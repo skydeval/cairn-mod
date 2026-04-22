@@ -8,8 +8,8 @@
       "cargo test"
     ],
     "blocked_git_commands": [
-      "git push --force",
-      "git push -f",
+      "git push --force ",
+      "git push -f ",
       "git reset --hard",
       "git clean -f",
       "git clean -fd",
