@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # All sqlx query macros resolve against the committed `.sqlx/` cache.
+  # Regenerate with `cargo sqlx prepare` after schema or query changes.
+  SQLX_OFFLINE: "true"
 
 jobs:
   fmt:

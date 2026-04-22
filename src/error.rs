@@ -14,6 +14,12 @@ pub enum Error {
 
     #[error(transparent)]
     Figment(Box<figment::Error>),
+
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
 impl From<figment::Error> for Error {

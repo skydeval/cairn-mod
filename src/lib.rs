@@ -5,6 +5,7 @@
 pub mod config;
 pub mod error;
 pub mod signing_key;
+pub mod storage;
 
 pub use config::Config;
 pub use error::{Error, Result};
