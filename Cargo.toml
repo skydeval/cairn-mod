@@ -2,5 +2,26 @@
 name = "cairn-mod"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Lightweight, Rust-native ATProto labeler"
+repository = "https://github.com/skydeval/cairn-mod"
+
+[lib]
+name = "cairn_mod"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cairn"
+path = "src/main.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+figment = { version = "0.10", features = ["toml", "env"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
