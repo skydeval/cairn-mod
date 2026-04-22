@@ -4,9 +4,13 @@
 
 pub mod config;
 pub mod error;
+pub mod label;
+pub mod signing;
 pub mod signing_key;
 pub mod storage;
 
 pub use config::Config;
 pub use error::{Error, Result};
+pub use label::Label;
+pub use signing::{canonical_bytes, sign_label, verify_label};
 pub use signing_key::SigningKey;

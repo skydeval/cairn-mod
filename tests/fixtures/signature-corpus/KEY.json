@@ -1,0 +1,6 @@
+{
+  "jwtAlg": "ES256K",
+  "did": "did:key:zQ3shwPCvpBTKrDwtwYtJfrBD1nCBHbwwp4PRtyhDGA98s3oN",
+  "publicKeyMultibase": "zQ3shwPCvpBTKrDwtwYtJfrBD1nCBHbwwp4PRtyhDGA98s3oN",
+  "privateKeyHex": "b7e3f1c9a2d84ef50712436589bc1d8f023147b68cafed94a8b603c7159d4e2a"
+}

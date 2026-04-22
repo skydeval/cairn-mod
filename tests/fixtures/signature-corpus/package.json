@@ -1,0 +1,14 @@
+{
+  "name": "cairn-signature-corpus-generator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Generator for the Cairn <-> @atproto parity fixtures. Not published.",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs"
+  },
+  "dependencies": {
+    "@atproto/crypto": "0.4.5",
+    "@ipld/dag-cbor": "9.2.2"
+  }
+}

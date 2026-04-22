@@ -31,6 +31,15 @@ impl SigningKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+
+    /// Borrow the raw 32-byte scalar. Intentionally `pub(crate)`: the
+    /// only in-tree consumer is `crate::signing`, which needs the bytes to
+    /// construct a `K256Keypair`. The name flags the invariant breach
+    /// (§5.1 "never serialized, never printed") so it isn't reached for
+    /// casually.
+    pub(crate) fn expose_secret(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl fmt::Debug for SigningKey {

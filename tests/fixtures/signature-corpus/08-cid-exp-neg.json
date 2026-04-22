@@ -1,0 +1,10 @@
+{
+  "ver": 1,
+  "src": "did:plc:3jzfcijpj2z2a4pdagfkktq6",
+  "uri": "at://did:plc:3jzfcijpj2z2a4pdagfkktq6/app.bsky.feed.post/3k5jy6qyfh22",
+  "cid": "bafyreihvwplzihwmxejjxkc3olh6mouc2oduycgfhigs5lmxz2q2zmjg4a",
+  "val": "spam",
+  "neg": true,
+  "cts": "2026-04-22T12:00:00.000Z",
+  "exp": "2027-04-22T12:00:00.000Z"
+}

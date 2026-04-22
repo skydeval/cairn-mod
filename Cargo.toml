@@ -32,6 +32,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
 ] }
 uuid = { version = "1", features = ["v4", "serde"] }
+proto-blue-lex-data = "0.2.6"
+proto-blue-lex-cbor = "0.2.6"
+proto-blue-crypto = "0.2.6"
 
 [dev-dependencies]
 tempfile = "3"
+hex = "0.4"
+serde_json = "1"
