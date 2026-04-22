@@ -23,15 +23,18 @@ use std::time::Duration;
 
 use axum::Extension;
 use axum::Router;
+use axum::http::Method;
 use axum::routing::get;
 use sqlx::{Pool, Sqlite};
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::error::Result;
 use crate::writer::WriterHandle;
 
 pub mod limits;
-mod subscribe;
+mod query;
+pub(crate) mod subscribe;
 
 pub use limits::Limiter;
 
@@ -67,8 +70,15 @@ impl Default for SubscribeConfig {
     }
 }
 
-/// Build a router exposing the subscribe endpoint. The caller owns the
-/// pool and writer; dropping all cloned `WriterHandle`s signals shutdown.
+/// Build a router exposing the public label endpoints. The caller owns
+/// the pool and writer; dropping all cloned `WriterHandle`s signals
+/// shutdown.
+///
+/// CORS is applied to `queryLabels` only (§F3 "accepts requests from any
+/// origin"). subscribeLabels is WebSocket — browsers don't apply CORS to
+/// WS connections the same way, and the WS handshake rejects cross-
+/// origin reads at the Sec-WebSocket-* layer. Credentials are never
+/// echoed (`allow_credentials` defaults to false on `CorsLayer`).
 pub fn router(pool: Pool<Sqlite>, writer: WriterHandle, config: SubscribeConfig) -> Router {
     let limiter = Limiter::new(config.global_cap, config.per_ip_cap);
     let state = subscribe::AppState {
@@ -77,10 +87,19 @@ pub fn router(pool: Pool<Sqlite>, writer: WriterHandle, config: SubscribeConfig)
         limiter,
         config: Arc::new(config),
     };
+
+    let query_cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::OPTIONS]);
+
     Router::new()
         .route(
             "/xrpc/com.atproto.label.subscribeLabels",
             get(subscribe::handler),
+        )
+        .route(
+            "/xrpc/com.atproto.label.queryLabels",
+            get(query::handler).layer(query_cors),
         )
         .layer(Extension(state))
 }
