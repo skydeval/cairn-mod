@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                 seq      AS \"seq!: i64\",\n                 ver      AS \"ver!: i64\",\n                 src, uri, cid, val,\n                 neg      AS \"neg!: i64\",\n                 cts, exp, sig\n               FROM labels l1\n               WHERE l1.seq > ?1\n                 AND l1.seq <= ?2\n                 AND NOT (\n                   l1.neg = 0\n                   AND EXISTS (\n                     SELECT 1 FROM labels l2\n                     WHERE l2.src = l1.src\n                       AND l2.uri = l1.uri\n                       AND l2.val = l1.val\n                       AND l2.neg = 1\n                       AND l2.seq > l1.seq\n                   )\n                 )\n               ORDER BY l1.seq ASC\n               LIMIT ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "ver!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "src",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "uri",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "cid",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "val",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "neg!: i64",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cts",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "exp",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "sig",
+        "ordinal": 9,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "b2b7b1b72c2cae08b6e3940f1847fae36b2a7833370356c224ac66df53628640"
+}

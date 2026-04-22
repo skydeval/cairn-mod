@@ -45,7 +45,7 @@ use sqlx::{Pool, Sqlite};
 use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, PrimitiveDateTime};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::{MissedTickBehavior, interval};
 use uuid::Uuid;
 
@@ -161,6 +161,14 @@ enum WriteCommand {
 pub struct WriterHandle {
     tx: mpsc::Sender<WriteCommand>,
     broadcast_tx: broadcast::Sender<LabelEvent>,
+    /// Flipped to `true` when the writer task starts its shutdown path.
+    /// Exposed via [`WriterHandle::shutdown_signal`] so peer components
+    /// (the subscribeLabels handler, future maintenance tasks) can close
+    /// their own resources cleanly. Using a watch channel rather than the
+    /// broadcast-channel close signal because clones of `WriterHandle`
+    /// keep `broadcast_tx` alive — receivers would otherwise never see
+    /// `RecvError::Closed`.
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl WriterHandle {
@@ -198,6 +206,23 @@ impl WriterHandle {
         self.broadcast_tx.subscribe()
     }
 
+    /// Count of live broadcast receivers. Exposed for test sync points
+    /// (the WS handler subscribes asynchronously after upgrade; tests
+    /// that want to emit an event "after the subscriber is ready" poll
+    /// this until it reaches the expected count). Not a production hot
+    /// path — `broadcast::Sender::receiver_count` walks an atomic chain.
+    pub fn receiver_count(&self) -> usize {
+        self.broadcast_tx.receiver_count()
+    }
+
+    /// Observe writer lifecycle. The returned receiver starts at `false`
+    /// and flips to `true` once exactly, when the writer has accepted a
+    /// shutdown command and is about to release the lease. Holders close
+    /// downstream connections gracefully on the `true` transition.
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown_rx.clone()
+    }
+
     /// Explicit shutdown. Drains in-flight writes, releases the lease
     /// row, stops the heartbeat, and returns. Idempotent-ish: calling on
     /// an already-shut-down writer returns a channel-closed error, not a
@@ -230,6 +255,7 @@ pub async fn spawn(
 
     let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
     let (broadcast_tx, _first_rx) = broadcast::channel(BROADCAST_BUFFER);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let writer = Writer {
         pool,
@@ -239,11 +265,16 @@ pub async fn spawn(
         instance_id,
         rx,
         broadcast_tx: broadcast_tx.clone(),
+        shutdown_tx,
     };
 
     tokio::spawn(writer.run());
 
-    Ok(WriterHandle { tx, broadcast_tx })
+    Ok(WriterHandle {
+        tx,
+        broadcast_tx,
+        shutdown_rx,
+    })
 }
 
 // ---------- Writer task ----------
@@ -256,6 +287,7 @@ struct Writer {
     instance_id: String,
     rx: mpsc::Receiver<WriteCommand>,
     broadcast_tx: broadcast::Sender<LabelEvent>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl Writer {
@@ -284,6 +316,11 @@ impl Writer {
                             let _ = reply.send(res);
                         }
                         Some(WriteCommand::Shutdown(reply)) => {
+                            // Flip the shutdown watch *before* releasing the
+                            // lease so subscriber tasks see the signal while
+                            // the DB is still accessible for their close-
+                            // frame sends.
+                            let _ = self.shutdown_tx.send(true);
                             let res = self.release_lease().await;
                             let _ = reply.send(res);
                             return;
@@ -292,6 +329,7 @@ impl Writer {
                             // All handles dropped without explicit shutdown.
                             // Best-effort lease release so a same-process
                             // restart doesn't trip the 60s wait.
+                            let _ = self.shutdown_tx.send(true);
                             if let Err(e) = self.release_lease().await {
                                 tracing::error!("lease release on handle drop: {e}");
                             }
@@ -641,7 +679,11 @@ fn parse_rfc3339_ms(s: &str) -> Result<i64> {
     Ok((nanos / 1_000_000) as i64)
 }
 
-fn epoch_ms_now() -> i64 {
+/// Current wall-clock time as Unix epoch milliseconds. `pub(crate)` so
+/// peer modules (server, future retention sweep) share one implementation
+/// rather than each inlining `SystemTime::now()` with its own error
+/// handling.
+pub(crate) fn epoch_ms_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before unix epoch")

@@ -67,6 +67,26 @@ pub fn canonical_bytes(label: &Label) -> Result<Vec<u8>> {
     Ok(encode(&label_to_lex_value(label))?)
 }
 
+/// Build the wire-format `LexValue` for a *signed* label — same field rules
+/// as [`label_to_lex_value`] but **also includes** `sig` as `LexValue::Bytes`.
+///
+/// Used by the subscribeLabels frame encoder: the `#labels` body embeds each
+/// label in full, sig included, so consumers can verify per §6.3.
+///
+/// Errors when `label.sig` is `None` — the wire encoding requires a signed
+/// label, and callers should have either just signed it or loaded a signed
+/// row from storage.
+pub fn label_to_lex_value_with_sig(label: &Label) -> Result<LexValue> {
+    let sig = label
+        .sig
+        .ok_or_else(|| Error::Signing("wire encoding requires signed label".into()))?;
+    let LexValue::Map(mut m) = label_to_lex_value(label) else {
+        unreachable!("label_to_lex_value always returns a Map")
+    };
+    m.insert("sig".to_string(), LexValue::Bytes(sig.to_vec()));
+    Ok(LexValue::Map(m))
+}
+
 /// Sign `label` with `key`, returning a raw 64-byte compact `(r, s)` signature.
 ///
 /// Pipeline matches §6.2 end-to-end: strip `sig`, canonical-encode, SHA-256,
@@ -155,6 +175,43 @@ mod tests {
             !b1.windows(3).any(|w| w == b"neg"),
             "neg=false must be omitted from canonical form"
         );
+    }
+
+    #[test]
+    fn wire_encoding_includes_sig_and_pre_sign_does_not() {
+        // Concrete anti-confusion test for the two-encoder split:
+        // - label_to_lex_value_with_sig embeds the 64 sig bytes verbatim.
+        // - canonical_bytes (the signing input) must never contain them.
+        // A marker sig of repeated 0xCD is deliberately chosen: 0xCD is not
+        // a valid ASCII character (so CID/uri/val text strings can't contain
+        // it) and is not a valid DAG-CBOR structural byte for our field
+        // shapes, so accidental collisions in unrelated encoded content
+        // won't mask a real bug.
+        let marker: [u8; 64] = [0xCD; 64];
+        let mut label = fixture_label();
+        label.sig = Some(marker);
+
+        let presign = canonical_bytes(&label).expect("canonical");
+        let wire = encode(&label_to_lex_value_with_sig(&label).expect("with_sig"))
+            .expect("encode with_sig");
+
+        assert!(
+            wire.windows(64).any(|w| w == marker),
+            "wire encoding must contain the 64 sig bytes contiguously"
+        );
+        assert!(
+            !presign.windows(64).any(|w| w == marker),
+            "pre-sign encoding must NOT contain sig bytes — any match means sig leaked into the signing input"
+        );
+
+        // Also assert the wire encoding rejects an unsigned label, since
+        // callers should have either signed-then-encoded or loaded from
+        // a row that already carries sig.
+        let mut unsigned = fixture_label();
+        unsigned.sig = None;
+        let err = label_to_lex_value_with_sig(&unsigned)
+            .expect_err("unsigned label must not wire-encode");
+        assert!(matches!(err, Error::Signing(_)), "got {err:?}");
     }
 
     #[test]

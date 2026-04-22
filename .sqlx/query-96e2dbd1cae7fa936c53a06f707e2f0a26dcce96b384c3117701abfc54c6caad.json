@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(seq) AS \"max_seq?: i64\" FROM labels",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_seq?: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "96e2dbd1cae7fa936c53a06f707e2f0a26dcce96b384c3117701abfc54c6caad"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(seq) AS \"min_seq?: i64\" FROM labels WHERE created_at >= ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "min_seq?: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "064dd9083bf5a77df2129b3509b26b9de0ccdc23832c25843aa4114da1871cca"
+}
