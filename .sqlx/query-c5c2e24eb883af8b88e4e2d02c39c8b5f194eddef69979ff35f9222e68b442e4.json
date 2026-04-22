@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(cts) AS \"max_cts?: String\" FROM labels\n               WHERE src = ?1 AND uri = ?2 AND val = ?3",
+  "describe": {
+    "columns": [
+      {
+        "name": "max_cts?: String",
+        "ordinal": 0,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c5c2e24eb883af8b88e4e2d02c39c8b5f194eddef69979ff35f9222e68b442e4"
+}

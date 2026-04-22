@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instance_id, last_heartbeat FROM server_instance_lease WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "instance_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_heartbeat",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "519430cd291735bcbc3204b95203d9ac8bb2ad627f4409472210c9b257491e5f"
+}

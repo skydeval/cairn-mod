@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE server_instance_lease SET last_heartbeat = ?1\n             WHERE id = 1 AND instance_id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b504f2860705c7c6fdeab8f05f47e85c009732feb8d51125c26a845c7316e307"
+}

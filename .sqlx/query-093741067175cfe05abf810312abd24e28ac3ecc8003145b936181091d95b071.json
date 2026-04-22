@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action, actor_did, target, outcome, reason FROM audit_log",
+  "describe": {
+    "columns": [
+      {
+        "name": "action",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "target",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "093741067175cfe05abf810312abd24e28ac3ecc8003145b936181091d95b071"
+}

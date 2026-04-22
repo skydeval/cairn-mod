@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO server_instance_lease (id, instance_id, acquired_at, last_heartbeat)\n         VALUES (1, 'stale-zombie-id', ?1, ?1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "eec743559b76bd070b15612abdbcf97524d3933d96037347c01114f072e12dda"
+}

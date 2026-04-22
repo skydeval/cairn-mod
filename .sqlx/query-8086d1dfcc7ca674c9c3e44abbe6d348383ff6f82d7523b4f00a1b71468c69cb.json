@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO label_sequence DEFAULT VALUES RETURNING seq",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8086d1dfcc7ca674c9c3e44abbe6d348383ff6f82d7523b4f00a1b71468c69cb"
+}

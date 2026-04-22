@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT seq, src, uri, val, neg, cts, sig, signing_key_id FROM labels WHERE seq = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "seq",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "src",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "uri",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "val",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "neg",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cts",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "sig",
+        "ordinal": 6,
+        "type_info": "Blob"
+      },
+      {
+        "name": "signing_key_id",
+        "ordinal": 7,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f777384a47bd0c259e722c306833e9b8e6a6bf14dc875e95b777fcc435128418"
+}

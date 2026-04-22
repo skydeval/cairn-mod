@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO signing_keys (public_key_multibase, valid_from, valid_to, created_at)\n         VALUES (?1, ?2, NULL, ?3)\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c908d261ae98f07db38f09aae9d01ef1adfb72cddf6f1ceb55fcd64d83fd63c"
+}

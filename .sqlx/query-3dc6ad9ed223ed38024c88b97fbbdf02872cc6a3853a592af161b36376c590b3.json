@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO server_instance_lease (id, instance_id, acquired_at, last_heartbeat)\n         VALUES (1, ?1, ?2, ?2)\n         ON CONFLICT(id) DO UPDATE SET\n             instance_id = excluded.instance_id,\n             acquired_at = excluded.acquired_at,\n             last_heartbeat = excluded.last_heartbeat",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "3dc6ad9ed223ed38024c88b97fbbdf02872cc6a3853a592af161b36376c590b3"
+}

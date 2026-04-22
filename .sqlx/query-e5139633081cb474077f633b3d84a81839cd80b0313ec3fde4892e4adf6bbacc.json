@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT neg, cid FROM labels\n             WHERE src = ?1 AND uri = ?2 AND val = ?3\n             ORDER BY seq DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "neg",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cid",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "e5139633081cb474077f633b3d84a81839cd80b0313ec3fde4892e4adf6bbacc"
+}
