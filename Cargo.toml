@@ -50,11 +50,19 @@ bytes = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 form_urlencoded = "1"
 base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+lru = "0.12"
+url = "2"
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
 hex = "0.4"
 tokio-tungstenite = "0.29"
+wiremock = "0.6"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"

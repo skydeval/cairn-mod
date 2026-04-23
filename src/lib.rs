@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod config;
 pub mod error;
 pub mod label;
@@ -11,6 +12,7 @@ pub mod signing_key;
 pub mod storage;
 pub mod writer;
 
+pub use auth::{AuthConfig, AuthContext, AuthError, VerifiedCaller};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use label::Label;
