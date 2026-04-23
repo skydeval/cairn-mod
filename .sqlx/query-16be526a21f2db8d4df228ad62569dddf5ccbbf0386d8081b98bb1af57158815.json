@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT created_at, actor_did FROM audit_log\n         WHERE action = 'label_applied' AND target = ?1\n         ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "created_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "actor_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "16be526a21f2db8d4df228ad62569dddf5ccbbf0386d8081b98bb1af57158815"
+}

@@ -66,7 +66,6 @@ pub(super) enum AdminError {
     /// Declared in lexicons/tools/cairn/admin/negateLabel.json.
     LabelNotFound,
     /// Declared in lexicons/tools/cairn/admin/{getReport,resolveReport}.json.
-    #[allow(dead_code)]
     ReportNotFound,
     /// Declared in lexicons/tools/cairn/admin/{applyLabel,resolveReport}.json.
     /// Message MUST NOT enumerate the allowed label values — same
@@ -191,9 +190,8 @@ pub(super) async fn verify_and_authorize(
     })
 }
 
-/// Admin-only variant — listAuditLog in #17 uses this. Mod role gets
-/// 403 just like an unknown caller would.
-#[allow(dead_code)]
+/// Admin-only variant — used by listAuditLog. Mod role gets 403 just
+/// like an unknown caller would.
 pub(super) async fn verify_and_authorize_admin_only(
     state: &AdminState,
     headers: &HeaderMap,

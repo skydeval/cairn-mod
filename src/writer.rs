@@ -116,6 +116,33 @@ pub const AUDIT_REASON_RESOLVE_REPORT: &str =
 pub const AUDIT_REASON_FLAG_REPORTER: &str =
     "reporter_flagged / reporter_unflagged: { did, suppressed, moderator_reason }";
 
+/// Closed set of `audit_log.action` values emitted by Cairn write paths.
+///
+/// §F10: audit rows only for moderation decisions, not for input/operational
+/// events — `createReport` (input) intentionally does NOT audit. The
+/// listAuditLog handler validates its `action` query param against this
+/// exact set; unknown values return `InvalidRequest` rather than silently
+/// matching zero rows.
+///
+/// Adding a new moderation action requires: (1) the handler writes an
+/// `INSERT INTO audit_log (action, ...)` row, (2) the value is added here,
+/// (3) the `reason` schema for the new action is documented as a const
+/// alongside [`AUDIT_REASON_SCHEMA`] and friends.
+pub const AUDIT_ACTION_VALUES: &[&str] = &[
+    "label_applied",
+    "label_negated",
+    "report_resolved",
+    "reporter_flagged",
+    "reporter_unflagged",
+];
+
+/// Closed set of `audit_log.outcome` values matching the SQL `CHECK`
+/// constraint in `migrations/0001_init.sql`. listAuditLog validates the
+/// `outcome` query param against this set; the SQL constraint itself is
+/// the durable source of truth — this slice mirrors it so the handler
+/// can reject invalid values pre-query without round-tripping to SQLite.
+pub const AUDIT_OUTCOME_VALUES: &[&str] = &["success", "failure"];
+
 /// RFC-3339 with millisecond precision. `Z` is appended by
 /// [`rfc3339_from_epoch_ms`] and stripped by [`parse_rfc3339_ms`] — kept
 /// out of the format description because `time::OffsetDateTime::parse`
@@ -898,7 +925,10 @@ fn clamp_cts(wall_now_ms: i64, prev_cts_str: Option<&str>) -> Result<String> {
     rfc3339_from_epoch_ms(effective_ms)
 }
 
-fn rfc3339_from_epoch_ms(ms: i64) -> Result<String> {
+/// Epoch-ms → RFC-3339 Z with millisecond precision. `pub(crate)` so
+/// peer modules (admin/audit_view, future retention sweep) share the
+/// single formatter used on the writer's timestamp boundary.
+pub(crate) fn rfc3339_from_epoch_ms(ms: i64) -> Result<String> {
     let nanos: i128 = (ms as i128) * 1_000_000;
     let dt = OffsetDateTime::from_unix_timestamp_nanos(nanos)
         .map_err(|e| Error::Signing(format!("epoch ms {ms} out of range: {e}")))?;
@@ -908,7 +938,10 @@ fn rfc3339_from_epoch_ms(ms: i64) -> Result<String> {
     Ok(format!("{formatted}Z"))
 }
 
-fn parse_rfc3339_ms(s: &str) -> Result<i64> {
+/// RFC-3339 Z with millisecond precision → epoch-ms. `pub(crate)` so
+/// admin handlers can validate `since` / `until` query params against
+/// the same parser the writer uses on its input boundary.
+pub(crate) fn parse_rfc3339_ms(s: &str) -> Result<i64> {
     let stripped = s
         .strip_suffix('Z')
         .ok_or_else(|| Error::Signing(format!("cts {s:?} missing trailing Z")))?;

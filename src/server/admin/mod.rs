@@ -16,17 +16,16 @@ use crate::auth::AuthContext;
 use crate::writer::WriterHandle;
 
 mod apply_label;
+mod audit_view;
 mod common;
 mod flag_reporter;
 mod get_report;
+mod list_audit_log;
 mod list_labels;
 mod list_reports;
 mod negate_label;
 mod report_view;
 mod resolve_report;
-
-// Future session adds: list_audit_log (#17). It registers another
-// route in `admin_router` below.
 
 /// Operator configuration for admin endpoints. Kept separate from the
 /// subscribe/query configs so operators can tune label-value policy
@@ -88,6 +87,10 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.flagReporter",
             post(flag_reporter::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.listAuditLog",
+            get(list_audit_log::handler),
         )
         .layer(Extension(state))
 }
