@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM labels WHERE uri = 'at://did:plc:target/col/rkey' AND val = 'spam'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8bacf39e7bef08be1a7f25341b9940ffd512a50cb3f583ac7e766bae71c13ac6"
+}

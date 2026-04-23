@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM suppressed_reporters WHERE did = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4b4aea64d8fc5cefe41632966b606106dacd3111c8050d6f3956795766aaf85b"
+}

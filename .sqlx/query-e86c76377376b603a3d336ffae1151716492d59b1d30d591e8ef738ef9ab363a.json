@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO suppressed_reporters (did, suppressed_by, suppressed_at, reason)\n             VALUES (?1, ?2, ?3, ?4)\n             ON CONFLICT(did) DO UPDATE SET\n                 suppressed_by = excluded.suppressed_by,\n                 suppressed_at = excluded.suppressed_at,\n                 reason = excluded.reason",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e86c76377376b603a3d336ffae1151716492d59b1d30d591e8ef738ef9ab363a"
+}

@@ -88,6 +88,34 @@ const BROADCAST_BUFFER: usize = 1024;
 pub const AUDIT_REASON_SCHEMA: &str =
     "label_applied / label_negated: { val, neg, moderator_reason }";
 
+/// Audit-log `reason` JSON schema for `report_resolved` (§F12 resolveReport
+/// atomicity — two rows land in one transaction: the inner label_applied
+/// per [`AUDIT_REASON_SCHEMA`] plus this one).
+///
+/// ```json
+/// {
+///   "applied_label_val": "<val>" | null,
+///   "resolution_reason": "<free text>" | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.report_resolved")]
+pub const AUDIT_REASON_RESOLVE_REPORT: &str =
+    "report_resolved: { applied_label_val, resolution_reason }";
+
+/// Audit-log `reason` JSON schema for `reporter_flagged` /
+/// `reporter_unflagged` (§F12 flagReporter).
+///
+/// ```json
+/// {
+///   "did": "<flagged DID>",
+///   "suppressed": true | false,
+///   "moderator_reason": "<free text>" | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.flag_reporter")]
+pub const AUDIT_REASON_FLAG_REPORTER: &str =
+    "reporter_flagged / reporter_unflagged: { did, suppressed, moderator_reason }";
+
 /// RFC-3339 with millisecond precision. `Z` is appended by
 /// [`rfc3339_from_epoch_ms`] and stripped by [`parse_rfc3339_ms`] — kept
 /// out of the format description because `time::OffsetDateTime::parse`
@@ -150,7 +178,46 @@ pub struct LabelEvent {
 enum WriteCommand {
     Apply(ApplyLabelRequest, oneshot::Sender<Result<LabelEvent>>),
     Negate(NegateLabelRequest, oneshot::Sender<Result<LabelEvent>>),
+    ResolveReport(
+        ResolveReportRequest,
+        oneshot::Sender<Result<ResolvedReport>>,
+    ),
     Shutdown(oneshot::Sender<Result<()>>),
+}
+
+/// Inline label-application sub-object for [`ResolveReportRequest`].
+/// Structurally aligned with [`ApplyLabelRequest`] minus the
+/// moderator-reason (that field on the outer request already captures
+/// the resolution rationale; the label's own audit reason is derived
+/// from the resolution flow).
+#[derive(Debug, Clone)]
+pub struct ApplyLabelInline {
+    pub uri: String,
+    pub cid: Option<String>,
+    pub val: String,
+    pub exp: Option<String>,
+}
+
+/// Request to resolve a report (§F12 `resolveReport`). The optional
+/// `apply_label` is applied **in the same transaction** as the report
+/// status update and both audit rows — §F5 single-writer invariant
+/// plus §F12 atomicity requirement documented in the `resolveReport`
+/// lexicon.
+#[derive(Debug, Clone)]
+pub struct ResolveReportRequest {
+    pub actor_did: String,
+    pub report_id: i64,
+    pub apply_label: Option<ApplyLabelInline>,
+    pub resolution_reason: Option<String>,
+}
+
+/// Result of a successful resolve. `label_event` is `Some(..)` iff
+/// the request carried `apply_label`; the broadcast has already
+/// happened inside the writer task post-commit.
+#[derive(Debug, Clone)]
+pub struct ResolvedReport {
+    pub report: crate::report::Report,
+    pub label_event: Option<LabelEvent>,
 }
 
 /// Cheap handle to the writer task. Clones share the same underlying
@@ -192,6 +259,27 @@ impl WriterHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(WriteCommand::Negate(req, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
+    /// Resolve a report, optionally applying a label in the same
+    /// atomic transaction. The label INSERT + audit row + report
+    /// UPDATE + resolution audit row all commit together or not at
+    /// all; the label broadcast fires post-commit inside the writer
+    /// task (§F5 + §F12 atomicity contract).
+    ///
+    /// Errors:
+    /// - [`Error::ReportNotFound`] — `report_id` doesn't exist.
+    /// - [`Error::ReportAlreadyResolved`] — report is not in the
+    ///   `pending` state. Handler maps to a generic `InvalidRequest`.
+    pub async fn resolve_report(&self, req: ResolveReportRequest) -> Result<ResolvedReport> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::ResolveReport(req, reply_tx))
             .await
             .map_err(|_| Error::Signing("writer task is shut down".into()))?;
         reply_rx
@@ -315,6 +403,10 @@ impl Writer {
                             let res = self.handle_negate(req).await;
                             let _ = reply.send(res);
                         }
+                        Some(WriteCommand::ResolveReport(req, reply)) => {
+                            let res = self.handle_resolve_report(req).await;
+                            let _ = reply.send(res);
+                        }
                         Some(WriteCommand::Shutdown(reply)) => {
                             // Flip the shutdown watch *before* releasing the
                             // lease so subscriber tasks see the signal while
@@ -351,8 +443,30 @@ impl Writer {
 
     async fn handle_apply(&self, req: ApplyLabelRequest) -> Result<LabelEvent> {
         let mut tx = self.pool.begin().await?;
+        let created_at = epoch_ms_now();
+        let event = self.apply_label_inner(&mut tx, &req, created_at).await?;
+        tx.commit().await?;
+        // No-receivers is not a write failure (§plan point G).
+        let _ = self.broadcast_tx.send(event.clone());
+        Ok(event)
+    }
 
-        let seq = reserve_seq(&mut tx).await?;
+    /// Inner label-application pipeline: reserve seq → clamp cts →
+    /// sign → INSERT label → INSERT audit. Does NOT commit the
+    /// transaction and does NOT broadcast — caller handles both.
+    ///
+    /// Extracted from `handle_apply` so `handle_resolve_report` can
+    /// reuse it inside the same transaction as the report update,
+    /// preserving §F5's single-writer-owns-label-emission invariant
+    /// (this helper only runs on the writer task; no other code path
+    /// can access seq allocation or cts clamping).
+    async fn apply_label_inner(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        req: &ApplyLabelRequest,
+        created_at_ms: i64,
+    ) -> Result<LabelEvent> {
+        let seq = reserve_seq(tx).await?;
         let prev_cts: Option<String> = sqlx::query_scalar!(
             // sqlx type override — MAX() strips column origin metadata so
             // sqlx can't infer the TEXT+nullable shape on its own. `?:`
@@ -363,11 +477,10 @@ impl Writer {
             req.uri,
             req.val,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
 
-        let wall_now_ms = epoch_ms_now();
-        let cts = clamp_cts(wall_now_ms, prev_cts.as_deref())?;
+        let cts = clamp_cts(created_at_ms, prev_cts.as_deref())?;
 
         let mut label = Label {
             ver: 1,
@@ -383,7 +496,6 @@ impl Writer {
         label.sig = Some(sign_label(&self.key, &label)?);
         let sig_bytes = label.sig.expect("just set").to_vec();
 
-        let created_at = wall_now_ms;
         let neg_int: i64 = 0;
         sqlx::query!(
             "INSERT INTO labels (seq, ver, src, uri, cid, val, neg, cts, exp, sig, signing_key_id, created_at)
@@ -399,9 +511,9 @@ impl Writer {
             label.exp,
             sig_bytes,
             self.signing_key_id,
-            created_at,
+            created_at_ms,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         let audit_reason = build_audit_reason(&req.val, false, req.moderator_reason.as_deref());
@@ -410,7 +522,7 @@ impl Writer {
         sqlx::query!(
             "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            created_at,
+            created_at_ms,
             action,
             req.actor_did,
             req.uri,
@@ -418,15 +530,10 @@ impl Writer {
             outcome,
             audit_reason,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-        tx.commit().await?;
-
-        let event = LabelEvent { seq, label };
-        // No-receivers is not a write failure (§plan point G).
-        let _ = self.broadcast_tx.send(event.clone());
-        Ok(event)
+        Ok(LabelEvent { seq, label })
     }
 
     async fn handle_negate(&self, req: NegateLabelRequest) -> Result<LabelEvent> {
@@ -532,6 +639,138 @@ impl Writer {
         let event = LabelEvent { seq, label };
         let _ = self.broadcast_tx.send(event.clone());
         Ok(event)
+    }
+
+    /// Atomic resolveReport flow — §F12 requires label INSERT +
+    /// audit(label_applied) + report UPDATE + audit(report_resolved)
+    /// all commit together or not at all. Everything happens inside
+    /// one SQLite transaction on the writer task, preserving §F5's
+    /// single-writer invariant for the optional label emission.
+    ///
+    /// Returns [`Error::ReportNotFound`] if the report doesn't
+    /// exist, [`Error::ReportAlreadyResolved`] if it is not in
+    /// `status='pending'`. Label-value validation is a handler
+    /// concern (the handler consults `AdminConfig.label_values`
+    /// before sending the command here — saves a writer round-trip
+    /// on invalid input and keeps the anti-leak message local).
+    async fn handle_resolve_report(&self, req: ResolveReportRequest) -> Result<ResolvedReport> {
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Load the report; confirm pending status.
+        let current = sqlx::query_as!(
+            crate::report::Report,
+            r#"SELECT
+                 id                 AS "id!: i64",
+                 created_at         AS "created_at!: String",
+                 reported_by        AS "reported_by!: String",
+                 reason_type        AS "reason_type!: String",
+                 reason,
+                 subject_type       AS "subject_type!: String",
+                 subject_did        AS "subject_did!: String",
+                 subject_uri,
+                 subject_cid,
+                 status             AS "status!: String",
+                 resolved_at,
+                 resolved_by,
+                 resolution_label,
+                 resolution_reason
+               FROM reports WHERE id = ?1"#,
+            req.report_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let mut report = current.ok_or(Error::ReportNotFound { id: req.report_id })?;
+        if report.status != "pending" {
+            return Err(Error::ReportAlreadyResolved { id: req.report_id });
+        }
+
+        let created_at = epoch_ms_now();
+
+        // 2. Optional label-apply BEFORE the report UPDATE so audit
+        // row insertion order reflects logical sequence
+        // (label_applied, then report_resolved — §G per #15 criteria).
+        let label_event = if let Some(apply) = &req.apply_label {
+            let apply_req = ApplyLabelRequest {
+                actor_did: req.actor_did.clone(),
+                uri: apply.uri.clone(),
+                cid: apply.cid.clone(),
+                val: apply.val.clone(),
+                exp: apply.exp.clone(),
+                // The label's own audit_reason JSON captures {val,
+                // neg, moderator_reason}; the resolution-level reason
+                // goes on the report_resolved audit row below.
+                moderator_reason: None,
+            };
+            Some(
+                self.apply_label_inner(&mut tx, &apply_req, created_at)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        // 3. UPDATE reports.
+        let resolved_at_rfc = rfc3339_from_epoch_ms(created_at)?;
+        let resolution_label = req.apply_label.as_ref().map(|a| a.val.clone());
+        sqlx::query!(
+            "UPDATE reports SET
+                status = 'resolved',
+                resolved_at = ?1,
+                resolved_by = ?2,
+                resolution_label = ?3,
+                resolution_reason = ?4
+             WHERE id = ?5",
+            resolved_at_rfc,
+            req.actor_did,
+            resolution_label,
+            req.resolution_reason,
+            req.report_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // 4. Audit: report_resolved.
+        let audit_reason = build_resolve_audit_reason(
+            req.apply_label.as_ref().map(|a| a.val.as_str()),
+            req.resolution_reason.as_deref(),
+        );
+        let report_id_str = req.report_id.to_string();
+        let action = "report_resolved";
+        let outcome = "success";
+        sqlx::query!(
+            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
+            created_at,
+            action,
+            req.actor_did,
+            report_id_str,
+            outcome,
+            audit_reason,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        // 5. Broadcast (post-commit, per §F5 broadcast-after-commit rule).
+        if let Some(event) = &label_event {
+            let _ = self.broadcast_tx.send(event.clone());
+        }
+
+        // 6. Mutate the loaded report struct to reflect the committed
+        // state and return it. Avoids a re-fetch round-trip since we
+        // know exactly what changed.
+        report.status = "resolved".to_string();
+        report.resolved_at = Some(resolved_at_rfc);
+        report.resolved_by = Some(req.actor_did);
+        report.resolution_label = resolution_label;
+        report.resolution_reason = req.resolution_reason;
+
+        Ok(ResolvedReport {
+            report,
+            label_event,
+        })
     }
 
     async fn heartbeat(&self) -> Result<()> {
@@ -697,6 +936,36 @@ fn build_audit_reason(val: &str, neg: bool, moderator_reason: Option<&str>) -> S
         "moderator_reason": moderator_reason,
     });
     body.to_string()
+}
+
+/// `report_resolved` audit reason JSON — see [`AUDIT_REASON_RESOLVE_REPORT`]
+/// for the schema.
+fn build_resolve_audit_reason(
+    applied_label_val: Option<&str>,
+    resolution_reason: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "applied_label_val": applied_label_val,
+        "resolution_reason": resolution_reason,
+    })
+    .to_string()
+}
+
+/// `reporter_flagged` / `reporter_unflagged` audit reason JSON —
+/// see [`AUDIT_REASON_FLAG_REPORTER`]. Shared with the flagReporter
+/// handler (not the writer — flagReporter is a direct handler txn
+/// per the #15 criteria).
+pub(crate) fn build_flag_reporter_audit_reason(
+    did: &str,
+    suppressed: bool,
+    moderator_reason: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "did": did,
+        "suppressed": suppressed,
+        "moderator_reason": moderator_reason,
+    })
+    .to_string()
 }
 
 #[cfg(test)]

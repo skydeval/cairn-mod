@@ -49,6 +49,17 @@ pub enum Error {
         uri: String,
         val: String,
     },
+
+    /// `resolveReport` (§F12) targeted a report id that doesn't exist.
+    /// Surface via the handler as `ReportNotFound` (declared lexicon error).
+    #[error("report not found: id={id}")]
+    ReportNotFound { id: i64 },
+
+    /// `resolveReport` (§F12) targeted a report that is already resolved.
+    /// Surface via the handler as `InvalidRequest` with a generic message
+    /// (no timestamps or resolver DID per the anti-leak principle).
+    #[error("report already resolved: id={id}")]
+    ReportAlreadyResolved { id: i64 },
 }
 
 impl From<figment::Error> for Error {

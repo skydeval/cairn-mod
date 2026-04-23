@@ -6,6 +6,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod label;
+pub mod report;
 pub mod server;
 pub mod signing;
 pub mod signing_key;

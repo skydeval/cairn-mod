@@ -17,11 +17,15 @@ use crate::writer::WriterHandle;
 
 mod apply_label;
 mod common;
+mod flag_reporter;
+mod get_report;
 mod list_labels;
+mod list_reports;
 mod negate_label;
+mod report_view;
+mod resolve_report;
 
-// Future sessions add: list_reports, get_report, resolve_report,
-// flag_reporter (#15); list_audit_log (#17). Each registers another
+// Future session adds: list_audit_log (#17). It registers another
 // route in `admin_router` below.
 
 /// Operator configuration for admin endpoints. Kept separate from the
@@ -68,6 +72,22 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.listLabels",
             get(list_labels::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.listReports",
+            get(list_reports::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getReport",
+            get(get_report::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.resolveReport",
+            post(resolve_report::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.flagReporter",
+            post(flag_reporter::handler),
         )
         .layer(Extension(state))
 }

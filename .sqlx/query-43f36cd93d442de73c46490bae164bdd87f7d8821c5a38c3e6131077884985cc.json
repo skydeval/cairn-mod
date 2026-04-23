@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO reports\n             (created_at, reported_by, reason_type, reason,\n              subject_type, subject_did, status)\n         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending')\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "43f36cd93d442de73c46490bae164bdd87f7d8821c5a38c3e6131077884985cc"
+}
