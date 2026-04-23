@@ -63,16 +63,16 @@ pub struct MockPdsState {
     pub current_refresh: Mutex<String>,
 }
 
-/// Everything a test needs to interact with the mock.
+/// Everything a test needs to interact with the mock. Fields are
+/// `#[allow(dead_code)]` because each integration test binary only
+/// reaches for a subset (e.g., `cli_login` doesn't touch `state`).
+#[allow(dead_code)]
 pub struct MockPds {
     pub addr: SocketAddr,
     pub state: Arc<MockPdsState>,
     /// The DID the mock returns in `createSession` response. Tests
     /// that validate Cairn agreement register this DID in the
-    /// MockDidResolver with the fixture public key. Unused in
-    /// `pds_client.rs` (which passes the DID constant directly);
-    /// consumed by Commit 3's login/logout/report tests.
-    #[allow(dead_code)]
+    /// MockDidResolver with the fixture public key.
     pub moderator_did: String,
 }
 

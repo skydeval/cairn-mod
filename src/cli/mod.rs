@@ -11,5 +11,9 @@
 //! - `report` — `cairn report create`.
 //! - `output` — human vs `--json` formatting.
 
+pub mod error;
+pub mod login;
+pub mod logout;
 pub mod pds;
+pub mod report;
 pub mod session;
