@@ -6,10 +6,13 @@
 //! branch on them will depend on the numbers below. Add new classes
 //! by appending new codes; renumbering is breaking.
 
+use std::net::SocketAddr;
+
 use thiserror::Error;
 
 use super::pds::PdsError;
 use super::session::SessionError;
+use crate::signing_key::KeyLoadError;
 
 /// Exit code taxonomy. Matches criterion G from the #16 plan.
 pub mod code {
@@ -31,6 +34,12 @@ pub mod code {
     pub const SERVER_5XX: i32 = 8;
     /// Internal error (malformed response body, unexpected state).
     pub const INTERNAL: i32 = 10;
+    /// `cairn serve` could not acquire the single-instance lease —
+    /// another Cairn process holds it with a fresh heartbeat (§F5).
+    /// Distinct from INTERNAL so systemd-restart-loop logic can
+    /// branch ("another instance is running, don't restart") vs.
+    /// genuine internal failure.
+    pub const LEASE_CONFLICT: i32 = 11;
 }
 
 /// Error sources the CLI dispatcher knows about. The human-readable
@@ -64,6 +73,37 @@ pub enum CliError {
     },
     #[error("{0}")]
     Config(String),
+    /// Signing key file couldn't be loaded (§5.1 invariant failure,
+    /// bad hex, wrong length, env-override attempt). Full cause lives
+    /// on the nested `KeyLoadError`; `Display` never includes the key
+    /// material because the key bytes are never decoded when an error
+    /// path runs, and `KeyLoadError::Display` only formats paths +
+    /// metadata.
+    #[error("signing key load failed: {0}")]
+    KeyLoad(#[from] KeyLoadError),
+    /// SQLite migrations failed at startup. String-only rather than
+    /// wrapping sqlx's error type to avoid leaking schema internals
+    /// into the error taxonomy.
+    #[error("migrations failed: {0}")]
+    MigrationFailed(String),
+    /// Another Cairn instance holds the single-instance lease (§F5).
+    /// Distinct variant so operators + systemd can branch on the
+    /// dedicated [`code::LEASE_CONFLICT`] exit code.
+    #[error("another Cairn instance holds the lease (instance_id={instance_id}, age={age_secs}s)")]
+    LeaseConflict { instance_id: String, age_secs: u64 },
+    /// `TcpListener::bind` failed — port in use, permission denied,
+    /// malformed addr, etc.
+    #[error("could not bind {addr}: {source}")]
+    BindFailed {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    /// Anything in the startup sequence that doesn't fit the buckets
+    /// above (writer spawn, auth-context init). Rare at runtime;
+    /// surfaces as INTERNAL.
+    #[error("startup failure: {0}")]
+    Startup(String),
 }
 
 impl CliError {
@@ -95,6 +135,11 @@ impl CliError {
             },
             CliError::MalformedResponse { .. } => code::INTERNAL,
             CliError::Config(_) => code::USAGE,
+            CliError::KeyLoad(_) => code::INTERNAL,
+            CliError::MigrationFailed(_) => code::INTERNAL,
+            CliError::LeaseConflict { .. } => code::LEASE_CONFLICT,
+            CliError::BindFailed { .. } => code::NETWORK,
+            CliError::Startup(_) => code::INTERNAL,
         }
     }
 }

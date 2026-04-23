@@ -9,6 +9,7 @@ pub mod credential_file;
 pub mod error;
 pub mod label;
 pub mod report;
+pub mod serve;
 pub mod server;
 pub mod signing;
 pub mod signing_key;

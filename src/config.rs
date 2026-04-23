@@ -98,21 +98,36 @@ impl Config {
         Ok(())
     }
 
-    /// Load configuration. Sources, low to high precedence:
-    /// 1. Compiled-in defaults (`bind_addr` if unset, empty admin
-    ///    table).
-    /// 2. TOML at the path in `CAIRN_CONFIG`, or
-    ///    `/etc/cairn/cairn.toml` if that file exists.
-    /// 3. Environment variables prefixed `CAIRN_`
-    ///    (e.g. `CAIRN_SERVICE_DID`).
+    /// Load configuration from the default TOML location + env
+    /// overrides (see [`Self::load_from`] for the full precedence
+    /// rules). The default location is `CAIRN_CONFIG` env var, or
+    /// `/etc/cairn/cairn.toml` if unset.
     pub fn load() -> Result<Self> {
         let toml_path: PathBuf = std::env::var_os("CAIRN_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/etc/cairn/cairn.toml"));
+        Self::load_from(Some(&toml_path))
+    }
 
+    /// Load configuration with an explicit TOML path (or `None` to
+    /// skip the file layer entirely and rely on env overrides).
+    ///
+    /// Sources, low to high precedence:
+    /// 1. Compiled-in defaults (`bind_addr` if unset, empty admin
+    ///    table).
+    /// 2. `toml_path` if `Some` and the file exists.
+    /// 3. Environment variables prefixed `CAIRN_`
+    ///    (e.g. `CAIRN_SERVICE_DID`).
+    ///
+    /// `cairn serve --config <path>` routes through this without
+    /// mutating process env (which is `unsafe` under Rust 2024 and
+    /// blocked by the crate's `#![forbid(unsafe_code)]`).
+    pub fn load_from(toml_path: Option<&std::path::Path>) -> Result<Self> {
         let mut fig = Figment::new();
-        if toml_path.is_file() {
-            fig = fig.merge(Toml::file(&toml_path));
+        if let Some(p) = toml_path {
+            if p.is_file() {
+                fig = fig.merge(Toml::file(p));
+            }
         }
         fig = fig.merge(Env::prefixed("CAIRN_"));
 

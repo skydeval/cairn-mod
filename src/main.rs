@@ -1,7 +1,7 @@
 //! `cairn` — ATProto labeler binary entry point.
 //!
-//! v1 surface is CLI-only here. The `cairn serve` subcommand (to
-//! launch the labeler HTTP/WebSocket process) is deferred to #18.
+//! Exposes the CLI subcommands (login/logout/report) and
+//! `cairn serve` — the long-running labeler process.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,6 +13,8 @@ use cairn_mod::cli::{
     report::{self, ReportCreateInput},
     session,
 };
+use cairn_mod::config::Config;
+use cairn_mod::serve;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -47,6 +49,20 @@ enum Command {
         #[command(subcommand)]
         sub: ReportSub,
     },
+
+    /// Run the Cairn labeler as a long-running server. Loads config,
+    /// runs migrations, acquires the single-instance lease, and
+    /// serves HTTP until SIGINT/SIGTERM.
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    /// Path to the TOML config file. Defaults to
+    /// `/etc/cairn/cairn.toml` (same as `Config::load`). Set
+    /// `CAIRN_CONFIG` instead to reuse that path.
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -155,6 +171,7 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Report {
             sub: ReportSub::Create(args),
         } => run_report_create(args).await,
+        Command::Serve(args) => run_serve(args).await,
     }
 }
 
@@ -216,4 +233,35 @@ async fn run_report_create(args: ReportCreateArgs) -> Result<(), CliError> {
 
 fn session_path() -> Result<PathBuf, CliError> {
     Ok(session::default_path()?)
+}
+
+async fn run_serve(args: ServeArgs) -> Result<(), CliError> {
+    // `--config <path>` wins if supplied; otherwise fall through to
+    // `Config::load`'s default path resolution (CAIRN_CONFIG env var
+    // or /etc/cairn/cairn.toml).
+    let config = match args.config.as_deref() {
+        Some(path) => Config::load_from(Some(path)),
+        None => Config::load(),
+    }
+    .map_err(|e| CliError::Config(e.to_string()))?;
+    serve::run(config, shutdown_signal()).await
+}
+
+/// Future that resolves on the first SIGINT (Ctrl-C) or SIGTERM. Both
+/// signals land the same way — request graceful shutdown. SIGTERM is
+/// what `systemctl stop` sends; SIGINT is interactive Ctrl-C.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
