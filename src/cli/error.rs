@@ -118,6 +118,7 @@ impl CliError {
             CliError::Pds(PdsError::Unauthorized { .. }) => code::AUTH,
             CliError::Pds(PdsError::InvalidUrl { .. }) => code::USAGE,
             CliError::Pds(PdsError::MalformedResponse { .. }) => code::INTERNAL,
+            CliError::Pds(PdsError::SwapRace { .. }) => code::INTERNAL,
             CliError::Pds(PdsError::UnexpectedStatus { status, .. }) => match *status {
                 401 => code::AUTH,
                 403 => code::FORBIDDEN,

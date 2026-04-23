@@ -62,6 +62,18 @@ pub struct Config {
     /// (matches the existing [`crate::AdminConfig`] default).
     #[serde(default)]
     pub admin: AdminConfigToml,
+    /// Labeler policy (§F1) — the `app.bsky.labeler.service` record
+    /// content. Required for `cairn publish-service-record`; other
+    /// subcommands don't consume it, so it's optional at load time.
+    /// When absent, `publish-service-record` surfaces a clear error.
+    #[serde(default)]
+    pub labeler: Option<LabelerConfigToml>,
+    /// Operator PDS auth surface (§F1 service record publishing).
+    /// The operator's identity is the DID that OWNS the labeler
+    /// account — distinct from moderators who authenticate to Cairn
+    /// (§5.2) and distinct from Cairn's own signing key (§5.1).
+    #[serde(default)]
+    pub operator: Option<OperatorConfigToml>,
 }
 
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
@@ -75,6 +87,102 @@ pub struct AdminConfigToml {
     /// accepted.
     #[serde(default)]
     pub label_values: Option<Vec<String>>,
+}
+
+/// Labeler policy (§F1, §6.4) — the content of the
+/// `app.bsky.labeler.service` record that `cairn publish-service-record`
+/// emits to the operator's PDS. Field-name mapping to the wire shape is
+/// via `#[serde(rename)]` at the runtime-side boundary in
+/// [`crate::service_record`]; TOML stays snake_case for operator ergonomics.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LabelerConfigToml {
+    /// Short-name list of labels this instance will emit (§6.4
+    /// `policies.labelValues`). Every value here must also have a
+    /// matching definition in `label_value_definitions` unless it's a
+    /// global well-known value (§6.5). Publishing rejects if a non-
+    /// global identifier has no definition.
+    pub label_values: Vec<String>,
+    /// Per-label metadata entries (§6.4
+    /// `policies.labelValueDefinitions`). Empty vec is legal — means
+    /// only global values, no custom definitions.
+    #[serde(default)]
+    pub label_value_definitions: Vec<LabelValueDefinitionToml>,
+    /// Optional §6.4 `reasonTypes`. Typically the
+    /// `com.atproto.moderation.defs#reason*` set matching createReport
+    /// (§F11).
+    #[serde(default)]
+    pub reason_types: Vec<String>,
+    /// Optional §6.4 `subjectTypes` (e.g. `["account", "record"]`).
+    #[serde(default)]
+    pub subject_types: Vec<String>,
+    /// Optional §6.4 `subjectCollections` (e.g.
+    /// `["app.bsky.feed.post"]`).
+    #[serde(default)]
+    pub subject_collections: Vec<String>,
+}
+
+/// Single entry in `labelValueDefinitions`. §6.4 constraints:
+/// `severity` + `blurs` + `locales` required; `locales` must be
+/// non-empty; `default_setting` + `adult_only` optional.
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LabelValueDefinitionToml {
+    pub identifier: String,
+    pub severity: SeverityToml,
+    pub blurs: BlursToml,
+    #[serde(default)]
+    pub default_setting: Option<DefaultSettingToml>,
+    #[serde(default)]
+    pub adult_only: Option<bool>,
+    pub locales: Vec<LocaleToml>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeverityToml {
+    Inform,
+    Alert,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlursToml {
+    Content,
+    Media,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultSettingToml {
+    Ignore,
+    Warn,
+    Hide,
+}
+
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+pub struct LocaleToml {
+    pub lang: String,
+    pub name: String,
+    pub description: String,
+}
+
+/// Operator-side PDS auth config (§F1). Scope is narrow — just the
+/// PDS URL + session file path. Named `[operator]` today; if future
+/// operator-identity fields land (contact, alerts, etc.) the table
+/// stays small enough to nest those in, or split to `[operator.pds]`
+/// then.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OperatorConfigToml {
+    /// PDS base URL (e.g. `https://bsky.social`). No default — the
+    /// labeler owner's PDS varies per deployment.
+    pub pds_url: String,
+    /// On-disk path for the operator session file. Written by
+    /// `cairn operator-login`, read by `cairn publish-service-record`.
+    /// Same §5.3 invariants as the moderator session file (mode 0600,
+    /// owned by running user) via the shared
+    /// `crate::credential_file` helper.
+    pub session_path: std::path::PathBuf,
 }
 
 fn default_bind_addr() -> SocketAddr {

@@ -59,6 +59,14 @@ struct GetServiceAuthResponse {
     token: String,
 }
 
+/// `putRecord` 200 response body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PutRecordResponse {
+    pub uri: String,
+    pub cid: String,
+}
+
 /// Wire shape of an XRPC error body (`{error, message}`), used to
 /// surface meaningful CLI error output without echoing the whole
 /// PDS response.
@@ -118,6 +126,14 @@ pub enum PdsError {
         #[source]
         source: reqwest::Error,
     },
+    /// §F1 swap-race. Distinct from `UnexpectedStatus` so
+    /// `publish-service-record` can exit with a specific message
+    /// directing the operator to inspect + reconcile manually
+    /// before re-running.
+    #[error(
+        "another process has modified the service record on the PDS since Cairn's last publish: {message}"
+    )]
+    SwapRace { message: String },
 }
 
 /// Thin wrapper over `reqwest::Client` pinned to one PDS base URL.
@@ -235,6 +251,87 @@ impl PdsClient {
             Ok(())
         } else {
             Err(classify_error(CTX, resp).await)
+        }
+    }
+
+    /// Put a record at (repo, collection, rkey). When `swap_record`
+    /// is `Some`, the request is conditional on the PDS's current
+    /// record having that CID — §F1 swap-race detection rides on
+    /// this. Used by `cairn publish-service-record` to emit the
+    /// `app.bsky.labeler.service` record at rkey=self.
+    ///
+    /// Distinct `context` discriminators for auth failures:
+    /// `"putRecord"` generally, mapped upward to a specific
+    /// swap-race error via [`PdsError::SwapRace`] when the PDS's
+    /// response body carries the `InvalidSwap` shape.
+    pub async fn put_record(
+        &self,
+        access_jwt: &str,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+        record: &serde_json::Value,
+        swap_record: Option<&str>,
+    ) -> Result<PutRecordResponse, PdsError> {
+        const CTX: &str = "putRecord";
+        let url = self.endpoint("com.atproto.repo.putRecord");
+
+        let mut body = serde_json::json!({
+            "repo": repo,
+            "collection": collection,
+            "rkey": rkey,
+            "record": record,
+        });
+        if let Some(cid) = swap_record {
+            body.as_object_mut()
+                .expect("json object")
+                .insert("swapRecord".into(), serde_json::Value::String(cid.into()));
+        }
+
+        let resp = self
+            .client
+            .post(url.clone())
+            .bearer_auth(access_jwt)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| PdsError::Network {
+                url: url.to_string(),
+                source,
+            })?;
+        if resp.status().is_success() {
+            resp.json::<PutRecordResponse>()
+                .await
+                .map_err(|source| PdsError::MalformedResponse {
+                    context: CTX,
+                    source,
+                })
+        } else {
+            // Surface InvalidSwap as its own variant so callers can
+            // branch on §F1 swap-race detection without parsing
+            // error strings. Everything else falls through to the
+            // generic classifier.
+            let status = resp.status();
+            let body = resp.json::<XrpcErrorBody>().await.unwrap_or_default();
+            if body.error == "InvalidSwap" {
+                return Err(PdsError::SwapRace {
+                    message: body.message,
+                });
+            }
+            Err(if status == reqwest::StatusCode::UNAUTHORIZED {
+                PdsError::Unauthorized {
+                    context: CTX,
+                    error: body.error,
+                    message: body.message,
+                }
+            } else {
+                PdsError::UnexpectedStatus {
+                    context: CTX,
+                    status: status.as_u16(),
+                    error: body.error,
+                    message: body.message,
+                }
+            })
         }
     }
 

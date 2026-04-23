@@ -14,6 +14,9 @@
 pub mod error;
 pub mod login;
 pub mod logout;
+pub mod operator_login;
+pub mod operator_session;
 pub mod pds;
+pub mod publish_service_record;
 pub mod report;
 pub mod session;

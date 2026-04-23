@@ -11,6 +11,7 @@ pub mod label;
 pub mod report;
 pub mod serve;
 pub mod server;
+pub mod service_record;
 pub mod signing;
 pub mod signing_key;
 pub mod storage;

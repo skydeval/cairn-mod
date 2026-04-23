@@ -53,6 +53,7 @@ pub struct MockPdsState {
     pub refresh_session_calls: AtomicUsize,
     pub delete_session_calls: AtomicUsize,
     pub get_service_auth_calls: AtomicUsize,
+    pub put_record_calls: AtomicUsize,
     pub force_get_service_auth_401_next: AtomicUsize,
     pub force_refresh_401: AtomicUsize,
     /// Current access token the mock accepts. Rotated on each
@@ -61,6 +62,15 @@ pub struct MockPdsState {
     /// Current refresh token the mock accepts. Rotated on each
     /// `refreshSession`.
     pub current_refresh: Mutex<String>,
+    /// Current CID stored for the (service_record) repo. Populated
+    /// by putRecord; publishers with `swapRecord != current_cid`
+    /// get `InvalidSwap` — the §F1 swap-race signal.
+    pub current_service_record_cid: Mutex<Option<String>>,
+    /// Monotonic counter used to generate successive fake CIDs on
+    /// every putRecord. Tests can set this via the stored value
+    /// itself (e.g., writing `Some("external-cid")` simulates an
+    /// out-of-band write before the next publish).
+    pub put_record_seq: AtomicUsize,
 }
 
 /// Everything a test needs to interact with the mock. Fields are
@@ -99,6 +109,7 @@ pub async fn spawn(moderator_did: impl Into<String>) -> MockPds {
     let state = Arc::new(MockPdsState {
         current_access: Mutex::new("initial-access-jwt".into()),
         current_refresh: Mutex::new("initial-refresh-jwt".into()),
+        current_service_record_cid: Mutex::new(None),
         ..Default::default()
     });
     let inner = Inner {
@@ -123,6 +134,7 @@ pub async fn spawn(moderator_did: impl Into<String>) -> MockPds {
             "/xrpc/com.atproto.server.getServiceAuth",
             get(get_service_auth),
         )
+        .route("/xrpc/com.atproto.repo.putRecord", post(put_record))
         .with_state(inner);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -331,6 +343,80 @@ fn mint_service_auth_jwt(iss: &str, aud: &str, lxm: &str) -> String {
     let input = format!("{h}.{p}");
     let sig = keypair().sign(input.as_bytes()).unwrap();
     format!("{h}.{p}.{}", engine.encode(sig))
+}
+
+#[derive(Deserialize)]
+struct PutRecordBody {
+    repo: String,
+    collection: String,
+    rkey: String,
+    record: Value,
+    #[serde(default, rename = "swapRecord")]
+    swap_record: Option<String>,
+}
+
+/// putRecord handler with §F1 swap-race semantics:
+/// - `swapRecord` omitted on first write → accepted (current CID is
+///   None, caller wants unconditional).
+/// - `swapRecord` supplied and matches stored current CID →
+///   accepted; CID rotates.
+/// - `swapRecord` supplied and doesn't match → InvalidSwap 400.
+async fn put_record(
+    State(inner): State<Inner>,
+    headers: HeaderMap,
+    Json(body): Json<PutRecordBody>,
+) -> Response {
+    inner.state.put_record_calls.fetch_add(1, Ordering::SeqCst);
+
+    let bearer = match extract_bearer(&headers) {
+        Some(b) => b,
+        None => {
+            return xrpc_error(
+                StatusCode::UNAUTHORIZED,
+                "AuthenticationRequired",
+                "missing bearer",
+            );
+        }
+    };
+    if bearer != *inner.state.current_access.lock().await {
+        return xrpc_error(
+            StatusCode::UNAUTHORIZED,
+            "AuthenticationRequired",
+            "stale access token",
+        );
+    }
+
+    let mut current_cid = inner.state.current_service_record_cid.lock().await;
+    match (&*current_cid, body.swap_record.as_deref()) {
+        (Some(have), Some(want)) if have != want => {
+            return xrpc_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidSwap",
+                "record was modified externally; swap CID stale",
+            );
+        }
+        (None, Some(_)) => {
+            // Caller supplied a swap CID but the mock has no prior
+            // record. Real PDSes also reject this as InvalidSwap.
+            return xrpc_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidSwap",
+                "no existing record to swap against",
+            );
+        }
+        _ => {}
+    }
+
+    let seq = inner.state.put_record_seq.fetch_add(1, Ordering::SeqCst);
+    let new_cid = format!("bafy-mock-{seq:04x}");
+    *current_cid = Some(new_cid.clone());
+
+    let uri = format!("at://{}/{}/{}", body.repo, body.collection, body.rkey);
+    // body.record is retained only to force the handler signature
+    // to deserialize it; tests that inspect the record would use
+    // the currently-stored CID via put_record_calls + state.
+    let _ = body.record;
+    Json(json!({ "uri": uri, "cid": new_cid })).into_response()
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {

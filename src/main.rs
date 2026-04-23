@@ -10,11 +10,13 @@ use cairn_mod::cli::{
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
+    operator_login,
+    publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     session,
 };
 use cairn_mod::config::Config;
-use cairn_mod::serve;
+use cairn_mod::{serve, storage};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -54,6 +56,19 @@ enum Command {
     /// runs migrations, acquires the single-instance lease, and
     /// serves HTTP until SIGINT/SIGTERM.
     Serve(ServeArgs),
+
+    /// Authenticate as the operator (the DID that owns the labeler's
+    /// PDS account) so `cairn publish-service-record` can write
+    /// records to that repo. Prompts for the PDS app password
+    /// interactively; writes a 0600 session file at the path in
+    /// config's [operator] section.
+    OperatorLogin(OperatorLoginArgs),
+
+    /// Render `app.bsky.labeler.service` from the [labeler] config
+    /// section and publish it to the operator's PDS at rkey=self
+    /// (§F1). Idempotent — no PDS write if the content hash matches
+    /// the last-published value.
+    PublishServiceRecord(ServeArgs),
 }
 
 #[derive(Debug, Args)]
@@ -61,6 +76,22 @@ struct ServeArgs {
     /// Path to the TOML config file. Defaults to
     /// `/etc/cairn/cairn.toml` (same as `Config::load`). Set
     /// `CAIRN_CONFIG` instead to reuse that path.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct OperatorLoginArgs {
+    /// PDS base URL. Overrides `operator.pds_url` from config if
+    /// both are set; one of the two must resolve to a usable value.
+    #[arg(long)]
+    pds: Option<String>,
+    /// Operator handle or DID — the identifier passed to
+    /// `com.atproto.server.createSession`.
+    #[arg(long)]
+    handle: String,
+    /// Path to the TOML config file (same semantics as `cairn serve
+    /// --config`).
     #[arg(long)]
     config: Option<PathBuf>,
 }
@@ -172,6 +203,8 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
             sub: ReportSub::Create(args),
         } => run_report_create(args).await,
         Command::Serve(args) => run_serve(args).await,
+        Command::OperatorLogin(args) => run_operator_login(args).await,
+        Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
     }
 }
 
@@ -235,15 +268,66 @@ fn session_path() -> Result<PathBuf, CliError> {
     Ok(session::default_path()?)
 }
 
-async fn run_serve(args: ServeArgs) -> Result<(), CliError> {
-    // `--config <path>` wins if supplied; otherwise fall through to
-    // `Config::load`'s default path resolution (CAIRN_CONFIG env var
-    // or /etc/cairn/cairn.toml).
-    let config = match args.config.as_deref() {
-        Some(path) => Config::load_from(Some(path)),
+async fn run_operator_login(args: OperatorLoginArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let operator_cfg = config
+        .operator
+        .as_ref()
+        .ok_or_else(|| CliError::Config("missing [operator] section in config".into()))?;
+    let pds_url = args.pds.as_deref().unwrap_or(&operator_cfg.pds_url);
+
+    let password = rpassword::prompt_password(format!(
+        "Operator app password for {} at {}: ",
+        args.handle, pds_url
+    ))
+    .map_err(|e| CliError::Config(format!("could not read app password (no TTY?): {e}")))?;
+    if password.is_empty() {
+        return Err(CliError::Config("app password was empty".into()));
+    }
+
+    let session =
+        operator_login::login(pds_url, &args.handle, &password, &operator_cfg.session_path).await?;
+    println!(
+        "{}",
+        operator_login::post_login_warning(&session, &operator_cfg.session_path)
+    );
+    Ok(())
+}
+
+async fn run_publish_service_record(args: ServeArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let operator_cfg = config
+        .operator
+        .as_ref()
+        .ok_or_else(|| CliError::Config("missing [operator] section in config".into()))?
+        .clone();
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+
+    let outcome =
+        publish_service_record::publish(&pool, &config, &operator_cfg.session_path).await?;
+    match outcome {
+        PublishOutcome::NoChange => {
+            println!("service record already up to date; no publish needed");
+        }
+        PublishOutcome::Published { cid, created_at } => {
+            println!("published service record: cid={cid}, createdAt={created_at}");
+        }
+    }
+    Ok(())
+}
+
+fn load_config(explicit_path: Option<&std::path::Path>) -> Result<Config, CliError> {
+    match explicit_path {
+        Some(p) => Config::load_from(Some(p)),
         None => Config::load(),
     }
-    .map_err(|e| CliError::Config(e.to_string()))?;
+    .map_err(|e| CliError::Config(e.to_string()))
+}
+
+async fn run_serve(args: ServeArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
     serve::run(config, shutdown_signal()).await
 }
 
