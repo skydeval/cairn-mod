@@ -22,11 +22,33 @@ use crate::error::Result;
 ///
 /// Fields grow with features; the struct is `non_exhaustive` so additions
 /// are not a breaking change for downstream crates.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[non_exhaustive]
 pub struct Config {
     /// The service DID Cairn runs as (§5.1).
     pub service_did: String,
+    /// Publicly-reachable base URL where this Cairn instance serves HTTP
+    /// and WebSocket endpoints (e.g., `https://labeler.example`). Emitted
+    /// as the `serviceEndpoint` value in the `AtprotoLabeler` entry of
+    /// `/.well-known/did.json` so consumers can discover where to call.
+    ///
+    /// This is distinct from the bind address in the serve subcommand —
+    /// typical production deployments bind `127.0.0.1:3000` behind a
+    /// reverse proxy but advertise the public `https://labeler.example`
+    /// URL here. Validated at load time as a URL.
+    pub service_endpoint: String,
+}
+
+impl Config {
+    /// Post-load validation run by [`Config::load`]. Exposed so call
+    /// sites that construct a `Config` directly (e.g., tests) can
+    /// share the same rule set.
+    pub fn validate(&self) -> Result<()> {
+        url::Url::parse(&self.service_endpoint).map_err(|e| {
+            crate::error::Error::Signing(format!("config.service_endpoint is not a valid URL: {e}"))
+        })?;
+        Ok(())
+    }
 }
 
 impl Config {
@@ -45,6 +67,8 @@ impl Config {
         }
         fig = fig.merge(Env::prefixed("CAIRN_"));
 
-        Ok(fig.extract()?)
+        let cfg: Config = fig.extract()?;
+        cfg.validate()?;
+        Ok(cfg)
     }
 }
