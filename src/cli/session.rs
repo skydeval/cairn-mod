@@ -112,6 +112,30 @@ pub enum SessionError {
     UnsupportedPlatform,
 }
 
+// The shared credential-file checker (§5.1 + §5.3) reports failures in
+// its own terms. Map into SessionError so callers keep getting the
+// session-specific variants they already branch on.
+impl From<crate::credential_file::CredentialFileError> for SessionError {
+    fn from(e: crate::credential_file::CredentialFileError) -> Self {
+        use crate::credential_file::CredentialFileError as C;
+        match e {
+            C::Io(io) => SessionError::Io(io),
+            C::InsecurePermissions { path, mode } => {
+                SessionError::InsecurePermissions { path, mode }
+            }
+            C::ForeignOwner { path } => SessionError::ForeignOwner { path },
+            C::UnsupportedPlatform => SessionError::UnsupportedPlatform,
+            // Session file loading never reject-on-env-override; the
+            // session module has no env-var override semantics for its
+            // credential bytes. If we ever get this variant it's a
+            // misuse; surface as Io to keep the taxonomy small.
+            C::EnvOverrideRejected { env } => SessionError::Io(io::Error::other(format!(
+                "unexpected env-override rejection for {env}"
+            ))),
+        }
+    }
+}
+
 /// Resolve the session path: `CAIRN_SESSION_FILE` env var first,
 /// otherwise `<config_dir>/cairn/session.json` per XDG.
 pub fn default_path() -> Result<PathBuf, SessionError> {
@@ -141,26 +165,15 @@ impl SessionFile {
     /// All three on-disk invariants (mode, owner, version) are
     /// checked before the JSON body is parsed.
     pub fn load(path: &Path) -> Result<Option<Self>, SessionError> {
-        let meta = match fs::metadata(path) {
-            Ok(m) => m,
+        match fs::metadata(path) {
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
-        };
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let mode = meta.mode() & 0o777;
-            check_mode(path, mode)?;
-            let current = current_uid();
-            check_owner(path, meta.uid(), current)?;
         }
 
-        #[cfg(not(unix))]
-        {
-            let _ = meta;
-            return Err(SessionError::UnsupportedPlatform);
-        }
+        // §5.3 mode + owner invariants via the shared checker (§5.1 +
+        // §5.3 share the rule set — see src/credential_file.rs).
+        crate::credential_file::check_mode_and_owner(path)?;
 
         let bytes = fs::read(path)?;
         let session: SessionFile =
@@ -224,68 +237,15 @@ pub fn delete(path: &Path) -> Result<(), SessionError> {
     }
 }
 
-#[cfg(unix)]
-fn check_mode(path: &Path, mode: u32) -> Result<(), SessionError> {
-    if mode == 0o600 {
-        Ok(())
-    } else {
-        Err(SessionError::InsecurePermissions {
-            path: path.to_path_buf(),
-            mode,
-        })
-    }
-}
-
-/// Ownership predicate. Extracted as a pure function so tests can
-/// exercise the "foreign owner" branch without needing root to chown
-/// a fixture file.
-#[cfg(unix)]
-fn check_owner(path: &Path, file_uid: u32, current_uid: u32) -> Result<(), SessionError> {
-    if file_uid == current_uid {
-        Ok(())
-    } else {
-        Err(SessionError::ForeignOwner {
-            path: path.to_path_buf(),
-        })
-    }
-}
-
-#[cfg(unix)]
-fn current_uid() -> u32 {
-    rustix::process::geteuid().as_raw()
-}
+// mode + owner checks moved to `crate::credential_file`. Unit tests
+// for the underlying predicates live there; the `wider_permissions_
+// rejected_on_load` integration test still covers the session-side
+// mapping (the `From<CredentialFileError> for SessionError` impl).
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn check_owner_accepts_matching_uid() {
-        assert!(check_owner(&PathBuf::from("x"), 1000, 1000).is_ok());
-    }
-
-    #[test]
-    fn check_owner_rejects_foreign_uid() {
-        let err = check_owner(&PathBuf::from("x"), 0, 1000).unwrap_err();
-        assert!(matches!(err, SessionError::ForeignOwner { .. }));
-    }
-
-    #[test]
-    fn check_mode_accepts_0600() {
-        assert!(check_mode(&PathBuf::from("x"), 0o600).is_ok());
-    }
-
-    #[test]
-    fn check_mode_rejects_wider_modes() {
-        for bad in [0o644, 0o640, 0o666, 0o700, 0o755, 0o777] {
-            let err = check_mode(&PathBuf::from("x"), bad).unwrap_err();
-            assert!(
-                matches!(err, SessionError::InsecurePermissions { mode, .. } if mode == bad),
-                "expected InsecurePermissions for mode {bad:o}, got {err:?}"
-            );
-        }
-    }
 
     #[test]
     fn default_path_respects_env_override() {

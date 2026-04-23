@@ -25,10 +25,14 @@ const SERVICE_ENDPOINT: &str = "https://labeler.test";
 
 fn test_config() -> Config {
     // Construct via JSON to avoid `non_exhaustive` fiddling and keep
-    // the test isolated from future field additions.
+    // the test isolated from future field additions. `db_path` and
+    // `signing_key_path` are required by Config but not consumed by
+    // did_document_router — any placeholder path suffices.
     serde_json::from_value(serde_json::json!({
         "service_did": SERVICE_DID,
         "service_endpoint": SERVICE_ENDPOINT,
+        "db_path": "/tmp/cairn-test-placeholder.db",
+        "signing_key_path": "/tmp/cairn-test-placeholder.hex",
     }))
     .expect("config deserializes")
 }

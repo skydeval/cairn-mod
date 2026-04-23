@@ -60,12 +60,12 @@ dirs = "6"
 rpassword = "7"
 tempfile = "3"
 include_dir = "0.7"
+hex = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
 
 [dev-dependencies]
-hex = "0.4"
 tokio-tungstenite = "0.29"
 wiremock = "0.6"
 hyper = { version = "1", features = ["client", "http1"] }

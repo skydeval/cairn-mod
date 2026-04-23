@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod credential_file;
 pub mod error;
 pub mod label;
 pub mod report;

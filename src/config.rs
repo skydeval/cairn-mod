@@ -5,18 +5,25 @@
 //! once the clap surface grows subcommands.
 //!
 //! Per §5.1, signing-key private material is NEVER sourced through this
-//! path. The signing-key *path* may be configured here in a later issue,
-//! but the bytes are read only by the signing module with explicit
-//! permission and ownership checks.
+//! path. `signing_key_path` points at a file; the bytes are read only by
+//! [`crate::signing_key::SigningKey::load_from_file`] with explicit
+//! permission, ownership, and env-var-reject checks.
 
 use figment::{
     Figment,
     providers::{Env, Format, Toml},
 };
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use crate::error::Result;
+
+/// Default bind address when `bind_addr` is absent from config.
+/// §F13: "expects reverse proxy for TLS." Loopback-only by default;
+/// operators knowingly opt into `0.0.0.0:3000` when they run without
+/// a reverse proxy on the same host.
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:3000";
 
 /// Top-level Cairn configuration.
 ///
@@ -32,11 +39,48 @@ pub struct Config {
     /// as the `serviceEndpoint` value in the `AtprotoLabeler` entry of
     /// `/.well-known/did.json` so consumers can discover where to call.
     ///
-    /// This is distinct from the bind address in the serve subcommand —
-    /// typical production deployments bind `127.0.0.1:3000` behind a
-    /// reverse proxy but advertise the public `https://labeler.example`
-    /// URL here. Validated at load time as a URL.
+    /// This is distinct from [`Self::bind_addr`] — typical production
+    /// deployments bind `127.0.0.1:3000` behind a reverse proxy but
+    /// advertise the public `https://labeler.example` URL here.
+    /// Validated at load time as a URL.
     pub service_endpoint: String,
+    /// Where `cairn serve` binds its HTTP listener. Defaults to
+    /// [`DEFAULT_BIND_ADDR`] (`127.0.0.1:3000`) if omitted.
+    #[serde(default = "default_bind_addr")]
+    pub bind_addr: SocketAddr,
+    /// SQLite database file. Parent directory must exist; the file
+    /// itself is created on first run by
+    /// [`crate::storage::open`] alongside embedded migrations.
+    pub db_path: PathBuf,
+    /// Signing key file (§5.1). Mode 0600, owned by the running user,
+    /// hex-encoded 32-byte secp256k1 private key. Env-var delivery of
+    /// the key material is explicitly rejected — see
+    /// [`crate::signing_key::SIGNING_KEY_ENV_REJECTED`].
+    pub signing_key_path: PathBuf,
+    /// Admin-endpoint policy (§F12). Defaults to an empty table,
+    /// meaning `admin.applyLabel` accepts any label value ≤128 bytes
+    /// (matches the existing [`crate::AdminConfig`] default).
+    #[serde(default)]
+    pub admin: AdminConfigToml,
+}
+
+/// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
+/// type because (a) `AdminConfig` is constructed from a vector of owned
+/// strings and doesn't itself derive `Deserialize`, (b) keeping the
+/// wire shape here avoids coupling the server module to figment/serde.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AdminConfigToml {
+    /// Operator-declared label values. When `Some`, `applyLabel` only
+    /// accepts values in this set. When absent, any val ≤128 bytes is
+    /// accepted.
+    #[serde(default)]
+    pub label_values: Option<Vec<String>>,
+}
+
+fn default_bind_addr() -> SocketAddr {
+    DEFAULT_BIND_ADDR
+        .parse()
+        .expect("DEFAULT_BIND_ADDR is a valid socket address")
 }
 
 impl Config {
@@ -47,15 +91,20 @@ impl Config {
         url::Url::parse(&self.service_endpoint).map_err(|e| {
             crate::error::Error::Signing(format!("config.service_endpoint is not a valid URL: {e}"))
         })?;
+        // Path existence of db_path / signing_key_path is checked at
+        // use time by storage::open and SigningKey::load_from_file —
+        // duplicating here would just double-fail and lose the
+        // specific cause.
         Ok(())
     }
-}
 
-impl Config {
     /// Load configuration. Sources, low to high precedence:
-    /// 1. Compiled-in defaults (none yet).
-    /// 2. TOML at the path in `CAIRN_CONFIG`, or `/etc/cairn/cairn.toml` if that file exists.
-    /// 3. Environment variables prefixed `CAIRN_` (e.g. `CAIRN_SERVICE_DID`).
+    /// 1. Compiled-in defaults (`bind_addr` if unset, empty admin
+    ///    table).
+    /// 2. TOML at the path in `CAIRN_CONFIG`, or
+    ///    `/etc/cairn/cairn.toml` if that file exists.
+    /// 3. Environment variables prefixed `CAIRN_`
+    ///    (e.g. `CAIRN_SERVICE_DID`).
     pub fn load() -> Result<Self> {
         let toml_path: PathBuf = std::env::var_os("CAIRN_CONFIG")
             .map(PathBuf::from)
@@ -70,5 +119,13 @@ impl Config {
         let cfg: Config = fig.extract()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+}
+
+impl From<AdminConfigToml> for crate::AdminConfig {
+    fn from(t: AdminConfigToml) -> Self {
+        crate::AdminConfig {
+            label_values: t.label_values,
+        }
     }
 }
