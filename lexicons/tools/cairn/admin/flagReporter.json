@@ -1,0 +1,41 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.flagReporter",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Flag or unflag a reporter DID. Flagged reporters receive RateLimitExceeded on all subsequent com.atproto.moderation.createReport calls with no indication of suppression (§F11 non-enumeration).",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "did",
+            "suppressed"
+          ],
+          "properties": {
+            "did": {
+              "type": "string",
+              "format": "did"
+            },
+            "suppressed": {
+              "type": "boolean",
+              "description": "true to flag (suppress future reports); false to unflag."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  }
+}

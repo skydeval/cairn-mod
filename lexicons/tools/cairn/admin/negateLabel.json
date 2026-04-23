@@ -1,0 +1,63 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.negateLabel",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Negate (withdraw) a previously-applied label. Emits a signed neg=true Label event per §F6 and writes a corresponding audit_log entry in the same transaction.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "uri",
+            "val"
+          ],
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "val": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "cid": {
+              "type": "string",
+              "format": "cid",
+              "description": "Required if the applied label was pinned to a CID; the negation must target the same (src, uri, val, cid?) tuple."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "seq",
+            "cts"
+          ],
+          "properties": {
+            "seq": {
+              "type": "integer"
+            },
+            "cts": {
+              "type": "string",
+              "format": "datetime"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "LabelNotFound",
+          "description": "No currently-applied label exists for the given (src, uri, val) tuple."
+        }
+      ]
+    }
+  }
+}

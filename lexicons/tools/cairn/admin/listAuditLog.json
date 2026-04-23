@@ -1,0 +1,60 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.listAuditLog",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Admin-role-only. List audit log entries with optional filtering by actor DID, action type, and time range. Callers with the `mod` role receive Forbidden (§F12 role-based authorization).",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "actor": {
+            "type": "string",
+            "format": "did"
+          },
+          "action": {
+            "type": "string"
+          },
+          "since": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "until": {
+            "type": "string",
+            "format": "datetime"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "entries"
+          ],
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "entries": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "tools.cairn.admin.defs#auditEntry"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,124 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.defs",
+  "defs": {
+    "reportView": {
+      "type": "object",
+      "required": [
+        "id",
+        "createdAt",
+        "reasonType",
+        "subject",
+        "reportedBy",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "reasonType": {
+          "type": "string",
+          "description": "One of the com.atproto.moderation.defs#reasonType values."
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 2048,
+          "description": "Full report body. Only populated on admin fetches (getReport); listReports responses may omit this."
+        },
+        "subject": {
+          "type": "union",
+          "refs": [
+            "com.atproto.admin.defs#repoRef",
+            "com.atproto.repo.strongRef"
+          ]
+        },
+        "reportedBy": {
+          "type": "string",
+          "format": "did"
+        },
+        "status": {
+          "type": "string",
+          "knownValues": [
+            "pending",
+            "resolved"
+          ]
+        },
+        "resolvedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "resolvedBy": {
+          "type": "string",
+          "format": "did"
+        },
+        "resolutionLabel": {
+          "type": "string",
+          "description": "If the report was resolved with an accompanying label application, the label value applied."
+        },
+        "resolutionReason": {
+          "type": "string"
+        }
+      }
+    },
+    "auditEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "createdAt",
+        "action",
+        "actorDid",
+        "outcome"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "Audit-log row id. Monotonic per-instance."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "action": {
+          "type": "string",
+          "knownValues": [
+            "label_applied",
+            "label_negated",
+            "report_resolved",
+            "reporter_flagged",
+            "moderator_granted",
+            "moderator_revoked",
+            "signing_key_added",
+            "labeler_service_published"
+          ]
+        },
+        "actorDid": {
+          "type": "string",
+          "format": "did"
+        },
+        "target": {
+          "type": "string",
+          "description": "Target identifier (AT-URI, DID, report ID, etc.) — semantics depend on action."
+        },
+        "targetCid": {
+          "type": "string",
+          "format": "cid"
+        },
+        "outcome": {
+          "type": "string",
+          "knownValues": [
+            "success",
+            "failure"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "description": "Structured JSON or free text; action-specific schema documented in src/writer.rs AUDIT_REASON_SCHEMA."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.applyLabel",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Apply a label to a subject. Emits a signed Label event per §6.2 and writes a corresponding audit_log entry in the same transaction.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "uri",
+            "val"
+          ],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "description": "AT-URI or DID of the subject being labeled."
+            },
+            "cid": {
+              "type": "string",
+              "format": "cid",
+              "description": "Optional record-version pin; when present, the label applies to this specific version."
+            },
+            "val": {
+              "type": "string",
+              "maxLength": 128,
+              "description": "Label value from the operator's declared label set."
+            },
+            "exp": {
+              "type": "string",
+              "format": "datetime",
+              "description": "Optional expiration timestamp. Enforcement is v1.1 scope (§F7); v1 stores but does not act on this field."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 2048,
+              "description": "Moderator-supplied rationale recorded to the audit log only. Not part of the signed label record."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "seq",
+            "cts"
+          ],
+          "properties": {
+            "seq": {
+              "type": "integer",
+              "description": "Per-instance strictly-monotonic sequence number assigned by the writer (§F5)."
+            },
+            "cts": {
+              "type": "string",
+              "format": "datetime",
+              "description": "RFC-3339 Z timestamp on the emitted label, after §6.1 monotonicity clamping."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "InvalidLabelValue",
+          "description": "The `val` is not in the operator's declared label set."
+        }
+      ]
+    }
+  }
+}

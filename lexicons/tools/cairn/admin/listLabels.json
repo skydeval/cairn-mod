@@ -1,0 +1,65 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.listLabels",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Admin-view label listing. Unlike the public com.atproto.label.queryLabels, this can include negated and expired labels and filter by the moderator DID that emitted them.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "uri": {
+            "type": "string"
+          },
+          "val": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "actor": {
+            "type": "string",
+            "format": "did",
+            "description": "Filter by the moderator DID recorded in audit_log.actor_did at emission time."
+          },
+          "includeNegated": {
+            "type": "boolean",
+            "default": false
+          },
+          "includeExpired": {
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "labels"
+          ],
+          "properties": {
+            "cursor": {
+              "type": "string"
+            },
+            "labels": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "com.atproto.label.defs#label"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

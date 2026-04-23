@@ -1,0 +1,74 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.resolveReport",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Resolve a report, optionally applying a label as part of the same atomic operation. Implementation (in #14/#15) MUST commit report status update, label INSERT (if applyLabel supplied), and audit entry in one transaction — no partial-failure states.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "applyLabel": {
+              "type": "ref",
+              "ref": "#labelAction",
+              "description": "Optional label to apply to the reported subject as part of resolution."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 2048
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#reportView"
+        }
+      },
+      "errors": [
+        {
+          "name": "ReportNotFound",
+          "description": "No report exists with the given id."
+        },
+        {
+          "name": "InvalidLabelValue",
+          "description": "The `applyLabel.val` is not in the operator's declared label set."
+        }
+      ]
+    },
+    "labelAction": {
+      "type": "object",
+      "required": [
+        "uri",
+        "val"
+      ],
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid"
+        },
+        "val": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "exp": {
+          "type": "string",
+          "format": "datetime"
+        }
+      }
+    }
+  }
+}

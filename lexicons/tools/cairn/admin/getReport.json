@@ -1,0 +1,34 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getReport",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Fetch a single report by ID, including its full reason text. Admin-authenticated (§F11: report body never returned by public endpoints).",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#reportView"
+        }
+      },
+      "errors": [
+        {
+          "name": "ReportNotFound",
+          "description": "No report exists with the given id."
+        }
+      ]
+    }
+  }
+}
