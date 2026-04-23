@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_type, subject_did, subject_uri, subject_cid FROM reports",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_uri",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_cid",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6e546436b9ec750a901c7167943fed0d50ddc9c5c7f40d6e88bb0c0e6125557d"
+}

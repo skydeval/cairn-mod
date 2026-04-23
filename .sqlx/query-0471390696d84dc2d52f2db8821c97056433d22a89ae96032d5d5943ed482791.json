@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO suppressed_reporters (did, suppressed_by, suppressed_at)\n         VALUES (?1, 'did:plc:admin0000000000000000000000', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0471390696d84dc2d52f2db8821c97056433d22a89ae96032d5d5943ed482791"
+}

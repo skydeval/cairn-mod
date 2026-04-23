@@ -32,10 +32,12 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::error::Result;
 use crate::writer::WriterHandle;
 
+mod create_report;
 pub mod limits;
 mod query;
 pub(crate) mod subscribe;
 
+pub use create_report::{CreateReportConfig, create_report_router};
 pub use limits::Limiter;
 
 /// Tunables for the subscribeLabels endpoint. All defaults match §F4.
