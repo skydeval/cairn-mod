@@ -127,18 +127,12 @@ pub(crate) fn parse_patterns(raw: Vec<String>) -> Result<Vec<UriPattern>, XrpcEr
 
 // ---------- Cursor codec ----------
 
-pub(crate) fn encode_cursor(seq: i64) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(seq.to_string())
-}
+// Cursor encode/decode live in `super::xrpc`; this file and the admin
+// handlers (#13, #15) share the same base64url(i64) format so future
+// listing endpoints don't drift.
 
-pub(crate) fn decode_cursor(s: &str) -> Result<i64, XrpcError> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|_| XrpcError::InvalidRequest("malformed cursor (bad base64)".into()))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|_| XrpcError::InvalidRequest("malformed cursor (bad utf-8)".into()))?;
-    text.parse::<i64>()
-        .map_err(|_| XrpcError::InvalidRequest("malformed cursor (not an integer)".into()))
+fn decode_cursor_or_invalid(s: &str) -> Result<i64, XrpcError> {
+    super::xrpc::decode_cursor(s).map_err(|_| XrpcError::InvalidRequest("malformed cursor".into()))
 }
 
 // ---------- LabelJson + response ----------
@@ -297,7 +291,7 @@ async fn query_labels(raw_query: String, state: AppState) -> Result<QueryRespons
 
     let cursor_seq: i64 = match cursor_raw {
         None => 0,
-        Some(c) => decode_cursor(&c)?,
+        Some(c) => decode_cursor_or_invalid(&c)?,
     };
 
     // 2. Resolve `now` in the same RFC-3339 Z format as `labels.cts` /
@@ -407,7 +401,7 @@ async fn query_labels(raw_query: String, state: AppState) -> Result<QueryRespons
             .last()
             .expect("trimmed non-empty since we had >limit rows")
             .seq;
-        (trimmed, Some(encode_cursor(last_seq)))
+        (trimmed, Some(super::xrpc::encode_cursor(last_seq)))
     } else {
         (rows, None)
     };
@@ -480,25 +474,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cursor_roundtrips() {
-        for seq in [1_i64, 42, 1_000_000, i64::MAX] {
-            let encoded = encode_cursor(seq);
-            let decoded = decode_cursor(&encoded).expect("decode");
-            assert_eq!(decoded, seq);
-        }
-    }
-
-    #[test]
-    fn cursor_rejects_non_base64() {
-        assert!(decode_cursor("!!!not_base64!!!").is_err());
-    }
-
-    #[test]
-    fn cursor_rejects_non_integer_payload() {
-        let bad = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("hello");
-        assert!(decode_cursor(&bad).is_err());
-    }
+    // Cursor encode/decode tests live in `super::xrpc::tests` now
+    // that the codec is shared with the admin handlers.
 
     #[test]
     fn label_json_sig_uses_typed_bytes_shape() {
