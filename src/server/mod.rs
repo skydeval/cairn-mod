@@ -37,11 +37,13 @@ mod create_report;
 pub mod limits;
 mod query;
 pub(crate) mod subscribe;
+pub mod wellknown;
 pub mod xrpc;
 
 pub use admin::{AdminConfig, admin_router};
 pub use create_report::{CreateReportConfig, create_report_router};
 pub use limits::Limiter;
+pub use wellknown::wellknown_router;
 
 /// Tunables for the subscribeLabels endpoint. All defaults match §F4.
 #[derive(Debug, Clone)]

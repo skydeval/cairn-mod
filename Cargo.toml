@@ -59,6 +59,7 @@ async-trait = "0.1"
 dirs = "6"
 rpassword = "7"
 tempfile = "3"
+include_dir = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
