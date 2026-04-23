@@ -185,9 +185,35 @@ pub(super) async fn handler(
         return (StatusCode::SERVICE_UNAVAILABLE, "subscriber cap reached").into_response();
     };
 
+    // Register the broadcast receiver and observe the shutdown signal
+    // SYNCHRONOUSLY, before the 101 upgrade response is produced. Two
+    // races close here:
+    //
+    // 1. Handler-level: `ws.on_upgrade(closure)` returns a Response; axum
+    //    sends the 101, the client's `connect_async` resolves, and only
+    //    then is the closure task scheduled. If `subscribe()` lived inside
+    //    the closure, a client that called apply() immediately after
+    //    connect_async returned could broadcast to zero receivers and
+    //    silently drop the event.
+    //
+    // 2. Tokio-broadcast-internal: `Sender::subscribe` bumps
+    //    `num_receivers` before taking the tail lock to snapshot the
+    //    receiver's initial `next` position. A `send` that interleaves
+    //    between fetch_add and the tail lock sees the incremented count,
+    //    writes at the current tail, and advances past it — the new
+    //    receiver's `next` then points *past* the just-sent event.
+    //    Holding both calls pre-upgrade means no send can interleave
+    //    before the client is able to observe the upgrade completing.
+    //
+    // Moving these calls out of the closure is a production correctness
+    // property: any real client doing apply-then-observe without a sync
+    // point would otherwise hit the same race.
+    let bcast = state.writer.subscribe();
+    let shutdown_rx = state.writer.shutdown_signal();
+
     ws.on_upgrade(move |socket| async move {
         let permit = permit; // RAII: released when this task ends.
-        if let Err(err) = run_subscription(socket, state, params.cursor).await {
+        if let Err(err) = run_subscription(socket, state, params.cursor, bcast, shutdown_rx).await {
             tracing::warn!(%addr, error = %err, "subscribeLabels connection ended with error");
         }
         drop(permit);
@@ -209,13 +235,14 @@ async fn run_subscription(
     socket: WebSocket,
     state: AppState,
     cursor_raw: Option<String>,
+    bcast: broadcast::Receiver<LabelEvent>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    // `bcast` and `shutdown_rx` are created in `handler` before the 101
+    // upgrade response is produced — see the comment there for the race
+    // this ordering closes. This function receives them as parameters
+    // precisely so they exist before the client can observe the upgrade.
     let (mut sink, mut stream) = socket.split();
-
-    // Subscribe BEFORE reading head to avoid the "miss events between
-    // snapshot and subscribe" seam.
-    let bcast = state.writer.subscribe();
-    let shutdown_rx = state.writer.shutdown_signal();
 
     // Retention floor (read-side): oldest seq whose row is newer than the
     // retention cutoff. Sweep is deferred — this floor enforces the
@@ -249,18 +276,16 @@ async fn run_subscription(
             Ok(())
         }
         CursorDecision::LiveOnly => {
-            // Drop any events in the receiver that landed before subscription
-            // was registered? No: we just subscribed; nothing older is
-            // available. Proceed straight to live.
-            live_tail(
-                &mut sink,
-                &mut stream,
-                bcast,
-                shutdown_rx,
-                head_at_join,
-                &state,
-            )
-            .await
+            // No replay happened, so no seq has been emitted yet. Pass 0
+            // as the "last emitted" threshold: broadcast receivers created
+            // pre-upgrade only hold post-subscribe events, so every seq
+            // they carry is by construction one the client has not yet
+            // seen. Passing `head_at_join` here (the committed head at
+            // query time) would erroneously skip an event that was
+            // applied *between* the pre-upgrade subscribe and the head
+            // query — a narrow window, but deterministically hit by a
+            // client that connect-then-apply's quickly.
+            live_tail(&mut sink, &mut stream, bcast, shutdown_rx, 0, &state).await
         }
         CursorDecision::Replay {
             emit_outdated,
@@ -301,12 +326,16 @@ async fn run_subscription(
 
 type WsSink = SplitSink<WebSocket, Message>;
 
+/// `skip_seq_at_or_below` is the largest seq already emitted via replay
+/// (or 0 for `LiveOnly`, where nothing has been emitted yet). Events
+/// received here with `seq <= skip_seq_at_or_below` were already served
+/// via the replay path and are dropped to avoid double-emission.
 async fn live_tail(
     sink: &mut WsSink,
     stream: &mut futures_util::stream::SplitStream<WebSocket>,
     mut bcast: broadcast::Receiver<LabelEvent>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    head_at_join: i64,
+    skip_seq_at_or_below: i64,
     state: &AppState,
 ) -> Result<()> {
     let mut ping_timer = interval(state.config.ping_interval);
@@ -324,7 +353,7 @@ async fn live_tail(
             res = bcast.recv() => match res {
                 Ok(event) => {
                     // Skip events already served during replay.
-                    if event.seq <= head_at_join {
+                    if event.seq <= skip_seq_at_or_below {
                         continue;
                     }
                     let frame = labels_frame(event.seq, &event.label)?;
