@@ -324,6 +324,115 @@ async fn fresh_db_path_is_created_and_migrated() {
     );
 }
 
+// ---------- #19 regression: spontaneous exit after DRAIN_TIMEOUT ----------
+
+/// Under the old bug, `serve::run` wrapped the entire serve future in
+/// `tokio::time::timeout(DRAIN_TIMEOUT, ...)`, causing the server to
+/// exit after ~30s even without any shutdown signal. This test pauses
+/// tokio time and advances past DRAIN_TIMEOUT: if the regression ever
+/// returns, `server.is_finished()` will be true after the advance.
+/// After the fix, no DRAIN_TIMEOUT sleep is pending before shutdown,
+/// so the advance is a no-op and the server stays alive.
+#[tokio::test]
+async fn server_stays_alive_past_drain_timeout_without_external_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr = free_port();
+    let config = build_config(&dir, addr);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let cfg_for_task = config.clone();
+    let server = tokio::spawn(async move {
+        serve::run(cfg_for_task, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+    wait_ready(addr).await;
+
+    // Pause and fast-forward well past DRAIN_TIMEOUT (30s). Under the
+    // old bug, tokio::time::timeout would fire here and the server task
+    // would complete; under the fix, no timer is pending so advance is
+    // a no-op.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    // Give the scheduler a few ticks to observe any work the advance
+    // might have woken.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(
+        !server.is_finished(),
+        "server exited on its own within 60s of simulated time — #19 regression"
+    );
+
+    // Restore real-time before cleanup. Under auto-advance, the outer
+    // timeout below would otherwise race the server task's shutdown
+    // wakeups and fire prematurely.
+    tokio::time::resume();
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("server exits within real-time timeout")
+        .expect("server task did not panic")
+        .expect("clean shutdown should return Ok");
+}
+
+/// Complements the above: when shutdown fires AND a handler is still
+/// in-flight (simulated by an open subscribeLabels WebSocket), the
+/// drain timer must eventually fire and force-exit. This covers the
+/// real scenario the 30s bound exists for.
+#[tokio::test]
+async fn drain_timeout_forces_exit_when_handler_hangs() {
+    use tokio_tungstenite::connect_async;
+
+    let dir = tempfile::tempdir().unwrap();
+    let addr = free_port();
+    let config = build_config(&dir, addr);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let cfg_for_task = config.clone();
+    let server = tokio::spawn(async move {
+        serve::run(cfg_for_task, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+    wait_ready(addr).await;
+
+    // Open a subscribeLabels WebSocket. The handler loops on (broadcast
+    // recv | client message) and won't exit on its own, so axum's
+    // graceful_shutdown can't drain without the drain_timer firing.
+    let ws_url = format!("ws://{addr}/xrpc/com.atproto.label.subscribeLabels");
+    let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
+    // Let the upgrade settle so the handler is registered as in-flight.
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+
+    shutdown_tx.send(()).unwrap();
+
+    // Fast-forward past DRAIN_TIMEOUT. drain_timer wakes → force-exit.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(35)).await;
+    // Restore real-time for the cleanup timeout; otherwise auto-advance
+    // can fire it before the server finishes writer.shutdown() + exit.
+    tokio::time::resume();
+
+    let result = tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("server must exit within real-time timeout after advance")
+        .expect("server task did not panic");
+    assert!(
+        result.is_ok(),
+        "drain-timeout path must return Ok(()), got {result:?}"
+    );
+
+    // Close the client cleanly; assertion is done.
+    let _ = ws.close(None).await;
+}
+
 // Silence unused-import warnings where a single-use helper isn't
 // reached by every test in this file.
 #[allow(dead_code)]

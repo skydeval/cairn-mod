@@ -134,18 +134,53 @@ where
         "cairn listening; lease acquired"
     );
 
-    // Step 7: serve until `shutdown` resolves. `with_graceful_shutdown`
-    // stops accepting new connections when the future completes; in-
-    // flight handlers drain until the listener's internal state says
-    // they're done. We wrap the whole thing in a DRAIN_TIMEOUT so a
-    // misbehaving handler can't keep the process alive indefinitely.
+    // Step 7: serve until `shutdown` resolves, then bound the drain
+    // phase to DRAIN_TIMEOUT. `with_graceful_shutdown` stops accepting
+    // new connections when the future completes; in-flight handlers
+    // drain until the listener's internal state says they're done.
+    // The drain timer starts only after shutdown has actually been
+    // observed — wrapping the whole serve future in a timeout (the
+    // earlier implementation) made the server spontaneously exit
+    // after 30s regardless of whether any signal had fired (#19).
+    let (drain_start_tx, drain_start_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_wrapper = async move {
+        shutdown.await;
+        // Forward the shutdown edge to the drain timer. A send failure
+        // means the receiver has been dropped (server exiting another
+        // way) — fine, drain_timer is no longer relevant.
+        let _ = drain_start_tx.send(());
+    };
+
     let serve_fut = axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown);
+    .with_graceful_shutdown(shutdown_wrapper);
 
-    let serve_outcome = tokio::time::timeout(DRAIN_TIMEOUT, serve_fut).await;
+    // Drain timer: parked on the oneshot until shutdown fires, then
+    // sleeps DRAIN_TIMEOUT. If `serve_fut` resolves first (clean drain)
+    // the sender is dropped, the oneshot resolves Err, and this future
+    // pends forever so the other select arm always wins.
+    let drain_timer = async move {
+        match drain_start_rx.await {
+            Ok(()) => tokio::time::sleep(DRAIN_TIMEOUT).await,
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    enum Outcome {
+        Clean,
+        AxumError(std::io::Error),
+        DrainTimeout,
+    }
+
+    let outcome = tokio::select! {
+        res = serve_fut => match res {
+            Ok(()) => Outcome::Clean,
+            Err(e) => Outcome::AxumError(e),
+        },
+        _ = drain_timer => Outcome::DrainTimeout,
+    };
 
     // Step 8: shut the Writer down regardless of HTTP outcome so the
     // lease is released. A lingering lease is a deployment bug
@@ -155,13 +190,13 @@ where
         tracing::warn!(error = %e, "writer shutdown failed during serve exit");
     }
 
-    match serve_outcome {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(CliError::Startup(format!("axum serve error: {e}"))),
-        Err(_elapsed) => {
+    match outcome {
+        Outcome::Clean => Ok(()),
+        Outcome::AxumError(e) => Err(CliError::Startup(format!("axum serve error: {e}"))),
+        Outcome::DrainTimeout => {
             tracing::warn!(
                 drain_timeout_secs = DRAIN_TIMEOUT.as_secs(),
-                "HTTP drain timeout exceeded; forcing exit"
+                "drain timeout exceeded after shutdown signal; forcing exit"
             );
             Ok(())
         }

@@ -335,17 +335,26 @@ async fn run_serve(args: ServeArgs) -> Result<(), CliError> {
 /// signals land the same way — request graceful shutdown. SIGTERM is
 /// what `systemctl stop` sends; SIGINT is interactive Ctrl-C.
 async fn shutdown_signal() {
+    // Tracing kept at debug! so future signal-handling bugs can be
+    // diagnosed via `-vv` without cluttering the info-level log stream
+    // on every start/stop.
+    tracing::debug!("shutdown_signal: entered, awaiting SIGINT or SIGTERM");
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+            _ = tokio::signal::ctrl_c() => {
+                tracing::debug!("shutdown_signal: SIGINT (ctrl_c) fired");
+            }
+            _ = term.recv() => {
+                tracing::debug!("shutdown_signal: SIGTERM (term.recv()) fired");
+            }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        tracing::debug!("shutdown_signal: ctrl_c fired (non-unix path)");
     }
 }
