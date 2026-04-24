@@ -164,6 +164,145 @@ curl -sSL https://labeler.example/.well-known/did.json | jq '.verificationMethod
 Should return `"did:web:labeler.example#atproto_label"` (or the
 suffixed forms during v1.1 key rotation).
 
+## Production Checklist
+
+Walk through this before pointing real subscribers at the instance.
+Each item links the relevant design-doc section for deeper context.
+
+### Transport ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment))
+
+- [ ] **TLS terminates at the reverse proxy**, not Cairn. `cairn
+  serve` binds HTTP only (default `127.0.0.1:3000`) and assumes a
+  TLS-terminating proxy fronts it. See
+  [`contrib/`](contrib/) for Caddy and nginx templates.
+- [ ] **HSTS header** on responses (`Strict-Transport-Security:
+  max-age=31536000; includeSubDomains`). Set at the proxy; the
+  contrib templates ship it.
+
+### Rate limits ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment) numbers, enforced at reverse proxy)
+
+- [ ] **`createReport`** per-IP: burst 3, rate 10 per hour. Enforced
+  by `contrib/nginx/cairn.conf` out of the box; Caddy requires the
+  `caddy-ratelimit` third-party module — see
+  [`contrib/caddy/Caddyfile`](contrib/caddy/Caddyfile) for the
+  commented stanza and install pointer.
+- [ ] **`subscribeLabels`** per-IP: 8 concurrent connections.
+  Enforced alongside the createReport limit in the same contrib
+  configs.
+
+### Secrets ([§5.1](cairn-design.md#51-labeler-service-identity), [§5.3](cairn-design.md#53-cli-ergonomics))
+
+- [ ] **Signing key file** at mode `0600`, owned by the running
+  user. Cairn's `credential_file::check_mode_and_owner` refuses
+  wider permissions or foreign ownership at startup.
+- [ ] **Signing key file NEVER committed to version control.** A
+  signing key in git history is a compromise even after deletion.
+- [ ] **Signing key material NOT delivered via env var.** The
+  `CAIRN_SIGNING_KEY` env var is explicitly rejected by the
+  loader (`SIGNING_KEY_ENV_REJECTED` constant) — the guardrail
+  exists to prevent an "ergonomics" PR later adding a parallel
+  unsafe path.
+- [ ] **Operator session file** (written by `cairn operator-login`)
+  at `0600` owned by the running user. Treat it as equivalent to
+  your PDS app password — anyone with read access can push records
+  to the labeler's PDS repo until the session expires.
+
+### Key lifecycle ([§4.1.6](cairn-design.md#41-out-of-scope-threats), [§12](cairn-design.md#12-security-considerations))
+
+- [ ] **Signing key is permanent for v1.** Rotation is v1.1
+  scope. Plan the host, permissions, and backup accordingly — a
+  v1 key lives as long as the labeler identity.
+- [ ] **Do NOT remove the labeler signing key from the DID
+  document.** Every historical label Cairn has signed stops
+  verifying at consumers. Catastrophic and not undoable.
+
+### Backup
+
+- [ ] **SQLite database** (`db_path`) — contains labels, reports,
+  audit log, moderators, single-instance lease state. Regular
+  backups via `sqlite3 .backup` or filesystem snapshot.
+- [ ] **Signing key file** (`signing_key_path`) — losing it means
+  losing the labeler identity. Back up encrypted, store offline.
+- [ ] **Session files are NOT backup-worthy.** Operator and
+  moderator sessions are re-created by running `cairn
+  operator-login` / `cairn login`.
+
+### Moderator management
+
+v1 has no dedicated CLI or admin XRPC for moderator membership.
+Manage via direct SQL against the `moderators` table:
+
+```sql
+-- Grant mod role:
+INSERT INTO moderators (did, role, added_at)
+VALUES ('did:plc:example', 'mod', strftime('%s','now') * 1000);
+
+-- Grant admin role:
+INSERT INTO moderators (did, role, added_at)
+VALUES ('did:plc:example', 'admin', strftime('%s','now') * 1000);
+
+-- Revoke (any role):
+DELETE FROM moderators WHERE did = 'did:plc:example';
+```
+
+`cairn moderator {add,remove,list}` subcommands are v1.1 scope
+(§F9).
+
+### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
+
+- [ ] **Only one `cairn serve` against a given DID at a time.**
+  Cairn enforces this with a SQLite-backed lease; the loser of a
+  startup race exits with `LEASE_CONFLICT` (exit code 11). The
+  contrib systemd unit sets `RestartPreventExitStatus=11` so
+  systemd doesn't restart-loop.
+- [ ] **Even with the lease disabled, two instances against the
+  same DB would corrupt the sequence space.** Don't attempt it.
+
+### Monitoring (v1 surface is minimal)
+
+- [ ] **systemd status + journalctl** — errors and panics land
+  here. The contrib unit sets `StandardOutput=journal`.
+- [ ] **Disk usage on the `db_path` partition** — Cairn has an
+  app-level disk guard for the report path, but OS-level
+  monitoring catches everything.
+- [ ] **TLS certificate expiry at the reverse proxy** — Caddy
+  auto-renews via ACME; nginx + certbot needs its own cron check.
+
+Cairn v1 exposes **no dedicated `/health` or `/ready` endpoint**.
+"Process up + `/.well-known/did.json` returns 200" is the
+available liveness signal. A dedicated health endpoint is tracked
+for a future version.
+
+## Trust-chain disclosures
+
+Operators AND subscribers should understand what Cairn's protocol
+guarantees and what it doesn't. These are v1 properties, documented
+in [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience)
+of the design doc and summarized here per §14's "prominently
+placed" directive.
+
+1. **Label trust is operator trust.** A subscriber to this
+   labeler's DID is implicitly trusting the current and past
+   judgment of whoever controls that DID. If the operator
+   silently swaps intent (becomes malicious, sells the DID, is
+   compromised) there is no protocol-level mechanism for
+   subscribers to detect this.
+
+2. **Historical labels are forgeable by a malicious operator with
+   DB access.** v1's audit log records who/when/why at the
+   application layer but isn't cryptographically linked to the
+   labels table. An operator with direct SQLite access can
+   rewrite history. v1.1's hash-chained audit log is a
+   prerequisite (but not sufficient) for historical-label
+   integrity.
+
+3. **Single operator per instance is a single point of
+   compromise.** Operators concerned about unilateral
+   label-history tampering should evaluate this limitation
+   against their threat model. Mitigations (transparency logs,
+   hash-chained audit) are tracked for future versions; specific
+   mechanics are not yet finalized.
+
 ## Architecture
 
 - **Single-writer task** (§F5) owns all write operations through an
