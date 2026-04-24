@@ -26,7 +26,7 @@ than Skyware; it does not try to be either.
 
 ## Status
 
-**v1 is in development.** The technical surface is code-complete —
+**v1.0 has been released.** The technical surface is code-complete —
 see the [tracker](https://github.com/skydeval/cairn-mod/issues) for
 remaining docs + release work. v1.1 plans (review queue, richer
 admin API, key rotation) live in the design doc's §18 roadmap.
