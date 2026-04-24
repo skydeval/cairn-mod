@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+- CI hardening (#3)
+- Complete rustdoc sweep for tier 3 items deferred from #22 (#11)
 
 ### Fixed
 
