@@ -193,10 +193,9 @@ async fn first_publish_writes_record_and_persists_state() {
     assert_eq!(audit.target_cid.as_deref(), Some(published_cid.as_str()));
 
     // Parse reason JSON via serde — literal boolean match per #20 note.
-    let reason: AuditReason = serde_json::from_str(
-        audit.reason.as_deref().expect("reason json present"),
-    )
-    .expect("reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
+    let reason: AuditReason =
+        serde_json::from_str(audit.reason.as_deref().expect("reason json present"))
+            .expect("reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
     assert!(
         reason.content_changed,
         "first publish is content_changed=true by construction of the publish-path branch"
@@ -276,10 +275,9 @@ async fn republish_with_identical_config_is_noop() {
         Some(first_cid.as_str()),
         "skip audit echoes prior cid in target_cid, not null"
     );
-    let reason: AuditReason = serde_json::from_str(
-        skip_audit.reason.as_deref().expect("reason json present"),
-    )
-    .expect("skip reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
+    let reason: AuditReason =
+        serde_json::from_str(skip_audit.reason.as_deref().expect("reason json present"))
+            .expect("skip reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
     assert!(
         !reason.content_changed,
         "skip path records content_changed=false (literal bool)"
