@@ -15,7 +15,6 @@
 //! [cairn-design]: https://github.com/skydeval/cairn-mod/blob/main/cairn-design.md
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
 
 pub mod auth;
 pub mod cli;
