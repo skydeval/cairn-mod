@@ -516,7 +516,7 @@ Namespace: `tools.cairn.admin.*`. Auth: ATProto service auth (§5).
 ### F13. Single binary + SQLite deployment
 
 **Verification:**
-- `cargo install cairn-labeler` produces a working binary named `cairn`.
+- `cargo install cairn-mod` produces a working binary named `cairn`.
 - First run creates the SQLite schema via embedded migrations.
 - `contrib/` includes:
   - systemd service file template.
@@ -691,7 +691,7 @@ Complements §4 and §5. This is the attacker's-eye view for code review.
 
 Cairn v1 ships as a focused release: protocol-correct, self-contained, and notably smaller than Ozone in feature surface. This is intentional. Users who need Ozone's full moderation workflow (review queue, takedowns, team management, web UI) should use Ozone today and consider migrating to Cairn when v1.1+ delivers those features. Users who want a Rust-native labeler without Ozone's dependency footprint are Cairn v1's target audience.
 
-- `cargo publish` as `cairn-labeler` (the bare name `cairn` is placeholder-squatted on crates.io). The produced binary is named `cairn` via the `[[bin]]` target, so end-users run `cairn` after `cargo install cairn-labeler`.
+- `cargo publish` as `cairn-mod` (the bare name `cairn` is placeholder-squatted on crates.io; a claim attempt on `cairn` via help@crates.io is a low-priority post-v1 follow-up — see §17). The produced binary is named `cairn` via the `[[bin]]` target, so end-users run `cairn` after `cargo install cairn-mod`.
 - Pre-built binaries (Linux x86_64, macOS arm64+x86_64, Windows x86_64) via GitHub Actions.
 - `cairn.tools` hosting: **GitHub Pages with custom domain (CNAME)**. Zero ongoing cost, handles static JSON at `.well-known/lexicons/` paths with correct `Content-Type` (configured via `.nojekyll` + proper file extensions, or via a minimal build step that emits files with correct MIME types).
 - README contents: install, quickstart, **Production Checklist**, security caveats, out-of-scope list, comparison to Ozone/Skyware, contribution guide, **§4.2 trust-chain disclosures prominently placed**, observed network rate limits (§6.6), unsigned-binaries friction note (see below).
@@ -740,14 +740,14 @@ Cairn v1 cannot ship until all of these are true:
 These are not pass/fail but are explicitly checked before cutting a release candidate:
 
 - **First external installer.** One named person other than Chrys has installed Cairn from a release-candidate branch and successfully emitted a verifying label. Name the person before the README-quickstart issue in §21 (the first-external-installer issue); brief them on what to test; give them an ETA. Their feedback is a pre-release gate against a branch, not a post-release verification against `main`.
-- **Adversarial review cycles have all been run and findings resolved to author satisfaction.** "Resolved" means: addressed in the doc or code, explicitly declined with a recorded rationale, or deferred to a v1.1+ issue with a link. Each round's findings are tracked as a crosslink issue so the disposition is visible.
+- **Adversarial review cycles have all been run and findings resolved to author satisfaction.** "Resolved" means: addressed in the doc or code, explicitly declined with a recorded rationale, or deferred to a v1.1+ issue with a link. Each round's findings are tracked as a chainlink issue so the disposition is visible.
 - **Production Checklist dry-run.** Chrys themselves (or the first external installer, if that's arranged) has walked through the Production Checklist end-to-end against a fresh deployment. This is the stopwatch for the 30-minute quickstart plus the full operator-hardening path.
 
 The signals exist because they're real release-quality indicators. They are soft gates because each depends on external people or judgment that cannot be made fully mechanical. Labeling them as soft rather than hard keeps the release-decision honest: if the external tester never appears, the release-decision is Chrys's call, not an indefinite wait.
 
 ## 17. Open Questions
 
-1. ~~Crate name at publish time.~~ **Settled:** `cairn-labeler` on crates.io (bare `cairn` is squatted); binary name remains `cairn` via `[[bin]]` target.
+1. **Crate name on crates.io.** Currently shipping as `cairn-mod` (the name held by the scaffold). The bare `cairn` is placeholder-squatted; a claim attempt via help@crates.io is a low-priority post-v1 follow-up. If successful, rename and publish a 1.x move that re-exports from the new name for one release cycle. Binary name remains `cairn` via the `[[bin]]` target regardless of crate-name outcome.
 2. Retention default tuning (180 days is a first guess).
 3. Report rate limit (10/hour/DID is a first guess).
 4. Transparency-record format for v1.1 (decided before v1.1 kickoff).
@@ -797,7 +797,7 @@ Order of operations (each step waits for the previous to succeed):
 4. **GitHub Release published.** Release notes attach binaries + SHA-256 checksums. Uses CHANGELOG v1.0.0 entry as the body.
 5. **`cairn.tools` deployed.** Install instructions point at the now-published version. `.well-known/lexicons/` bundle live.
 6. **Announcement posted** to prepared surfaces.
-7. **Post-release issue opened in crosslink** for tracking any week-1 feedback and hotfix coordination.
+7. **Post-release issue opened in chainlink** for tracking any week-1 feedback and hotfix coordination.
 
 ### 19.3 Failure modes and rollback
 
@@ -809,10 +809,10 @@ Order of operations (each step waits for the previous to succeed):
 ### 19.4 Week-1 post-release
 
 1. Monitor GitHub issues daily.
-2. Check crosslink for logged issue patterns.
+2. Check chainlink for logged issue patterns.
 3. Respond to security-sensitive reports within 48 hours (see §20 SLA).
 4. Defer non-urgent feature requests to v1.1 planning, not same-week fixes.
-5. Hold a retrospective entry in crosslink: what slipped, what worked, what v1.1 needs.
+5. Hold a retrospective entry in chainlink: what slipped, what worked, what v1.1 needs.
 
 ## 20. Maintenance & Disclosure
 
@@ -822,7 +822,7 @@ Cairn is a solo-maintained project with a real dependency chain (Hideaway, futur
 
 A `SECURITY.md` at the repo root contains:
 
-- **Contact:** a dedicated email address (not a personal one) — e.g., `security@cairn.tools`. Email forwarding to the maintainer is configured via the domain registrar.
+- **Contact:** `security@mod.cairn.tools` — a dedicated email address (not a personal one), subdomain-scoped to `mod.cairn.tools` so mail setup doesn't gate on apex-domain DNS and so other `cairn.tools` subprojects can configure their own contacts independently. Forwarded to the maintainer via the domain registrar.
 - **Disclosure timeline:** acknowledge within 48 hours. Coordinated-disclosure period of 90 days by default, negotiable.
 - **Scope:** signing-key handling, auth verification paths, label-integrity issues, DoS vectors affecting operators. Report-content leaks. Anything in §12.
 - **Out of scope:** bugs in dependencies (report upstream); issues only reachable via operator negligence (host compromise, leaked config).
@@ -872,7 +872,7 @@ Issues, in dependency order. Estimates are in "evenings" (~2-3 focused hours eac
 21. **Rustdoc pass** (1 evening): every public item commented; `cargo doc --no-deps --all-features` clean.
 22. **`examples/` directory** (1 evening): minimum 2 example programs demonstrating common flows.
 23. **`cairn.tools` landing page** (1 evening): GitHub Pages, install instructions, link to docs, `.well-known/lexicons/` routing.
-24. **OSS table-stakes files** (1 evening): LICENSE-MIT + LICENSE-APACHE, CONTRIBUTING.md, CODE_OF_CONDUCT.md (Contributor Covenant), SECURITY.md, CHANGELOG.md (Keep a Changelog format with v1.0.0 entry skeleton), issue templates, MAINTAINERS.md.
+24. **OSS table-stakes files** (1 evening): LICENSE-MIT + LICENSE-APACHE, CONTRIBUTING.md, CODE_OF_CONDUCT.md (Contributor Covenant), SECURITY.md, CHANGELOG.md (Keep a Changelog format; ships with an `[Unreleased]` section only — dated version entries are added by the release workflow at publish time), issue templates, MAINTAINERS.md.
 25. **Adversarial review rounds 4 and 5 follow-up fixes** — *already complete before implementation began; merged into this doc. Included here for historical completeness, not as an open issue.*
 26. **CI hardening** (1 evening): verify release workflow on clean runners for every target; `cargo sqlx prepare --check`; dry-run the release procedure on a test tag.
 27. **Release workflow** (1–2 evenings — see §19): GitHub Actions, binary builds with checksums, crates.io publish with `--dry-run` first, `cairn.tools` deploy, announcement post drafts, rollback procedure documented.
