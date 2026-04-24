@@ -11,6 +11,10 @@ community moderation.
 <!-- TODO (#27 CI hardening): GitHub Actions badge once workflows exist. -->
 <!-- TODO (#28 release workflow): crates.io + docs.rs badges once published. -->
 
+> **Latest stable release:** [v1.0.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.0.0) · install with `cargo install cairn-mod`
+>
+> The `main` branch contains active development toward the next release. For production deployments, pin to a released version.
+
 ## What is Cairn?
 
 Cairn is a standalone ATProto labeler server. It publishes a
@@ -26,10 +30,11 @@ than Skyware; it does not try to be either.
 
 ## Status
 
-**v1.0 has been released.** The technical surface is code-complete —
-see the [tracker](https://github.com/skydeval/cairn-mod/issues) for
-remaining docs + release work. v1.1 plans (review queue, richer
-admin API, key rotation) live in the design doc's §18 roadmap.
+**v1.0.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.0.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.0.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
+
+**v1.1 is in active development on `main`.** Scope includes `/health` and `/ready` endpoints, a moderator management CLI, CI security scanning, and subscribeLabels retention.
+
+Production deployments should pin to the stable release, not the `main` branch.
 
 ## Quickstart
 
