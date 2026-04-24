@@ -4,7 +4,7 @@ This file names the people currently responsible for `cairn-mod`.
 
 ## Primary maintainer
 
-- **Chrys** — [@skydeval](https://github.com/skydeval)
+- [@skydeval](https://github.com/skydeval)
 
 ## Adding maintainers
 

@@ -7,7 +7,7 @@
 **Language:** Rust
 **Status:** Draft
 **Methodology:** VDD/IAR
-**Author:** Chrys
+**Author:** skydeval
 
 ---
 
@@ -739,11 +739,11 @@ Cairn v1 cannot ship until all of these are true:
 
 These are not pass/fail but are explicitly checked before cutting a release candidate:
 
-- **First external installer.** One named person other than Chrys has installed Cairn from a release-candidate branch and successfully emitted a verifying label. Name the person before the README-quickstart issue in §21 (the first-external-installer issue); brief them on what to test; give them an ETA. Their feedback is a pre-release gate against a branch, not a post-release verification against `main`.
+- **First external installer.** One named person other than skydeval has installed Cairn from a release-candidate branch and successfully emitted a verifying label. Name the person before the README-quickstart issue in §21 (the first-external-installer issue); brief them on what to test; give them an ETA. Their feedback is a pre-release gate against a branch, not a post-release verification against `main`.
 - **Adversarial review cycles have all been run and findings resolved to author satisfaction.** "Resolved" means: addressed in the doc or code, explicitly declined with a recorded rationale, or deferred to a v1.1+ issue with a link. Each round's findings are tracked as a chainlink issue so the disposition is visible.
-- **Production Checklist dry-run.** Chrys themselves (or the first external installer, if that's arranged) has walked through the Production Checklist end-to-end against a fresh deployment. This is the stopwatch for the 30-minute quickstart plus the full operator-hardening path.
+- **Production Checklist dry-run.** skydeval themselves (or the first external installer, if that's arranged) has walked through the Production Checklist end-to-end against a fresh deployment. This is the stopwatch for the 30-minute quickstart plus the full operator-hardening path.
 
-The signals exist because they're real release-quality indicators. They are soft gates because each depends on external people or judgment that cannot be made fully mechanical. Labeling them as soft rather than hard keeps the release-decision honest: if the external tester never appears, the release-decision is Chrys's call, not an indefinite wait.
+The signals exist because they're real release-quality indicators. They are soft gates because each depends on external people or judgment that cannot be made fully mechanical. Labeling them as soft rather than hard keeps the release-decision honest: if the external tester never appears, the release-decision is skydeval's call, not an indefinite wait.
 
 ## 17. Open Questions
 
