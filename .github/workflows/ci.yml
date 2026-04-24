@@ -5,10 +5,20 @@ on:
     branches: [main]
   pull_request:
 
+# OS matrix is Ubuntu-only by design. Cairn's §5.1 credential file
+# invariants (mode 0o600 + owner-UID match via rustix::process::geteuid)
+# and §5.3 session-file handling require POSIX semantics. Testing on
+# macOS is feasible but buys nothing given the tests exercise the same
+# Unix syscalls; Windows would require gating large swaths of tests
+# behind #[cfg(unix)] with dedicated mock paths we don't have.
+
 env:
   CARGO_TERM_COLOR: always
   # All sqlx query macros resolve against the committed `.sqlx/` cache.
   # Regenerate with `cargo sqlx prepare` after schema or query changes.
+  # Drift surfaces as a compile error in clippy + test jobs (explicit
+  # `cargo sqlx prepare --check` would add a friendlier error message
+  # but no safety — the implicit enforcement is sufficient).
   SQLX_OFFLINE: "true"
 
 jobs:
@@ -20,6 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -30,6 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -38,4 +50,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all-features
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets --all-features
+
+  doc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    env:
+      # Promotes rustdoc warnings (missing_docs, broken intra-doc
+      # links, bare URLs) to errors. Coverage + cleanliness were
+      # closed out in #11 / 3c34a7a; this gate prevents regression.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+
+  msrv:
+    # MSRV (minimum supported Rust version) matches Cargo.toml's
+    # `rust-version = "1.88"`. Only build + test run on MSRV —
+    # clippy and fmt are intentionally absent because their lint
+    # set churns across Rust versions and pinning them to 1.88
+    # would flag legitimate stable-only lints as MSRV failures.
+    # Coverage split: stable enforces lints (fmt + clippy + doc),
+    # MSRV enforces "does it still compile and pass tests here."
+    name: test-msrv (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --all-features
+      - run: cargo test --all-targets --all-features

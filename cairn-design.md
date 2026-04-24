@@ -698,7 +698,7 @@ Cairn v1 ships as a focused release: protocol-correct, self-contained, and notab
 - **Binary signing (decision):** macOS and Windows binaries are **unsigned**. README documents the Gatekeeper ("cannot verify developer" — `xattr -d com.apple.quarantine cairn` or right-click-open) and SmartScreen ("unrecognized publisher") friction. SHA-256 checksums are published alongside binaries in each GitHub Release for verification. Signing with Apple Developer ($99/yr) and Windows EV cert (several hundred/yr) is a v1.1+ consideration if adoption justifies the cost.
 - **Semver commitment:** library crate (`cairn` as a Rust dependency, if anyone consumes it that way) follows strict semver. CLI output format and admin XRPC surface follow strict semver — breaking changes require a major-version bump. DB schema migrations run automatically on upgrade via embedded `sqlx migrate`; the operator does not run a separate command. Internal implementation details (module structure, private types) are not covered by semver.
 - **CI strict mode:** `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings` (default lint groups only, not pedantic/nursery), `cargo fmt --check`, `cargo sqlx prepare --check` to keep compile-time query artifacts fresh.
-- MSRV: Rust 1.85+ (inherited from `proto-blue` edition 2024).
+- MSRV: Rust 1.88+ (inherited from `proto-blue` edition 2024).
 - **Cross-platform build:** Linux x86_64 (GNU and musl static), Linux aarch64, macOS arm64 + x86_64, Windows x86_64. Built via GitHub Actions with `cross` or `cargo-zigbuild` where cross-compilation is needed. Build procedure verified end-to-end on clean runners before release (not just "works on my machine").
 - Detailed release procedure and rollback policy: see §19 (Release Runbook).
 
@@ -708,7 +708,7 @@ Cairn depends on `proto-blue` for ATProto primitives (DAG-CBOR/DRISL, CIDs, Mult
 
 **Path A (preferred):** `proto-blue` is on crates.io at release time.
 
-**Path B (contingency):** vendor the needed subset (DRISL canonical encoding, Multikey encoding/decoding, k256 with RFC 6979 + low-S, DID doc parsing including `did:web` path-component handling). **Honest scope estimate:** 2–4 weekends of vendoring, parity-testing, and edge-case debugging. DRISL edge cases (integer-encoding boundaries, map-key byte ordering, empty-map-vs-missing-field) are the specific risk. **MSRV under Path B:** Cairn holds the same MSRV (Rust 1.85+) whether depending on `proto-blue` or vendoring its subset. Vendored code will be updated to match proto-blue's MSRV if upstream advances, to preserve straightforward re-adoption.
+**Path B (contingency):** vendor the needed subset (DRISL canonical encoding, Multikey encoding/decoding, k256 with RFC 6979 + low-S, DID doc parsing including `did:web` path-component handling). **Honest scope estimate:** 2–4 weekends of vendoring, parity-testing, and edge-case debugging. DRISL edge cases (integer-encoding boundaries, map-key byte ordering, empty-map-vs-missing-field) are the specific risk. **MSRV under Path B:** Cairn holds the same MSRV (Rust 1.88+) whether depending on `proto-blue` or vendoring its subset. Vendored code will be updated to match proto-blue's MSRV if upstream advances, to preserve straightforward re-adoption.
 
 **Vendored-code maintenance policy:** reviewed monthly against upstream; security fixes ported within 7 days; non-security changes batched quarterly.
 

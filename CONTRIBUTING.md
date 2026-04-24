@@ -8,7 +8,7 @@ are answered there.
 
 ## Prerequisites
 
-- **Rust toolchain 1.85 or newer.** The crate's minimum supported Rust
+- **Rust toolchain 1.88 or newer.** The crate's minimum supported Rust
   version is pinned in [`Cargo.toml`](Cargo.toml) (`rust-version`). Do
   not file bugs against older toolchains.
 - **`sqlx-cli`**, needed for offline query cache regeneration. Install

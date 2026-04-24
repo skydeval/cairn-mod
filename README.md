@@ -5,7 +5,7 @@ single binary, SQLite-backed, designed for small and mid-scale
 community moderation.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![MSRV: 1.85](https://img.shields.io/badge/MSRV-1.85-informational.svg)](Cargo.toml)
+[![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-informational.svg)](Cargo.toml)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
 <!-- TODO (#27 CI hardening): GitHub Actions badge once workflows exist. -->
@@ -38,7 +38,7 @@ service record, responding to `GET /.well-known/did.json`.
 
 ### Prerequisites
 
-- **Rust 1.85+** — install via [rustup](https://rustup.rs).
+- **Rust 1.88+** — install via [rustup](https://rustup.rs).
 - **A DID for the labeler** — either `did:web:your.host` or
   `did:plc:...`. How to obtain one is out of scope; the design doc
   §5.1 has the context.
