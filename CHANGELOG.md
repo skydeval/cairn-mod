@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+- README quickstart config missing operator.pds_url field (#18)
+- Consolidate maintainer identity as @skydeval (#16)
 
 ### Fixed
 
