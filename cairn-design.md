@@ -567,6 +567,50 @@ Two unauthenticated HTTP endpoints for orchestrator integration (Kubernetes live
 - `/ready` returns 503 with `checks.label_stream = "degraded"` when the lease heartbeat is stale past `LEASE_STALE_MS`.
 - Both endpoints are reachable without an `Authorization` header (unauthenticated by design).
 
+### F15. Dependency security scanning in CI (v1.1)
+
+Two tools enforce supply-chain posture on every change to `main` and a third trigger catches out-of-band advisory publications against already-pinned deps.
+
+**Tools and triggers:**
+
+- **`cargo-audit`** — scans `Cargo.lock` against the RustSec advisory database. Runs as a CI job on push to `main` + every PR; also runs on a daily `cron` schedule (`.github/workflows/security-audit.yml`) that opens a tracking issue when advisories fire. The scheduled run exists because the advisory DB updates out-of-band — a dep pinned today may have a new advisory tomorrow without any local commit.
+- **`cargo-deny`** — runs four independent checks (advisories, licenses, bans, sources) configured by `deny.toml` at repo root. CI job on push to `main` + every PR.
+
+Both tools are pinned to explicit versions (see CONTRIBUTING.md's **Security scanning tools** section — currently `cargo-audit 0.22.1` / `cargo-deny 0.19.4`). The pinning rationale: the scanner is part of the security posture, so its version should be auditable and change deliberately, not silently. Bumps are deliberate commits, not drive-bys.
+
+**Hard-fail posture:**
+
+All three jobs are blocking. Any advisory not explicitly ignored, any license outside the allowlist, any duplicate crate pattern marked `deny`, any non-crates.io source fails the gate. This was a v1.0 → v1.1 posture upgrade: #13 originally planned `continue-on-error` pending a triage policy; deferring the gate until the policy existed, then flipping to hard-fail once it did.
+
+**Escape-hatch pattern for accepted risks:**
+
+Hard-fail is only workable if there's a documented way to accept a specific risk. That mechanism is:
+
+1. In `deny.toml`, add an entry to `[[advisories.ignore]]` with an `id` and a `reason` naming the risk, the reachability analysis, and the fix availability.
+2. Add a `# Review: YYYY-MM-DD` comment above the entry with a date ≤ 180 days out. `cargo-deny 0.19` doesn't support a structured `expiration` field, so the review date lives in the comment form. A `grep -n 'Review:' deny.toml` is the human audit tool on each review cycle.
+3. If the advisory also fires in `cargo-audit` (it may not — see asymmetry note below), add the ID to the `--ignore` flag in both `.github/workflows/ci.yml`'s audit step and `.github/workflows/security-audit.yml`'s audit step. IDs MUST mirror between the three locations; drift means one tool opens issues for risks another accepts.
+
+**Tool asymmetry worth documenting:**
+
+`cargo-deny` and `cargo-audit` share the RustSec advisory database but disagree on scope. `cargo-deny` respects Cargo feature flags when building its active-dep graph — dependencies gated behind features we don't enable are NOT evaluated for advisories. `cargo-audit` scans `Cargo.lock` unconditionally, flagging anything that's present regardless of feature activation. An advisory that appears ONLY in `cargo-audit` output belongs as an `--ignore` flag in the workflow YAMLs, NOT in `deny.toml`'s ignore list — adding it to `deny.toml` produces an `advisory-not-detected` warning. `deny.toml`'s comment header documents this so a future contributor doesn't re-derive it.
+
+**Worked example — the rsa ignore:**
+
+v1.1's CI launched with exactly one accepted advisory: [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (rsa 0.9.x Marvin timing sidechannel, medium severity, no fix available). `sqlx-macros-core` unconditionally imports all sqlx driver crates for macro expansion, including `sqlx-mysql` which transitively depends on `rsa`. Cairn builds `sqlx` with `default-features = false` and enables only `{ runtime-tokio, sqlite, macros, migrate }` — `sqlx-mysql`'s code never links into the binary. `cargo-deny` recognizes this via feature-flag analysis and stays silent; `cargo-audit` does not and flags the advisory. Ignore is applied in both `.github/workflows/ci.yml` and `.github/workflows/security-audit.yml`; `deny.toml`'s `ignore` list is empty and documents why.
+
+**Scheduled-run issue behavior:**
+
+When the daily scheduled `cargo-audit` fires on a new advisory, it opens an issue titled `Daily audit: advisories detected on main (YYYY-MM-DD)` with the `security` label and the full audit output as the body. Same-day re-runs gracefully noop because `gh issue create` refuses the duplicate title. Persistent advisories produce one issue per day until acknowledged + resolved (either fixed in a commit or added to the ignore list with dated rationale).
+
+**Verification:**
+
+- `cargo audit --deny warnings --ignore <IDs>` passes locally with the same `--ignore` list CI uses.
+- `cargo deny check` passes all four categories locally.
+- `deny.toml` contains an `ignore` comment header explaining the asymmetry with `cargo-audit`'s CLI flag.
+- Every entry in `deny.toml`'s `[[advisories.ignore]]` has a `Review: YYYY-MM-DD` comment ≤ 180 days out.
+- CI's `audit` and `deny` jobs block merges on any failure.
+- The scheduled workflow's `gh issue create` has `issues: write` permission.
+
 ## 8. Lexicons
 
 Cairn defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.

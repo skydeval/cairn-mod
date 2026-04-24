@@ -292,6 +292,21 @@ Cairn exposes two unauthenticated endpoints for orchestrators:
   intentionally failed (e.g., stop the writer, or point at an
   unreachable DB).
 
+### Dependency security scanning ([§F15](cairn-design.md#f15-dependency-security-scanning-in-ci-v11))
+
+- [ ] **Most recent CI security scan on `main` is green.** `cargo-audit`
+  and `cargo-deny` both run on push to `main` and every PR; a scheduled
+  daily `cargo-audit` opens a tracking issue when advisories land
+  out-of-band. Before pointing real subscribers at the instance, verify
+  the latest run on the version you're deploying passed.
+- [ ] **No advisories ignored without dated rationale and review date.**
+  Open `deny.toml` and inspect `[[advisories.ignore]]`. Each entry must
+  carry a `reason` naming why the risk is accepted, and a
+  `Review: YYYY-MM-DD` comment ≤ 180 days out. `grep -n 'Review:' deny.toml`
+  is the one-command audit. Entries without a review date, or with
+  dates in the past, are a hygiene failure — either renew the review
+  or remove the ignore.
+
 ## Trust-chain disclosures
 
 Operators AND subscribers should understand what Cairn's protocol
