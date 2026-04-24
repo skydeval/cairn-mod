@@ -35,6 +35,18 @@ use tempfile::TempDir;
 
 const OPERATOR_DID: &str = "did:plc:mockmoderator0000000000000";
 
+/// Parsed form of an `audit_log.reason` JSON payload for
+/// `service_record_published` actions. Mirrors the schema docblock
+/// at `publish_service_record::AUDIT_REASON_SERVICE_RECORD`.
+/// Tests parse via serde so `content_changed` asserts land on the
+/// literal boolean rather than a string-contains check.
+#[derive(Debug, serde::Deserialize)]
+struct AuditReason {
+    cid: String,
+    content_hash_hex: String,
+    content_changed: bool,
+}
+
 async fn setup_pool(dir: &TempDir) -> Pool<Sqlite> {
     let path = dir.path().join("cairn.db");
     storage::open(&path).await.unwrap()
@@ -131,33 +143,72 @@ async fn first_publish_writes_record_and_persists_state() {
     let outcome = publish_service_record::publish(&pool, &config, &session_path)
         .await
         .expect("publish");
-    match outcome {
+    let published_cid = match outcome {
         PublishOutcome::Published { cid, .. } => {
             assert!(cid.starts_with("bafy-mock-"), "got {cid}");
+            cid
         }
         other => panic!("expected Published, got {other:?}"),
-    }
+    };
 
     // Exactly one putRecord call.
     assert_eq!(pds.state.put_record_calls.load(Ordering::SeqCst), 1);
 
-    // labeler_config populated.
+    // labeler_config populated with the published CID and a hash.
     let cid: String =
         sqlx::query_scalar!("SELECT value FROM labeler_config WHERE key = 'service_record_cid'")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(cid.starts_with("bafy-mock-"));
+    assert_eq!(cid, published_cid);
+    let stored_hash: String = sqlx::query_scalar!(
+        "SELECT value FROM labeler_config WHERE key = 'service_record_content_hash'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
-    // Audit row with the expected action + actor.
-    let audit =
-        sqlx::query!("SELECT action, actor_did, outcome FROM audit_log ORDER BY id DESC LIMIT 1")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    // #20 invariant: every invocation writes exactly one audit row.
+    let audit_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'service_record_published'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "one audit row per publish invocation");
+
+    // Audit row shape + reason-JSON contents.
+    let audit = sqlx::query!(
+        "SELECT action, actor_did, outcome, target_cid, reason
+         FROM audit_log
+         WHERE action = 'service_record_published'
+         ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(audit.action, "service_record_published");
     assert_eq!(audit.actor_did, OPERATOR_DID);
     assert_eq!(audit.outcome, "success");
+    assert_eq!(audit.target_cid.as_deref(), Some(published_cid.as_str()));
+
+    // Parse reason JSON via serde — literal boolean match per #20 note.
+    let reason: AuditReason = serde_json::from_str(
+        audit.reason.as_deref().expect("reason json present"),
+    )
+    .expect("reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
+    assert!(
+        reason.content_changed,
+        "first publish is content_changed=true by construction of the publish-path branch"
+    );
+    assert_eq!(
+        reason.cid, published_cid,
+        "audit reason cid matches published cid"
+    );
+    assert_eq!(
+        reason.content_hash_hex, stored_hash,
+        "audit reason hash matches stored hash"
+    );
 
     drop(dir);
 }
@@ -174,6 +225,17 @@ async fn republish_with_identical_config_is_noop() {
         .await
         .unwrap();
     assert_eq!(pds.state.put_record_calls.load(Ordering::SeqCst), 1);
+    let first_cid: String =
+        sqlx::query_scalar!("SELECT value FROM labeler_config WHERE key = 'service_record_cid'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let first_hash: String = sqlx::query_scalar!(
+        "SELECT value FROM labeler_config WHERE key = 'service_record_content_hash'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     // Second publish with same config → NoChange, no extra putRecord.
     let outcome = publish_service_record::publish(&pool, &config, &session_path)
@@ -184,6 +246,51 @@ async fn republish_with_identical_config_is_noop() {
         pds.state.put_record_calls.load(Ordering::SeqCst),
         1,
         "no extra PDS round-trip on idempotent republish"
+    );
+
+    // #20 invariant: skip path audits too — two invocations → two rows.
+    let audit_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'service_record_published'"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit_count, 2,
+        "each invocation writes one audit row (publish + skip both audit)"
+    );
+
+    // Most recent row is the skip's. Assert target_cid, reason shape,
+    // and content_changed=false as a literal boolean.
+    let skip_audit = sqlx::query!(
+        "SELECT target_cid, reason
+         FROM audit_log
+         WHERE action = 'service_record_published'
+         ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        skip_audit.target_cid.as_deref(),
+        Some(first_cid.as_str()),
+        "skip audit echoes prior cid in target_cid, not null"
+    );
+    let reason: AuditReason = serde_json::from_str(
+        skip_audit.reason.as_deref().expect("reason json present"),
+    )
+    .expect("skip reason parses per AUDIT_REASON_SERVICE_RECORD docblock");
+    assert!(
+        !reason.content_changed,
+        "skip path records content_changed=false (literal bool)"
+    );
+    assert_eq!(
+        reason.cid, first_cid,
+        "skip audit reason echoes prior cid, not empty/null — audit integrity"
+    );
+    assert_eq!(
+        reason.content_hash_hex, first_hash,
+        "skip audit reason echoes the matched hash"
     );
 
     drop(dir);

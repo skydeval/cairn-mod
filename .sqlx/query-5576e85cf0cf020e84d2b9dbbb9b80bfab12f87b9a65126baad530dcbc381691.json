@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action, actor_did, outcome, target_cid, reason\n         FROM audit_log\n         WHERE action = 'service_record_published'\n         ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_cid",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "5576e85cf0cf020e84d2b9dbbb9b80bfab12f87b9a65126baad530dcbc381691"
+}
