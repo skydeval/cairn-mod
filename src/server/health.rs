@@ -47,7 +47,7 @@
 //!   heartbeating. Flipped to `degraded` if the writer's
 //!   `shutdown_signal` has fired, or if
 //!   `server_instance_lease.last_heartbeat` is older than
-//!   [`LEASE_STALE_MS`] (60s). Reuses the lease-staleness constant
+//!   `LEASE_STALE_MS` (60s). Reuses the lease-staleness constant
 //!   deliberately: /ready's "degraded" threshold aligns with the
 //!   lease-handoff boundary, so there is exactly one system-wide
 //!   notion of "this writer is dead." Two different thresholds would
