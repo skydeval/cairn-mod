@@ -84,6 +84,24 @@ jobs:
       - run: cargo build --all-targets --all-features
       - run: cargo test --all-targets --all-features
 
+  deny:
+    # cargo-deny: advisories + licenses + bans + sources. Config in
+    # deny.toml at repo root; see §F15 for the policy. Runs alongside
+    # cargo-audit — the two overlap on advisories but cargo-deny
+    # respects feature-gated deps and adds licenses / bans / sources
+    # coverage. The version is pinned to the one documented in
+    # CONTRIBUTING.md's Security scanning tools section; bump both
+    # together.
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny --version 0.19.4
+      - run: cargo deny check
+
   audit:
     # cargo-audit: scan Cargo.lock for known advisories. Hard-fail:
     # any advisory that isn't explicitly ignored blocks merge.

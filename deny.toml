@@ -1,0 +1,84 @@
+# cargo-deny configuration for cairn-mod (#13, §F15).
+#
+# Four check categories — each tuned per the policy decisions in §F15:
+#   advisories: hard-fail; ignores require dated rationale + review.
+#   licenses:   allowlist of permissive OSI licenses in the tree today.
+#   bans:       multiple-versions = warn (many upstream-forced dupes).
+#   sources:    crates.io only; no git deps allowed without explicit opt-in.
+#
+# Bumped alongside the pinned cargo-deny version in CONTRIBUTING.md's
+# Security scanning tools section.
+
+[advisories]
+version = 2
+# `yanked = deny` ensures a yanked dep in Cargo.lock fails CI —
+# typically signals a stale lockfile in a branch, not a live
+# incident.
+yanked = "deny"
+
+# cargo-deny 0.19.4's `[[advisories.ignore]]` schema supports only
+# `id` and `reason` — no structured `expiration` field. Review dates
+# live in the comment above each entry instead; a `grep -n 'Review:'
+# deny.toml` is the human audit tool.
+#
+# Every ignored advisory MUST carry:
+#   - a `reason` explaining why the risk is accepted
+#   - a `Review: YYYY-MM-DD` comment (≤ 180 days out) as the
+#     next-touch date; a bump, drop, or renewed review lands at
+#     or before that date
+#
+# Note on tool asymmetry: cargo-deny respects Cargo feature flags
+# when building its active-dep graph — dependencies gated behind
+# features we don't enable are NOT evaluated for advisories.
+# cargo-audit scans Cargo.lock unconditionally and will flag the
+# same feature-gated deps. Any advisory ID that appears ONLY in
+# cargo-audit output (not cargo-deny) belongs as an --ignore flag
+# in .github/workflows/ci.yml's cargo-audit step, NOT in this
+# ignore list — adding it here produces an "advisory-not-detected"
+# warning because cargo-deny correctly considers it unreachable.
+# The current case: RUSTSEC-2023-0071 (rsa via sqlx-macros-core's
+# unconditional driver imports) is ignored in ci.yml but omitted
+# from this list.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive OSI set covering the current tree. Additions require a
+# rationale in the PR that adds them.
+confidence-threshold = 0.93
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# The LLVM-exception WITH clause on Apache-2.0 shows up in unicode-ident;
+# the OR-alternative Apache-2.0 satisfies the allow list, so no explicit
+# clarification is required. Documented here in case a future bump
+# changes that.
+
+[bans]
+# Default posture: warn on duplicates rather than deny. Several
+# upstream-forced duplicates (base64, data-encoding, futures-channel,
+# wit-bindgen via wasip2/wasip3) can't be resolved without forking
+# or pinning deps we don't own. Strict deny here would trade CI
+# friction for little real security signal.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+# No [[bans.deny]] or [[bans.skip]] at launch — add per-incident
+# only when a specific supply-chain concern justifies it.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# allow-git intentionally omitted — no direct git deps; adding one
+# requires a deliberate amendment here and a rationale in the PR.
