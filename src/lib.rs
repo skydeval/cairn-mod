@@ -23,6 +23,7 @@ pub mod config;
 pub mod credential_file;
 pub mod error;
 pub mod label;
+pub(crate) mod moderators;
 pub mod report;
 pub mod serve;
 pub mod server;

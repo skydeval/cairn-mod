@@ -16,18 +16,10 @@ use serde::Serialize;
 use sqlx::{Pool, Sqlite};
 
 use crate::auth::AuthContext;
+use crate::moderators::Role;
 use crate::writer::WriterHandle;
 
 use super::AdminConfig;
-
-/// Role values persisted in `moderators.role`. The schema CHECK
-/// constrains the column to exactly these two strings, so any other
-/// value in a read means corrupt data, not an unknown role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Role {
-    Mod,
-    Admin,
-}
 
 /// Auth + role + CORS outcome for a single admin request. Handlers
 /// read `caller_did` for audit attribution and branch on `role` for
