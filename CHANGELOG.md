@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+
+### Fixed
+
+### Removed
+
+### Security
+
+## [1.0.0] - 2026-04-24
+
+### Added
+
+### Changed
 - Design-doc drift sweep: crate name, security contact, tracker references, CHANGELOG phrasing (#5)
 - Release workflow: manual workflow_dispatch triggers crates.io publish + GitHub Release, with non-blocking post-publish smoke test (#4)
 - CI hardening: rustdoc + MSRV gates, rust-cache; MSRV bumped 1.85→1.88 (#3)
