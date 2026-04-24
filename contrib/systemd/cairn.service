@@ -1,0 +1,101 @@
+# Cairn labeler — systemd service unit.
+#
+# Install:
+#   sudo useradd --system --home-dir /var/lib/cairn --shell /usr/sbin/nologin cairn
+#   sudo install -m 0755 -o root -g root target/release/cairn /usr/local/bin/cairn
+#   sudo install -Dm 0644 contrib/systemd/cairn.service /etc/systemd/system/cairn.service
+#   sudo install -dm 0750 -o root -g cairn /etc/cairn
+#   sudo install -m 0640 -o root -g cairn cairn.toml /etc/cairn/cairn.toml
+#   # Signing key goes into StateDirectory, not /etc/cairn (see NOTE below):
+#   sudo install -dm 0700 -o cairn -g cairn /var/lib/cairn
+#   sudo install -m 0600 -o cairn -g cairn signing-key.hex /var/lib/cairn/signing-key.hex
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cairn
+#
+# Config-file path and bind address live in cairn.toml. This unit assumes
+# the operator configured `db_path = "/var/lib/cairn/cairn.db"` and
+# `signing_key_path = "/var/lib/cairn/signing-key.hex"`.
+
+[Unit]
+Description=Cairn ATProto labeler
+Documentation=https://github.com/skydeval/cairn-mod
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# NOTE: Type=simple is honest for v1 — Cairn doesn't currently call
+# sd_notify(READY=1), so Type=notify would deadlock. When sd_notify
+# support lands, switch to Type=notify for cleaner startup visibility.
+Type=simple
+
+User=cairn
+Group=cairn
+
+# NOTE: DynamicUser=no is REQUIRED — Cairn's §5.1 signing-key ownership
+# check (credential_file::check_mode_and_owner) compares the key file's
+# UID against the running effective UID. DynamicUser=yes would give
+# Cairn a fresh UID on every restart, so the key file (owned by the
+# static cairn UID) would fail the owner check. Do not change without
+# a matching change to the signing-key loader.
+DynamicUser=no
+
+ExecStart=/usr/local/bin/cairn serve --config /etc/cairn/cairn.toml
+
+# NOTE: RestartPreventExitStatus=11 matches Cairn's LEASE_CONFLICT exit
+# code (src/cli/error.rs). If another Cairn instance holds the §F5
+# single-instance lease, a restart loop is strictly wrong — the loser
+# can't acquire the lease without human intervention. Stop instead.
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=11
+
+# systemd-managed paths. StateDirectory gives /var/lib/cairn owned by
+# cairn:cairn with mode 0750 — use it for the SQLite DB and the
+# signing key file. ConfigurationDirectory gives /etc/cairn for the
+# TOML config file.
+StateDirectory=cairn
+StateDirectoryMode=0750
+ConfigurationDirectory=cairn
+ConfigurationDirectoryMode=0750
+
+# Sandboxing. All are safe for Cairn's workload (a network service
+# reading SQLite + spawning no subprocesses).
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+NoNewPrivileges=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# NOTE: MemoryDenyWriteExecute=true is safe because Rust binaries
+# don't JIT. If a future dependency introduces a JIT (unlikely for
+# Cairn's surface), this needs revisiting.
+MemoryDenyWriteExecute=true
+
+# Drop all capabilities; Cairn doesn't need any.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Only the address families Cairn actually uses.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Syscall filter for a typical network service; Cairn stays within
+# @system-service.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

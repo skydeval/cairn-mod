@@ -1,0 +1,82 @@
+# Cairn labeler — Caddy reverse-proxy + TLS-termination template.
+#
+# Replace `labeler.example.com` with your hostname. Caddy's default
+# `tls` block auto-provisions a certificate via Let's Encrypt (ACME)
+# the first time the site is reached over HTTPS — no cert-bot hooks
+# required. Ensure port 80 + 443 are open.
+#
+# Deploy: drop this file at /etc/caddy/Caddyfile and
+#   sudo systemctl reload caddy
+#
+# Cairn's default bind is 127.0.0.1:3000 (§F13 "expects reverse proxy
+# for TLS"). Adjust the reverse_proxy target below if your cairn.toml
+# sets a different bind_addr.
+
+labeler.example.com {
+	# HSTS — §F13. Signals "HTTPS only for one year" to browsers.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# No-cache on admin endpoints. NOTE: admin responses reflect
+	# mutable moderation state (label lists, report state, audit
+	# log). Intermediary caches could produce stale views that
+	# affect moderation decisions — the §F13 "no-cache headers for
+	# admin endpoints" line exists to prevent that.
+	@admin path /xrpc/tools.cairn.admin.*
+	header @admin Cache-Control "no-store, max-age=0"
+	header @admin Pragma "no-cache"
+
+	# Caddy's reverse_proxy handles WebSocket upgrade automatically
+	# — subscribeLabels (GET /xrpc/com.atproto.label.subscribeLabels)
+	# works through this single directive. No explicit Upgrade/
+	# Connection headers needed (contrast with nginx).
+	reverse_proxy 127.0.0.1:3000
+
+	# --------------------------------------------------------------
+	# Rate limiting (§F13 targets).
+	#
+	# Caddy core does not ship rate-limiting. The §F13-specified
+	# numbers require the third-party `caddy-ratelimit` module
+	# (github.com/mholt/caddy-ratelimit). Install with:
+	#
+	#   xcaddy build --with github.com/mholt/caddy-ratelimit
+	#
+	# ...then uncomment the block below. The template ships with
+	# these commented out so Caddy parses this file without extra
+	# modules installed; nginx.conf in this directory ships them
+	# active by default because nginx has rate-limiting in core
+	# (platform capability difference, not oversight).
+	#
+	# § createReport per-IP: burst 3, rate 10/hour
+	# § subscribeLabels per-IP: 8 concurrent
+	#
+	# @report path /xrpc/com.atproto.moderation.createReport
+	# rate_limit @report {
+	# 	zone cairn_report {
+	# 		key {client_ip}
+	# 		events 10
+	# 		window 1h
+	# 	}
+	# }
+	#
+	# @subscribe path /xrpc/com.atproto.label.subscribeLabels
+	# rate_limit @subscribe {
+	# 	zone cairn_subscribe {
+	# 		key {client_ip}
+	# 		max_events 8
+	# 	}
+	# }
+	# --------------------------------------------------------------
+
+	tls {
+		# Default Caddy ACME issuer (Let's Encrypt production).
+		# For staging during first-run testing, uncomment:
+		# issuer acme {
+		# 	dir https://acme-staging-v02.api.letsencrypt.org/directory
+		# }
+	}
+
+	log {
+		output file /var/log/caddy/cairn.access.log
+		format json
+	}
+}
