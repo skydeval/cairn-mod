@@ -26,3 +26,6 @@
 # .claude/ — DO track these (if manually configured):
 #   .claude/settings.json         — Claude Code project settings
 #   .claude/settings.local.json is per-developer, ignore separately if needed
+# Chainlink runtime artifacts (rules/ tracked, runtime state excluded)
+.chainlink/daemon.log
+.chainlink/daemon.pid
