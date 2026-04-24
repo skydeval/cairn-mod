@@ -29,25 +29,12 @@ For security reports: email **security@mod.cairn.tools** — see
 
 Do not DM maintainers about security issues on public social media.
 
-## Handoff policy
+## Handoff
 
-If `cairn-mod` receives no commits and no issue responses for six
-consecutive months, the project is considered unmaintained. At that
-point the preferred handoff path is transfer of ownership to a
-named party, listed below. This is strictly better than silent
-abandonment.
-
-### Designated handoff target
-
-**TBD — to be named before the v1.0 release.** The design doc
-(§20.4) commits to naming a specific fallback (ideally a Guild or
-ATProto-Rust community member who has accepted the role) before
-v1.0 ships. Until then, this section is a live placeholder; a PR
-filling it in is one of the v1.0 release gates.
-
-If the project is unmaintained AND no handoff target has been
-named, treat the repo as archived — fork freely under the
-dual-license terms, but there is no authoritative upstream.
+Cairn is maintained solely by @skydeval. If the maintainer becomes
+unresponsive for ~6 months, the repo will be archived. Users should
+fork if long-term continuity matters. This policy may change in
+future versions.
 
 ## Updating this file
 
