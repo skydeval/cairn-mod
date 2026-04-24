@@ -1,72 +1,155 @@
 {
-  "allowedTools": [
-    "Bash(tmux *)",
-    "Bash(git worktree *)"
-  ],
+"permissions": {
+    "allow": [
+        "Bash(ls)",
+        "Bash(ls:*)",
+        "Bash(cat)",
+        "Bash(cat:*)",
+        "Bash(pwd)",
+        "Bash(cd:*)",
+        "Bash(which:*)",
+        "Bash(type:*)",
+        "Bash(echo:*)",
+        "Bash(file:*)",
+        "Bash(stat:*)",
+
+        "Bash(grep:*)",
+        "Bash(rg:*)",
+        "Bash(ag:*)",
+        "Bash(find:*)",
+        "Bash(fd:*)",
+        "Bash(tree:*)",
+
+        "Bash(wc:*)",
+        "Bash(head:*)",
+        "Bash(tail:*)",
+        "Bash(sort:*)",
+        "Bash(uniq:*)",
+        "Bash(cut:*)",
+        "Bash(awk:*)",
+        "Bash(sed -n:*)",
+        "Bash(diff:*)",
+
+        "Bash(cargo check:*)",
+        "Bash(cargo build:*)",
+        "Bash(cargo test:*)",
+        "Bash(cargo clippy:*)",
+        "Bash(cargo fmt:*)",
+        "Bash(cargo doc:*)",
+        "Bash(cargo tree:*)",
+        "Bash(cargo search:*)",
+        "Bash(cargo metadata:*)",
+        "Bash(cargo locate-project:*)",
+        "Bash(cargo pkgid:*)",
+        "Bash(cargo --version)",
+        "Bash(cargo sqlx:*)",
+
+        "Bash(git status)",
+        "Bash(git status:*)",
+        "Bash(git diff:*)",
+        "Bash(git log:*)",
+        "Bash(git show:*)",
+        "Bash(git branch:*)",
+        "Bash(git remote:*)",
+        "Bash(git blame:*)",
+        "Bash(git config --get:*)",
+        "Bash(git add:*)",
+        "Bash(git commit:*)",
+
+        "Bash(chainlink:*)",
+        "Bash(xl:*)",
+
+        "Bash(sqlite3 .chainlink/issues.db:*)",
+        "Bash(sqlite3 *.db:*)",
+
+        "Bash(tmux:*)",
+        "Bash(git worktree:*)",
+
+        "Read(//**)",
+        "Glob(**)",
+        "Grep(**)"
+    ],
+    "deny": [
+        "Bash(rm -rf /*)",
+        "Bash(rm -rf ~*)",
+        "Bash(rm -rf *)",
+        "Bash(git push:*)",
+        "Bash(git reset --hard:*)",
+        "Bash(git clean -fd:*)",
+        "Bash(git clean -fdx:*)",
+        "Bash(cargo publish:*)",
+        "Bash(gh:*)",
+        "Bash(curl:*)",
+        "Bash(wget:*)",
+        "Bash(sudo:*)",
+        "Bash(chmod -R:*)",
+        "Bash(chown -R:*)"
+    ]
+},
   "enableAllProjectMcpServers": true,
   "hooks": {
     "PostToolUse": [
       {
+        "matcher": "Write|Edit",
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/post-edit-check.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 5,
-            "type": "command"
+            "timeout": 5
           }
-        ],
-        "matcher": "Write|Edit"
+        ]
       },
       {
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/heartbeat.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 3,
-            "type": "command"
+            "timeout": 3
           }
         ]
       }
     ],
     "PreToolUse": [
       {
+        "matcher": "WebFetch|WebSearch",
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/pre-web-check.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 5,
-            "type": "command"
+            "timeout": 5
           }
-        ],
-        "matcher": "WebFetch|WebSearch"
+        ]
       },
       {
+        "matcher": "Write|Edit|Bash",
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/work-check.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 3,
-            "type": "command"
+            "timeout": 3
           }
-        ],
-        "matcher": "Write|Edit|Bash"
+        ]
       }
     ],
     "SessionStart": [
       {
+        "matcher": "startup|resume",
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/session-start.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 10,
-            "type": "command"
+            "timeout": 10
           }
-        ],
-        "matcher": "startup|resume"
+        ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
+            "type": "command",
             "command": "HOOK=\"$(git rev-parse --show-toplevel 2>/dev/null)/.claude/hooks/prompt-guard.py\"; if [ -f \"$HOOK\" ]; then python3 \"$HOOK\"; else exit 0; fi",
-            "timeout": 5,
-            "type": "command"
+            "timeout": 5
           }
         ]
       }
