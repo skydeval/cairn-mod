@@ -268,10 +268,24 @@ DELETE FROM moderators WHERE did = 'did:plc:example';
 - [ ] **TLS certificate expiry at the reverse proxy** — Caddy
   auto-renews via ACME; nginx + certbot needs its own cron check.
 
-Cairn v1 exposes **no dedicated `/health` or `/ready` endpoint**.
-"Process up + `/.well-known/did.json` returns 200" is the
-available liveness signal. A dedicated health endpoint is tracked
-for a future version.
+### Health probes ([§F14](cairn-design.md#f14-health-and-readiness-probe-endpoints-v11))
+
+Cairn exposes two unauthenticated endpoints for orchestrators:
+
+- [ ] **`GET /health`** — liveness probe. Always returns 200 with
+  `{"status": "ok", "version": "..."}` while the process can
+  answer a request. No dependencies checked. Failure = restart
+  the pod.
+- [ ] **`GET /ready`** — readiness probe. Returns 200 on all-ok,
+  503 on any check failure. Body is identical in both cases and
+  names the individual checks (`database`, `signing_key`,
+  `label_stream`). Failure = stop routing new traffic.
+- [ ] **Verify both endpoints respond correctly against a running
+  instance** before first release. `curl -s http://127.0.0.1:3000/health`
+  should return 200; `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/ready`
+  should return 200 when healthy and 503 when any check is
+  intentionally failed (e.g., stop the writer, or point at an
+  unreachable DB).
 
 ## Trust-chain disclosures
 

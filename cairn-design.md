@@ -526,6 +526,47 @@ Namespace: `tools.cairn.admin.*`. Auth: ATProto service auth (§5).
 - Binary's static resources (migrations, lexicon bundle for `.well-known` endpoints) compiled in.
 - Default port binding documented; Cairn expects reverse proxy for TLS.
 
+### F14. Health and readiness probe endpoints (v1.1)
+
+Two unauthenticated HTTP endpoints for orchestrator integration (Kubernetes livenessProbe / readinessProbe, systemd watchdogs, load-balancer health checks).
+
+**`GET /health`** — liveness probe. Always returns 200 with `{"status": "ok", "version": "<crate version>"}` as long as the process can accept a connection and service a request. No dependencies are checked. A failing liveness probe means "restart the pod," so baking DB or writer checks into it would cause needless pod restarts on transient hiccups that `/ready` already handles by flipping traffic away.
+
+**`GET /ready`** — readiness probe. Returns 200 on all-ok, 503 on any check failure. Body shape identical in both cases:
+
+```json
+{
+  "status": "ok" | "degraded",
+  "version": "<crate version>",
+  "checks": {
+    "database":     "ok" | "failed",
+    "signing_key":  "ok" | "failed",
+    "label_stream": "ok" | "degraded"
+  }
+}
+```
+
+**Why each check is meaningful:**
+
+- **database** (`SELECT 1` against the SQLite pool). Every request path that writes a label, report, or audit row funnels through the pool; an unreachable pool means Cairn cannot serve traffic. `ok | failed` because the pool either executes a trivial query or it doesn't — there is no intermediate lagging state.
+- **signing_key** (`signing_keys` table has at least one row with `valid_to IS NULL`). This matches `/.well-known/did.json`'s existing 503 semantics — without a signing key row, consumers cannot verify any label Cairn emits, so the service is not operationally ready. Using the same DB-row signal as did.json means both endpoints agree on "can we serve labels."
+- **label_stream** (writer's `shutdown_signal` is `false` AND `server_instance_lease.last_heartbeat` is within `LEASE_STALE_MS` of now). Flipped to `degraded` if either condition fails. `LEASE_STALE_MS` (60s) is reused deliberately: the system already has one notion of "this writer is dead" at the lease-handoff boundary, and `/ready`'s degraded threshold aligns with it exactly. Two different thresholds would be inconsistent. The distinction between `failed` and `degraded` is load-bearing — a stream lagging past its heartbeat window is operationally distinct from a pool that cannot execute a query, and the type system preserves that distinction.
+
+**Checks run in parallel** via `tokio::join!`; they are independent and the pool accepts concurrent reads.
+
+**Known gap:** a writer task that is alive and heartbeating but internally wedged on processing `WriteCommand` messages would pass the label_stream check. Closing the gap would require adding a `Ping` WriteCommand variant so `/ready` could exercise the actual command path. Deferred as a v1.2+ consideration.
+
+**Contract for orchestrator consumers:** `/health` failure → restart the pod; `/ready` 503 → stop routing new traffic, keep the pod alive long enough to surface the degraded state in logs + metrics. Both endpoints are cheap (one SQL round-trip max) and safe to probe as often as the orchestrator sees fit; no rate-limiting is applied.
+
+**Verification:**
+
+- `/health` returns 200 `{"status": "ok", "version": "..."}` against any running instance.
+- `/ready` returns 200 with all `checks.*` = "ok" on a healthy instance.
+- `/ready` returns 503 with `checks.database = "failed"` when the SQLite pool is unreachable.
+- `/ready` returns 503 with `checks.signing_key = "failed"` when `signing_keys` has no active row.
+- `/ready` returns 503 with `checks.label_stream = "degraded"` when the lease heartbeat is stale past `LEASE_STALE_MS`.
+- Both endpoints are reachable without an `Authorization` header (unauthenticated by design).
+
 ## 8. Lexicons
 
 Cairn defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
