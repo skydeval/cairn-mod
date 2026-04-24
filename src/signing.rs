@@ -68,7 +68,8 @@ pub fn canonical_bytes(label: &Label) -> Result<Vec<u8>> {
 }
 
 /// Build the wire-format `LexValue` for a *signed* label — same field rules
-/// as [`label_to_lex_value`] but **also includes** `sig` as `LexValue::Bytes`.
+/// as the canonical pre-signing form but **also includes** `sig` as
+/// `LexValue::Bytes`.
 ///
 /// Used by the subscribeLabels frame encoder: the `#labels` body embeds each
 /// label in full, sig included, so consumers can verify per §6.3.

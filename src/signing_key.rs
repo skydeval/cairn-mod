@@ -27,14 +27,26 @@ pub const SIGNING_KEY_ENV_REJECTED: &str = "CAIRN_SIGNING_KEY";
 /// Error surface for the file-based key loader.
 #[derive(Debug, Error)]
 pub enum KeyLoadError {
+    /// Underlying credential-file failure (permissions, ownership,
+    /// env-override rejection, I/O).
     #[error("signing key file: {0}")]
     CredentialFile(#[from] CredentialFileError),
+    /// File exists but isn't valid hex.
     #[error(
         "signing key file {path} is not valid hex (expected 64 hex chars, optional trailing newline)"
     )]
-    NotHex { path: PathBuf },
+    NotHex {
+        /// Path whose contents failed hex decoding.
+        path: PathBuf,
+    },
+    /// File decoded as hex but isn't exactly 32 bytes.
     #[error("signing key file {path} decodes to {got} bytes; expected 32")]
-    WrongLength { path: PathBuf, got: usize },
+    WrongLength {
+        /// Path whose decoded length didn't match.
+        path: PathBuf,
+        /// Actual decoded length.
+        got: usize,
+    },
 }
 
 /// 32-byte k256 (secp256k1) private signing-key material.

@@ -16,6 +16,7 @@ use crate::signing_key::KeyLoadError;
 
 /// Exit code taxonomy. Matches criterion G from the #16 plan.
 pub mod code {
+    /// Clean exit.
     pub const SUCCESS: i32 = 0;
     /// Usage / argument parsing. clap exits with 2 directly — this
     /// constant exists so hand-written handlers agree.
@@ -47,30 +48,49 @@ pub mod code {
 /// maps variants onto the [`code`] table.
 #[derive(Debug, Error)]
 pub enum CliError {
+    /// Session-file failure (absent, permissions, ownership,
+    /// version mismatch, malformed JSON).
     #[error("{0}")]
     Session(#[from] SessionError),
+    /// PDS interaction failure (network, unauthorized, swap-race,
+    /// unexpected status, malformed response).
     #[error("{0}")]
     Pds(#[from] PdsError),
+    /// Authed command ran with no session file present.
     #[error("not logged in; run `cairn login --cairn-server ... --pds ... --handle ...`")]
     NotLoggedIn,
+    /// Transport-level failure contacting a Cairn server URL
+    /// (timeout, DNS, TLS, connection refused).
     #[error("network error contacting {url}: {source}")]
     Http {
+        /// URL that failed.
         url: String,
+        /// Underlying reqwest error.
         #[source]
         source: reqwest::Error,
     },
+    /// Cairn returned a non-2xx HTTP status.
     #[error("Cairn at {url} returned {status}: {body}")]
     CairnStatus {
+        /// URL that returned the error.
         url: String,
+        /// HTTP status code.
         status: u16,
+        /// Response body for operator-side diagnostics.
         body: String,
     },
+    /// Cairn returned a 2xx response but the body didn't parse as
+    /// the expected shape.
     #[error("could not parse Cairn response from {url}: {source}")]
     MalformedResponse {
+        /// URL whose response failed to parse.
         url: String,
+        /// Underlying serde_json error.
         #[source]
         source: serde_json::Error,
     },
+    /// Argument-shape failure — malformed CLI inputs, config
+    /// validation failures.
     #[error("{0}")]
     Config(String),
     /// Signing key file couldn't be loaded (§5.1 invariant failure,
@@ -90,12 +110,19 @@ pub enum CliError {
     /// Distinct variant so operators + systemd can branch on the
     /// dedicated [`code::LEASE_CONFLICT`] exit code.
     #[error("another Cairn instance holds the lease (instance_id={instance_id}, age={age_secs}s)")]
-    LeaseConflict { instance_id: String, age_secs: u64 },
+    LeaseConflict {
+        /// Instance identifier held by the rival process.
+        instance_id: String,
+        /// Seconds since the rival last heartbeated.
+        age_secs: u64,
+    },
     /// `TcpListener::bind` failed — port in use, permission denied,
     /// malformed addr, etc.
     #[error("could not bind {addr}: {source}")]
     BindFailed {
+        /// Address we attempted to bind.
         addr: SocketAddr,
+        /// Underlying I/O error.
         #[source]
         source: std::io::Error,
     },

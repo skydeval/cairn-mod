@@ -29,6 +29,8 @@ pub const OPERATOR_SESSION_VERSION: u32 = 1;
 /// would be inapplicable and misleading.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperatorSession {
+    /// Schema version. Validated on load; mismatch requires a
+    /// fresh `cairn operator-login`.
     pub version: u32,
     /// The PDS the operator authenticated against.
     pub pds_url: String,
@@ -37,28 +39,41 @@ pub struct OperatorSession {
     pub operator_did: String,
     /// Handle at login time. Display only; the DID is identity.
     pub operator_handle: String,
+    /// Short-lived PDS access token. Refreshed on 401 via
+    /// `refreshSession`.
     pub access_jwt: String,
+    /// Long-lived PDS refresh token.
     pub refresh_jwt: String,
 }
 
+/// Error surface for operator-session load/save.
 #[derive(Debug, Error)]
 pub enum OperatorSessionError {
+    /// Filesystem I/O failure.
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// Session file JSON didn't parse.
     #[error("operator session file {path} is malformed: {source}")]
     Malformed {
+        /// Path to the session file.
         path: PathBuf,
+        /// Underlying serde_json error.
         #[source]
         source: serde_json::Error,
     },
+    /// Session file version mismatch; operator must re-login.
     #[error(
         "operator session file {path} has unsupported version {found} (expected {expected}); re-run `cairn operator-login`"
     )]
     UnsupportedVersion {
+        /// Path to the session file.
         path: PathBuf,
+        /// Version found on disk.
         found: u32,
+        /// Version this binary expects.
         expected: u32,
     },
+    /// Credential-file invariant failure (mode / owner / platform).
     #[error("{0}")]
     CredentialFile(#[from] crate::credential_file::CredentialFileError),
 }

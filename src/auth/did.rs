@@ -22,21 +22,30 @@ use super::ssrf::SafeDnsResolver;
 /// §4 non-enumeration; variants exist here for internal logging only.
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
+    /// DID method not supported (only `did:plc` and `did:web` are
+    /// handled in v1).
     #[error("unsupported DID method: {0}")]
     UnsupportedMethod(String),
 
+    /// DID string is not a valid DID.
     #[error("malformed DID: {0}")]
     Malformed(String),
 
+    /// Transport-level failure reaching the resolver endpoint (DNS,
+    /// TLS, timeout, connection refused).
     #[error("network error: {0}")]
     Network(String),
 
+    /// Resolver endpoint returned a non-2xx status.
     #[error("non-success HTTP status: {0}")]
     BadStatus(u16),
 
+    /// Response body was not a parseable DID document.
     #[error("body parse error: {0}")]
     Parse(String),
 
+    /// SSRF filter refused to resolve the host (loopback, private
+    /// range, or other disallowed target).
     #[error("SSRF protection rejected host: {0}")]
     SsrfBlocked(String),
 }
@@ -47,11 +56,15 @@ pub enum ResolveError {
 /// extra fields and future additions don't break parsing.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DidDocument {
+    /// DID (matches the resolved subject).
     pub id: String,
+    /// All declared verification methods. Cairn's code selects one
+    /// by fragment via [`DidDocument::find_verification_method`].
     #[serde(rename = "verificationMethod", default)]
     pub verification_method: Vec<VerificationMethod>,
 }
 
+/// One entry in a DID document's `verificationMethod` array.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VerificationMethod {
     /// Full verification-method identifier, e.g.
@@ -61,6 +74,7 @@ pub struct VerificationMethod {
     /// `Multikey` in v1 but we parse the string to classify.
     #[serde(rename = "type")]
     pub r#type: String,
+    /// Multibase-encoded public key (typically z-prefixed base58btc).
     #[serde(rename = "publicKeyMultibase")]
     pub public_key_multibase: String,
 }
@@ -81,6 +95,9 @@ impl DidDocument {
 /// shape under test.
 #[async_trait]
 pub trait DidResolver: Send + Sync {
+    /// Resolve `did` to a DID document, or return the categorical
+    /// failure. Implementors must fail closed — never return a
+    /// partial / default document on error.
     async fn resolve(&self, did: &str) -> Result<DidDocument, ResolveError>;
 }
 
@@ -94,6 +111,9 @@ pub struct HttpDidResolver {
 }
 
 impl HttpDidResolver {
+    /// Construct a production resolver with the §F11 SSRF-filtering
+    /// DNS resolver wired in. `timeout` applies to both connect and
+    /// overall request.
     pub fn new(plc_directory_url: String, timeout: std::time::Duration) -> Self {
         Self::with_dns_resolver(plc_directory_url, timeout, SafeDnsResolver::arc())
     }

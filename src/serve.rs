@@ -47,7 +47,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// future in production and a `oneshot::Receiver` in tests. On
 /// resolution the HTTP listener stops accepting new connections and
 /// axum's `with_graceful_shutdown` drains active requests (bounded by
-/// [`DRAIN_TIMEOUT`]). After HTTP drains — or the timeout fires —
+/// `DRAIN_TIMEOUT`). After HTTP drains — or the timeout fires —
 /// the Writer task is shut down explicitly so the
 /// `server_instance_lease` row is released for the next start.
 pub async fn run<F>(config: Config, shutdown: F) -> Result<(), CliError>

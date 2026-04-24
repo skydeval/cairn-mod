@@ -1,6 +1,21 @@
 //! Cairn — lightweight Rust-native ATProto labeler.
+//!
+//! This crate is a library surface (`cairn_mod`) plus a binary
+//! (`cairn`) for running a standalone labeler. The library modules
+//! mirror the §10 architecture of the [design doc][cairn-design]:
+//! storage, writer (single-writer task pattern, §F5), signing
+//! (§6.2), auth (§5.2), HTTP routers (§F3/F4/F11/F12), and CLI.
+//!
+//! Start points:
+//! - [`server::router`] for the subscribeLabels + queryLabels
+//!   public surface.
+//! - [`admin_router`] for the `tools.cairn.admin.*` endpoints.
+//! - [`serve::run`] for the full binary lifecycle.
+//!
+//! [cairn-design]: https://github.com/skydeval/cairn-mod/blob/main/cairn-design.md
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod auth;
 pub mod cli;

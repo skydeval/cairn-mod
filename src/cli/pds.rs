@@ -35,9 +35,14 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionResponse {
+    /// Short-lived access JWT. Used for authed PDS requests until
+    /// it expires, then rotated via `refreshSession`.
     pub access_jwt: String,
+    /// Long-lived refresh JWT. Used to mint new access tokens.
     pub refresh_jwt: String,
+    /// Authoritative DID the PDS authenticated this session as.
     pub did: String,
+    /// Handle associated with the authenticated DID.
     pub handle: String,
 }
 
@@ -46,7 +51,9 @@ pub struct CreateSessionResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshSessionResponse {
+    /// New short-lived access JWT.
     pub access_jwt: String,
+    /// New long-lived refresh JWT (rotates on each refresh).
     pub refresh_jwt: String,
 }
 
@@ -63,7 +70,11 @@ struct GetServiceAuthResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PutRecordResponse {
+    /// AT-URI of the record that was written
+    /// (`at://<did>/<collection>/<rkey>`).
     pub uri: String,
+    /// Content-addressed ID of the written record. Used as the
+    /// `swap_record` guard on subsequent conditional writes.
     pub cid: String,
 }
 
@@ -90,15 +101,21 @@ struct CreateSessionRequest<'a> {
 /// message without leaking PDS internals.
 #[derive(Debug, Error)]
 pub enum PdsError {
+    /// `Url::parse` failed on the configured PDS base.
     #[error("invalid PDS URL {url}: {source}")]
     InvalidUrl {
+        /// URL string that failed to parse.
         url: String,
+        /// Underlying parse error.
         #[source]
         source: url::ParseError,
     },
+    /// Transport-level failure (DNS, TLS, connection, timeout).
     #[error("network error contacting {url}: {source}")]
     Network {
+        /// URL the request was sent to.
         url: String,
+        /// Underlying reqwest error.
         #[source]
         source: reqwest::Error,
     },
@@ -108,21 +125,32 @@ pub enum PdsError {
     /// token expired" without parsing error strings.
     #[error("PDS rejected credentials on {context}: {error} — {message}")]
     Unauthorized {
+        /// Short lexicon method name that returned 401.
         context: &'static str,
+        /// `error` field from the XRPC response body.
         error: String,
+        /// `message` field from the XRPC response body.
         message: String,
     },
     /// Any non-2xx, non-401 status.
     #[error("PDS {context} failed with status {status}: {error} — {message}")]
     UnexpectedStatus {
+        /// Short lexicon method name that failed.
         context: &'static str,
+        /// HTTP status code returned.
         status: u16,
+        /// `error` field from the XRPC response body.
         error: String,
+        /// `message` field from the XRPC response body.
         message: String,
     },
+    /// Response deserialization failed (PDS sent 2xx but the body
+    /// didn't match the expected shape).
     #[error("PDS {context} returned malformed JSON: {source}")]
     MalformedResponse {
+        /// Short lexicon method name whose response didn't parse.
         context: &'static str,
+        /// Underlying reqwest/serde error.
         #[source]
         source: reqwest::Error,
     },
@@ -133,7 +161,10 @@ pub enum PdsError {
     #[error(
         "another process has modified the service record on the PDS since Cairn's last publish: {message}"
     )]
-    SwapRace { message: String },
+    SwapRace {
+        /// Message body from the PDS's `InvalidSwap` response.
+        message: String,
+    },
 }
 
 /// Thin wrapper over `reqwest::Client` pinned to one PDS base URL.

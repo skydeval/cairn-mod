@@ -86,28 +86,52 @@ pub struct SessionFile {
 /// criterion G) without leaking the session contents.
 #[derive(Debug, Error)]
 pub enum SessionError {
+    /// Filesystem-level failure (read, write, permissions metadata).
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// File mode is wider than `0o600` (§5.3 enforcement).
     #[error("session file {path} has insecure permissions (mode {mode:o}); expected 600")]
-    InsecurePermissions { path: PathBuf, mode: u32 },
+    InsecurePermissions {
+        /// Path to the session file.
+        path: PathBuf,
+        /// Actual mode bits (lower 9 bits).
+        mode: u32,
+    },
+    /// File exists but is owned by a UID other than the current
+    /// effective UID (§5.3 enforcement).
     #[error("session file {path} is owned by another user")]
-    ForeignOwner { path: PathBuf },
+    ForeignOwner {
+        /// Path to the session file.
+        path: PathBuf,
+    },
+    /// Session file's `version` field doesn't match the current
+    /// schema; operator must re-run `cairn login` to produce a
+    /// file the current binary understands.
     #[error(
         "session file {path} has unsupported version {found} (expected {expected}); re-run `cairn login`"
     )]
     UnsupportedVersion {
+        /// Path to the session file.
         path: PathBuf,
+        /// Version found on disk.
         found: u32,
+        /// Version this binary expects.
         expected: u32,
     },
+    /// JSON parse failure on the session file body.
     #[error("session file {path} is malformed: {source}")]
     Malformed {
+        /// Path to the session file.
         path: PathBuf,
+        /// Underlying serde_json error.
         #[source]
         source: serde_json::Error,
     },
+    /// `dirs::config_dir()` returned `None` and no
+    /// `CAIRN_SESSION_FILE` env override was set.
     #[error("could not resolve a config directory (set {env} to override)", env = SESSION_FILE_ENV)]
     NoConfigDir,
+    /// Non-Unix platform (§5.3 invariants require POSIX semantics).
     #[error("cairn CLI on this platform is not supported in v1; use a POSIX filesystem and set {env}", env = SESSION_FILE_ENV)]
     UnsupportedPlatform,
 }

@@ -182,9 +182,17 @@ pub struct ApplyLabelRequest {
 /// version — callers don't supply it.
 #[derive(Debug, Clone)]
 pub struct NegateLabelRequest {
+    /// Moderator DID issuing the negation. Becomes
+    /// `audit_log.actor_did`.
     pub actor_did: String,
+    /// AT-URI or DID of the subject whose label is being withdrawn.
+    /// The `cid` pinning (if any) is copied from the prior apply.
     pub uri: String,
+    /// Label value being negated. Must match an existing applied
+    /// label on `(src, uri, val)` or the call errors with
+    /// `LabelNotFound`.
     pub val: String,
+    /// Free-text reason recorded to `audit_log` only.
     pub moderator_reason: Option<String>,
 }
 
@@ -219,9 +227,15 @@ enum WriteCommand {
 /// from the resolution flow).
 #[derive(Debug, Clone)]
 pub struct ApplyLabelInline {
+    /// Subject the label applies to (AT-URI or DID).
     pub uri: String,
+    /// Optional record-version pin; `None` targets the account / all
+    /// versions of the record.
     pub cid: Option<String>,
+    /// Label value to apply (≤128 bytes).
     pub val: String,
+    /// Optional expiration timestamp (RFC-3339 Z). Stored only;
+    /// enforcement is v1.1.
     pub exp: Option<String>,
 }
 
@@ -232,9 +246,17 @@ pub struct ApplyLabelInline {
 /// lexicon.
 #[derive(Debug, Clone)]
 pub struct ResolveReportRequest {
+    /// Moderator DID issuing the resolution. Becomes
+    /// `audit_log.actor_did` on both the label-applied (if any) and
+    /// report_resolved rows.
     pub actor_did: String,
+    /// Primary key of the report being resolved.
     pub report_id: i64,
+    /// Optional label to emit atomically with the resolution. When
+    /// `None`, the resolution only updates report state + writes
+    /// the audit row.
     pub apply_label: Option<ApplyLabelInline>,
+    /// Free-text resolution rationale recorded to audit_log.
     pub resolution_reason: Option<String>,
 }
 
@@ -243,7 +265,11 @@ pub struct ResolveReportRequest {
 /// happened inside the writer task post-commit.
 #[derive(Debug, Clone)]
 pub struct ResolvedReport {
+    /// The updated report row (status now `resolved`).
     pub report: crate::report::Report,
+    /// The emitted label event, if the resolution included an
+    /// `apply_label`. Signed, broadcast, and committed as part of
+    /// the same transaction as the report UPDATE.
     pub label_event: Option<LabelEvent>,
 }
 
@@ -315,7 +341,7 @@ impl WriterHandle {
     }
 
     /// Subscribe to committed events. The returned receiver lags past
-    /// [`BROADCAST_BUFFER`] events; the consumer (subscribeLabels, #7)
+    /// the internal broadcast buffer; the consumer (subscribeLabels, #7)
     /// turns `RecvError::Lagged` into a connection close.
     pub fn subscribe(&self) -> broadcast::Receiver<LabelEvent> {
         self.broadcast_tx.subscribe()

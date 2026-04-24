@@ -61,10 +61,10 @@ enum Command {
     /// PDS account) so `cairn publish-service-record` can write
     /// records to that repo. Prompts for the PDS app password
     /// interactively; writes a 0600 session file at the path in
-    /// config's [operator] section.
+    /// config's `[operator]` section.
     OperatorLogin(OperatorLoginArgs),
 
-    /// Render `app.bsky.labeler.service` from the [labeler] config
+    /// Render `app.bsky.labeler.service` from the `[labeler]` config
     /// section and publish it to the operator's PDS at rkey=self
     /// (§F1). Idempotent — no PDS write if the content hash matches
     /// the last-published value.
@@ -98,10 +98,10 @@ struct OperatorLoginArgs {
 
 #[derive(Debug, Args)]
 struct LoginArgs {
-    /// Base URL of the Cairn labeler (e.g. https://labeler.example).
+    /// Base URL of the Cairn labeler (e.g. <https://labeler.example>).
     #[arg(long)]
     cairn_server: String,
-    /// Moderator's PDS base URL (e.g. https://bsky.social).
+    /// Moderator's PDS base URL (e.g. <https://bsky.social>).
     #[arg(long)]
     pds: String,
     /// Moderator handle or DID — the PDS identifier.

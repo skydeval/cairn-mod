@@ -114,33 +114,52 @@ pub struct VerifiedCaller {
 /// reason is for internal logs only.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
+    /// JWT declared an `alg` not in §5.2's allowlist.
     #[error("JWT alg not allowed: {0}")]
     AlgRejected(String),
 
+    /// JWT failed structural parse (header / payload / signature
+    /// sections or claim shape).
     #[error("JWT structure invalid: {0}")]
     Structural(#[from] jwt::JwtParseError),
 
+    /// DID resolution (plc.directory or did:web) failed.
     #[error("resolver error: {0}")]
     Resolve(#[from] ResolveError),
 
+    /// Caller's DID document has no `#atproto` verification method.
     #[error("DID doc has no `{MODERATOR_KEY_FRAGMENT}` verification method")]
     NoVerificationMethod,
 
+    /// Verification method exists but isn't `Multikey` ES256K.
     #[error("verification method has wrong key type (expected Multikey ES256K)")]
     WrongKeyType,
 
+    /// Signature did not verify against the resolved pubkey.
     #[error("signature verification failed")]
     SignatureInvalid,
 
+    /// One of `aud` / `exp` / `iat` / `lxm` didn't match expected
+    /// values. The inner `&str` names the offending claim.
     #[error("claim mismatch: {0}")]
     ClaimMismatch(&'static str),
 
+    /// `jti` for this `iss` was already observed inside the replay
+    /// cache TTL.
     #[error("replay detected (iss={iss}, jti={jti})")]
-    Replay { iss: String, jti: String },
+    Replay {
+        /// Caller DID whose token was replayed.
+        iss: String,
+        /// The replayed `jti`.
+        jti: String,
+    },
 
+    /// Cryptographic primitive (hash, signature parse, etc.) failed.
     #[error("crypto error: {0}")]
     Crypto(#[from] proto_blue_crypto::CryptoError),
 
+    /// System clock is before the Unix epoch — unreachable on any
+    /// reasonable host.
     #[error("system clock before unix epoch")]
     Clock,
 }

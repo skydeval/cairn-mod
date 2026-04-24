@@ -126,44 +126,70 @@ pub struct LabelerConfigToml {
 /// non-empty; `default_setting` + `adult_only` optional.
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct LabelValueDefinitionToml {
+    /// The label value this definition describes (matches an entry
+    /// in [`LabelerConfigToml::label_values`]).
     pub identifier: String,
+    /// §6.4 severity — how consumers should weight this label.
     pub severity: SeverityToml,
+    /// §6.4 blur policy — whether consumer UIs should obscure
+    /// content or media on a match.
     pub blurs: BlursToml,
+    /// Optional §6.4 default consumer-side setting. Omit to let
+    /// consumers pick their own default.
     #[serde(default)]
     pub default_setting: Option<DefaultSettingToml>,
+    /// Optional §6.4 flag marking the label as 18+ only.
     #[serde(default)]
     pub adult_only: Option<bool>,
+    /// Non-empty list of localized display strings (§6.4 requires
+    /// ≥1 locale per definition).
     pub locales: Vec<LocaleToml>,
 }
 
+/// §6.4 severity enum.
 #[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SeverityToml {
+    /// Informational; consumers typically don't gate on this.
     Inform,
+    /// Alert the viewer; consumers generally surface a warning.
     Alert,
+    /// No severity signal.
     None,
 }
 
+/// §6.4 blur policy — what consumer UIs should obscure on a match.
 #[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlursToml {
+    /// Blur the post / record body.
     Content,
+    /// Blur embedded media only.
     Media,
+    /// No blurring.
     None,
 }
 
+/// §6.4 default consumer-side setting.
 #[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DefaultSettingToml {
+    /// Consumers default to showing the content with no treatment.
     Ignore,
+    /// Consumers default to surfacing a warning.
     Warn,
+    /// Consumers default to hiding the content.
     Hide,
 }
 
+/// Localized display strings for a label value definition (§6.4).
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct LocaleToml {
+    /// BCP-47 language tag (e.g. `"en"`, `"fr-CA"`).
     pub lang: String,
+    /// Short display name shown in consumer UIs.
     pub name: String,
+    /// Longer explanation, typically shown on tooltip / expand.
     pub description: String,
 }
 

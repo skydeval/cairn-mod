@@ -3,7 +3,8 @@
 //! Each endpoint lives in its own file; [`admin_router`] wires them
 //! together under one `Extension<AdminState>` so sub-modules don't
 //! need to duplicate state plumbing. Per-request auth + role + CORS
-//! gating is centralized in [`common::verify_and_authorize`].
+//! gating is centralized in the shared `common::verify_and_authorize`
+//! helper inside this module.
 
 use std::sync::Arc;
 
