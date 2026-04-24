@@ -50,6 +50,28 @@ Commit the resulting `.sqlx/query-*.json` files alongside the code
 change. The CI build runs with `SQLX_OFFLINE=true` and will fail if
 the cache is stale.
 
+### Security scanning tools
+
+CI runs `cargo-audit` and `cargo-deny` on every push and PR (see
+[§F15](cairn-design.md#f15-dependency-security-scanning-in-ci)),
+and a daily scheduled `cargo audit` opens a tracking issue when
+new advisories land. Contributors rarely need to run these
+locally, but when investigating an advisory the pinned versions
+are:
+
+```
+cargo install --locked cargo-audit --version 0.22.1
+cargo install --locked cargo-deny  --version 0.19.4
+```
+
+These versions are the ones CI uses and the ones all local scans
+should use to avoid skew. Bumps are allowed but require verifying
+the current `deny.toml` still parses and that CI stays green with
+the new version; treat a bump as a load-bearing change, not a
+drive-by. The pinning rationale: the scanner is part of the
+security posture, so its version should be auditable and change
+deliberately, not silently.
+
 ## Code style
 
 - **No `unsafe`.** The crate has `#![forbid(unsafe_code)]` and we
