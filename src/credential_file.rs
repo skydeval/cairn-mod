@@ -25,16 +25,38 @@ use thiserror::Error;
 /// credential failed).
 #[derive(Debug, Error)]
 pub enum CredentialFileError {
+    /// Filesystem failure reading the file or its metadata.
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// File mode is wider than `0o600`. §5.1 / §5.3 rejection —
+    /// the actual mode bits (lower 9) are surfaced for
+    /// diagnostics.
     #[error("credential file {path} has insecure permissions (mode {mode:o}); expected 600")]
-    InsecurePermissions { path: PathBuf, mode: u32 },
+    InsecurePermissions {
+        /// Path to the offending credential file.
+        path: PathBuf,
+        /// Actual mode bits (lower 9 bits).
+        mode: u32,
+    },
+    /// File owner UID doesn't match the running effective UID
+    /// (§5.1 / §5.3 enforcement).
     #[error("credential file {path} is owned by another user")]
-    ForeignOwner { path: PathBuf },
+    ForeignOwner {
+        /// Path to the offending credential file.
+        path: PathBuf,
+    },
+    /// A named env var was set when `reject_env_override` was
+    /// called — guarded against operators trying to deliver key
+    /// material via env.
     #[error(
         "{env} is set — key material is file-only (§5.1); unset the env var and use the file path"
     )]
-    EnvOverrideRejected { env: &'static str },
+    EnvOverrideRejected {
+        /// Name of the forbidden env var.
+        env: &'static str,
+    },
+    /// Running on a non-Unix platform where the 0600 + owner
+    /// checks can't be enforced.
     #[error("cairn CLI on this platform is not supported in v1; use a POSIX filesystem")]
     UnsupportedPlatform,
 }

@@ -17,9 +17,13 @@ use serde::Deserialize;
 /// ignored by the verifier — the allowlist lives on `alg`.
 #[derive(Debug, Deserialize)]
 pub struct JwtHeader {
+    /// Algorithm identifier. Checked against §5.2 allowlist.
     pub alg: String,
+    /// Optional `typ` header; ignored by Cairn.
     #[serde(default)]
     pub typ: Option<String>,
+    /// Optional `kid` header; ignored by Cairn (key selection is by
+    /// verification-method fragment in the DID document, not kid).
     #[serde(default)]
     pub kid: Option<String>,
 }
@@ -30,17 +34,28 @@ pub struct JwtHeader {
 /// of extra claims is not a rejection reason.
 #[derive(Debug, Deserialize)]
 pub struct JwtPayload {
+    /// Issuer DID (moderator's DID).
     pub iss: String,
+    /// Audience — must equal Cairn's configured service DID.
     pub aud: String,
+    /// Expiration as Unix-seconds timestamp.
     pub exp: i64,
+    /// Issued-at as Unix-seconds timestamp.
     pub iat: i64,
+    /// JWT ID — random per token; feeds the replay cache.
     pub jti: String,
+    /// Lexicon method binding — must equal the target endpoint's
+    /// NSID (e.g. `com.atproto.moderation.createReport`).
     pub lxm: String,
 }
 
+/// Result of [`parse`]: header + payload split out, plus the raw
+/// bytes the signature covers and the signature itself.
 #[derive(Debug)]
 pub struct ParsedJwt {
+    /// Decoded header.
     pub header: JwtHeader,
+    /// Decoded payload / claims.
     pub payload: JwtPayload,
     /// Raw bytes `header.payload` (dot-joined, un-decoded). This is what
     /// the ES256K signature covers per RFC 7515 §5.
@@ -93,14 +108,24 @@ pub fn parse(token: &str) -> Result<ParsedJwt, JwtParseError> {
     })
 }
 
+/// Failure modes of [`parse`]. All map to the same external
+/// `AuthenticationRequired` response per §4 non-enumeration;
+/// variants exist for internal logging.
 #[derive(Debug, thiserror::Error)]
 pub enum JwtParseError {
+    /// Token is not three non-empty dot-separated segments.
     #[error("JWT structure invalid (not three non-empty segments)")]
     Structure,
+    /// One of the segments failed base64url decoding.
     #[error("JWT segment failed base64url decode")]
     Base64,
+    /// Header bytes didn't parse as a JSON object matching
+    /// [`JwtHeader`].
     #[error("JWT header is not valid JSON or is missing required fields")]
     HeaderJson,
+    /// Payload bytes didn't parse as a JSON object matching
+    /// [`JwtPayload`] (a required claim was missing or the wrong
+    /// type).
     #[error("JWT payload is not valid JSON or is missing required claims")]
     PayloadJson,
 }

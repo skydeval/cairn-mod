@@ -50,35 +50,68 @@ const LABELER_SERVICE_TYPE: &str = "AtprotoLabeler";
 /// synthetic rows without going through sqlx.
 #[derive(Debug, Clone)]
 pub struct SigningKeyRow {
+    /// `signing_keys.id` primary key. Used for fragment-ID
+    /// suffixing when multiple keys are active (v1.1 rotation).
     pub id: i64,
+    /// Public key in multibase (z-prefixed base58btc)
+    /// encoding. Emitted verbatim on the wire.
     pub public_key_multibase: String,
 }
 
+/// Wire shape of `/.well-known/did.json` (L3). Field names match
+/// the did:web document the rest of the ATProto ecosystem expects:
+/// `@context` + `id` + `verificationMethod[]` + `service[]`.
 #[derive(Debug, Serialize)]
 pub struct DidDocumentWire {
+    /// W3C DID context URIs. Both W3C DID v1 + Multikey v1 are
+    /// included for interop.
     #[serde(rename = "@context")]
     pub context: Vec<&'static str>,
+    /// The DID this document describes (matches Cairn's
+    /// configured `service_did`).
     pub id: String,
+    /// One entry per active signing key. Single-key case uses the
+    /// unsuffixed `#atproto_label` fragment; multi-key rotation
+    /// windows use `#atproto_label_{id}`.
     #[serde(rename = "verificationMethod")]
     pub verification_method: Vec<VerificationMethodWire>,
+    /// Typically a single `AtprotoLabeler` entry advertising this
+    /// Cairn instance's public endpoint URL.
     pub service: Vec<ServiceWire>,
 }
 
+/// One `verificationMethod` entry in the emitted DID document.
+/// Always a `Multikey` in v1; see [`crate::signing`] for the
+/// signing side of the contract.
 #[derive(Debug, Serialize)]
 pub struct VerificationMethodWire {
+    /// Full verification-method identifier, e.g.
+    /// `did:web:labeler.example#atproto_label`.
     pub id: String,
+    /// Always `"Multikey"` in v1.
     #[serde(rename = "type")]
     pub r#type: &'static str,
+    /// The DID that controls this key (always the service DID
+    /// itself for a labeler's own signing key).
     pub controller: String,
+    /// Multibase-encoded public key material.
     #[serde(rename = "publicKeyMultibase")]
     pub public_key_multibase: String,
 }
 
+/// One `service` entry — for Cairn's DID document this is the
+/// `AtprotoLabeler` record that points consumers at the HTTP /
+/// WebSocket surface.
 #[derive(Debug, Serialize)]
 pub struct ServiceWire {
+    /// Service fragment id (e.g. `"#atproto_labeler"`).
     pub id: &'static str,
+    /// Always `"AtprotoLabeler"` for Cairn (Bluesky-ecosystem
+    /// convention; see `LABELER_SERVICE_TYPE`).
     #[serde(rename = "type")]
     pub r#type: &'static str,
+    /// Publicly-reachable base URL where consumers call this
+    /// labeler — matches `Config::service_endpoint`.
     #[serde(rename = "serviceEndpoint")]
     pub service_endpoint: String,
 }

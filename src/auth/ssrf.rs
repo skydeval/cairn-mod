@@ -86,6 +86,7 @@ fn is_ipv6_unique_local(v6: Ipv6Addr) -> bool {
 #[derive(Debug, thiserror::Error)]
 #[error("SSRF protection rejected all IPs for host: {host}")]
 pub struct SsrfRejected {
+    /// Host (DNS name) whose resolved IPs were all blocked.
     pub host: String,
 }
 

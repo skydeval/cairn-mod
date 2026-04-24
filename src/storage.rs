@@ -55,8 +55,14 @@ pub struct Health {
 /// The singleton row from `server_instance_lease`.
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct Lease {
+    /// Unique instance identifier of the process holding the
+    /// lease.
     pub instance_id: String,
+    /// Unix epoch milliseconds when this instance first acquired
+    /// the lease.
     pub acquired_at: i64,
+    /// Unix epoch milliseconds of the most recent heartbeat —
+    /// staleness > `LEASE_STALE_MS` allows takeover.
     pub last_heartbeat: i64,
 }
 

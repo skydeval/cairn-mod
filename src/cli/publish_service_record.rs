@@ -61,7 +61,14 @@ pub enum PublishOutcome {
     NoChange,
     /// Record was written to the PDS. `cid` is the new record CID
     /// (used by the next publish's swap-race check).
-    Published { cid: String, created_at: String },
+    Published {
+        /// Content-addressed ID of the just-written record. Stored
+        /// locally as the swap-guard for the next publish.
+        cid: String,
+        /// RFC-3339 Z timestamp emitted in the record (preserved
+        /// across content-unchanged republishes per §F1).
+        created_at: String,
+    },
 }
 
 /// Run the publish flow end-to-end. `pool` is the labeler's own

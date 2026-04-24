@@ -47,6 +47,9 @@ impl std::fmt::Debug for Permit {
 }
 
 impl Limiter {
+    /// Build a `Limiter` with the given §F4 caps. Returned as
+    /// `Arc<Self>` because subscribeLabels handlers share one
+    /// limiter across all connections.
     pub fn new(global_cap: usize, per_ip_cap: usize) -> Arc<Self> {
         Arc::new(Self {
             global_cap,

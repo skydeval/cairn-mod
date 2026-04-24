@@ -19,11 +19,21 @@ use super::session::{self, SessionFile};
 /// anyway" from "no session at all."
 #[derive(Debug, PartialEq, Eq)]
 pub enum LogoutOutcome {
+    /// No session file on disk — `cairn logout` is a no-op.
     NotLoggedIn,
+    /// Happy path: PDS accepted `deleteSession` AND the local
+    /// session file was removed.
     RevokedAndRemoved,
+    /// Local session file was removed, but the PDS
+    /// `deleteSession` call failed (network, 5xx, stale token).
+    /// Per Q3 decision, local cleanup proceeds regardless; the
+    /// PDS-side session stays live until it expires naturally.
     RemovedLocalOnlyPdsFailed,
 }
 
+/// Revoke at PDS (best-effort) + remove local session file.
+/// Returns the outcome so `main.rs` can choose the user-facing
+/// message without string-matching.
 pub async fn logout(session_path: &Path) -> Result<LogoutOutcome, CliError> {
     let session = match SessionFile::load(session_path)? {
         Some(s) => s,

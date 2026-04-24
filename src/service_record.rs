@@ -42,23 +42,45 @@ pub const RECORD_RKEY: &str = "self";
 /// or `...is_empty`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceRecord {
+    /// `$type` — always `"app.bsky.labeler.service"` (§6.4).
     #[serde(rename = "$type")]
     pub record_type: &'static str,
+    /// RFC-3339 Z timestamp the consumer sees. Preserved across
+    /// content-unchanged republishes (§F1 idempotency); hashing
+    /// excludes this field.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// Required §6.4 policies block containing label values +
+    /// their definitions.
     pub policies: Policies,
+    /// Optional §6.4 reason-type values the labeler accepts on
+    /// reports. Typically the `com.atproto.moderation.defs#reason*`
+    /// set matching `createReport` (§F11).
     #[serde(rename = "reasonTypes", skip_serializing_if = "Vec::is_empty")]
     pub reason_types: Vec<String>,
+    /// Optional §6.4 subject-type values the labeler handles
+    /// (e.g. `"account"`, `"record"`).
     #[serde(rename = "subjectTypes", skip_serializing_if = "Vec::is_empty")]
     pub subject_types: Vec<String>,
+    /// Optional §6.4 record-collection filter
+    /// (e.g. `"app.bsky.feed.post"`) narrowing which records this
+    /// labeler will emit labels for.
     #[serde(rename = "subjectCollections", skip_serializing_if = "Vec::is_empty")]
     pub subject_collections: Vec<String>,
 }
 
+/// `policies` block — §6.4 requires `labelValues`; definitions are
+/// recommended but optional (empty means "only global values, no
+/// custom definitions").
 #[derive(Debug, Clone, Serialize)]
 pub struct Policies {
+    /// Short-name list of labels the labeler emits. Every value
+    /// here that is NOT a §6.5 global well-known value should have
+    /// a matching entry in [`Self::label_value_definitions`].
     #[serde(rename = "labelValues")]
     pub label_values: Vec<String>,
+    /// Per-label metadata. §6.4 enforces non-empty locales per
+    /// definition; empty vec at the top level is legal.
     #[serde(
         rename = "labelValueDefinitions",
         skip_serializing_if = "Vec::is_empty"
@@ -66,22 +88,41 @@ pub struct Policies {
     pub label_value_definitions: Vec<LabelValueDefinition>,
 }
 
+/// One entry in `policies.labelValueDefinitions` — the rich
+/// metadata consumer UIs render per label (§6.4). `severity`,
+/// `blurs`, and `locales` are required per lexicon; the rest are
+/// optional.
 #[derive(Debug, Clone, Serialize)]
 pub struct LabelValueDefinition {
+    /// Label value this definition describes (matches a
+    /// `Policies::label_values` entry).
     pub identifier: String,
+    /// §6.4 severity — `"inform"` / `"alert"` / `"none"`. Projected
+    /// from [`crate::config::SeverityToml`].
     pub severity: &'static str,
+    /// §6.4 blur policy — `"content"` / `"media"` / `"none"`.
+    /// Projected from [`crate::config::BlursToml`].
     pub blurs: &'static str,
+    /// Optional §6.4 consumer-side default — `"ignore"` / `"warn"`
+    /// / `"hide"`. Omitted entirely when `None` (serde
+    /// `skip_serializing_if`).
     #[serde(rename = "defaultSetting", skip_serializing_if = "Option::is_none")]
     pub default_setting: Option<&'static str>,
+    /// Optional §6.4 18+ gate. Omitted entirely when `None`.
     #[serde(rename = "adultOnly", skip_serializing_if = "Option::is_none")]
     pub adult_only: Option<bool>,
+    /// Non-empty per §6.4 — consumer UIs pick by locale.
     pub locales: Vec<Locale>,
 }
 
+/// Localized display strings per §6.4 `labelValueDefinition.locales`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Locale {
+    /// BCP-47 language tag (e.g. `"en"`, `"fr-CA"`).
     pub lang: String,
+    /// Short display name shown in consumer UIs.
     pub name: String,
+    /// Longer explanation, typically shown on tooltip / expand.
     pub description: String,
 }
 
@@ -90,10 +131,19 @@ pub struct Locale {
 /// record never reaches the PDS.
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
+    /// Config declared no label values. §6.4 requires at least one
+    /// — an empty `labelValues` array would be a protocol-violating
+    /// record.
     #[error("labeler.label_values is empty; the record must declare at least one label")]
     NoLabelValues,
+    /// A label-value definition at the given index carries zero
+    /// locales. §6.4 requires at least one locale per definition.
     #[error("labeler.label_value_definitions[{idx}] has no locales; §6.4 requires at least one")]
-    NoLocales { idx: usize },
+    NoLocales {
+        /// Zero-based index into `label_value_definitions` of the
+        /// offending entry.
+        idx: usize,
+    },
 }
 
 /// Render the record body ready for PDS emission. `created_at` is

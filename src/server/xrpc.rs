@@ -25,10 +25,16 @@ pub fn decode_cursor(s: &str) -> Result<i64, CursorError> {
     text.parse::<i64>().map_err(|_| CursorError::NotInteger)
 }
 
+/// Failure modes of [`decode_cursor`]. All map to
+/// `AdminError::InvalidRequest("malformed cursor")` at the handler
+/// boundary; variants exist for test discrimination.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CursorError {
+    /// Input was not valid base64url.
     BadBase64,
+    /// Decoded bytes were not valid UTF-8.
     BadUtf8,
+    /// UTF-8 payload didn't parse as a signed integer.
     NotInteger,
 }
 

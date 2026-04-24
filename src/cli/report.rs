@@ -45,13 +45,23 @@ pub struct ReportCreateInput {
 /// displays. Extra fields are ignored by serde.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CreateReportResponse {
+    /// Report row primary key assigned by Cairn's writer.
     pub id: i64,
+    /// RFC-3339 Z timestamp when the report row was committed.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// Lexicon-spec reason type Cairn echoed back (`com.atproto.
+    /// moderation.defs#reason*`).
     #[serde(rename = "reasonType")]
     pub reason_type: String,
+    /// Authenticated reporter DID — the `iss` from the
+    /// service-auth JWT the CLI minted.
     #[serde(rename = "reportedBy")]
     pub reported_by: String,
+    /// Subject union per §F11 — either a
+    /// `com.atproto.admin.defs#repoRef` or a
+    /// `com.atproto.repo.strongRef`. Opaque on the CLI side;
+    /// displayed as JSON when `--json` is set.
     pub subject: Value,
 }
 

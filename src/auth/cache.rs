@@ -113,6 +113,10 @@ impl JtiCache {
     }
 }
 
+/// Returned by the jti cache's `check_and_record` when the
+/// `(iss, jti)` pair was already observed inside its TTL (§5.2
+/// replay protection). Callers at the auth boundary map this to
+/// `AuthError::Replay`.
 #[derive(Debug, thiserror::Error)]
 #[error("replay detected")]
 pub struct Replay;
