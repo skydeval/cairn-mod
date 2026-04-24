@@ -99,12 +99,12 @@ impl JtiCache {
     ) -> Result<(), Replay> {
         let mut inner = self.inner.lock().expect("cache mutex poisoned");
         let key = (iss.to_owned(), jti.to_owned());
-        if let Some(existing_exp) = inner.get(&key) {
-            if Instant::now() < *existing_exp {
-                return Err(Replay);
-            }
-            // Stale — fall through and overwrite.
+        if let Some(existing_exp) = inner.get(&key)
+            && Instant::now() < *existing_exp
+        {
+            return Err(Replay);
         }
+        // Stale entries fall through and are overwritten below.
         // Per-§5.2: LRU eviction may drop a still-live jti to make room;
         // that jti loses replay protection for the remainder of its TTL.
         // Bounded-memory replay protection is the stated tradeoff.

@@ -110,12 +110,12 @@ pub async fn publish(
     let new_hash = service_record::content_hash(&record);
     let new_hash_hex = hex::encode(new_hash);
 
-    if let Some(p) = &prior {
-        if p.content_hash_hex == new_hash_hex {
-            // §F1 idempotency: content unchanged, preserve created_at,
-            // skip the PDS call entirely.
-            return Ok(PublishOutcome::NoChange);
-        }
+    if let Some(p) = &prior
+        && p.content_hash_hex == new_hash_hex
+    {
+        // §F1 idempotency: content unchanged, preserve created_at,
+        // skip the PDS call entirely.
+        return Ok(PublishOutcome::NoChange);
     }
 
     // Content has changed (or this is the first publish). If we have

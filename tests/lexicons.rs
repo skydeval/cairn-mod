@@ -154,24 +154,24 @@ fn collect_known_defs() -> HashSet<String> {
 fn walk_refs(v: &Value, self_id: &str, known: &HashSet<String>, path: &PathBuf) {
     match v {
         Value::Object(map) => {
-            if map.get("type").and_then(|t| t.as_str()) == Some("ref") {
-                if let Some(r) = map.get("ref").and_then(|r| r.as_str()) {
-                    let resolved = if let Some(local) = r.strip_prefix('#') {
-                        format!("{self_id}#{local}")
-                    } else {
-                        r.to_string()
-                    };
-                    // Only validate refs into our own namespace. Refs to
-                    // Bluesky lexicons (`com.atproto.*`, `app.bsky.*`)
-                    // are external and can't be checked from this
-                    // repo's files alone.
-                    if resolved.starts_with("tools.cairn.") {
-                        assert!(
-                            known.contains(&resolved),
-                            "{path:?}: unresolved ref {resolved} — \
-                             add the def to the appropriate file or fix the ref"
-                        );
-                    }
+            if map.get("type").and_then(|t| t.as_str()) == Some("ref")
+                && let Some(r) = map.get("ref").and_then(|r| r.as_str())
+            {
+                let resolved = if let Some(local) = r.strip_prefix('#') {
+                    format!("{self_id}#{local}")
+                } else {
+                    r.to_string()
+                };
+                // Only validate refs into our own namespace. Refs to
+                // Bluesky lexicons (`com.atproto.*`, `app.bsky.*`)
+                // are external and can't be checked from this
+                // repo's files alone.
+                if resolved.starts_with("tools.cairn.") {
+                    assert!(
+                        known.contains(&resolved),
+                        "{path:?}: unresolved ref {resolved} — \
+                         add the def to the appropriate file or fix the ref"
+                    );
                 }
             }
             for v in map.values() {

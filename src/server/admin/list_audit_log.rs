@@ -177,11 +177,11 @@ fn parse_params(raw: &str) -> Result<Params, AdminError> {
             _ => {}
         }
     }
-    if let (Some(s), Some(u)) = (p.since_ms, p.until_ms) {
-        if s > u {
-            // Anti-leak: no timestamps echoed back.
-            return Err(AdminError::InvalidRequest("since must be <= until"));
-        }
+    if let (Some(s), Some(u)) = (p.since_ms, p.until_ms)
+        && s > u
+    {
+        // Anti-leak: no timestamps echoed back.
+        return Err(AdminError::InvalidRequest("since must be <= until"));
     }
     Ok(p)
 }

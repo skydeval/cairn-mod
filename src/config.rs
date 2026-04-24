@@ -258,10 +258,10 @@ impl Config {
     /// blocked by the crate's `#![forbid(unsafe_code)]`).
     pub fn load_from(toml_path: Option<&std::path::Path>) -> Result<Self> {
         let mut fig = Figment::new();
-        if let Some(p) = toml_path {
-            if p.is_file() {
-                fig = fig.merge(Toml::file(p));
-            }
+        if let Some(p) = toml_path
+            && p.is_file()
+        {
+            fig = fig.merge(Toml::file(p));
         }
         fig = fig.merge(Env::prefixed("CAIRN_"));
 
