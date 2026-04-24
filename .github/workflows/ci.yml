@@ -83,3 +83,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets --all-features
       - run: cargo test --all-targets --all-features
+
+  audit:
+    # cargo-audit: scan Cargo.lock for known advisories. Hard-fail:
+    # any advisory that isn't explicitly ignored blocks merge.
+    # --deny warnings promotes unsound/unmaintained/yanked advisories
+    # to errors too, so the same threshold applies across severity
+    # bands. The version is pinned to the one documented in
+    # CONTRIBUTING.md's Security scanning tools section; bump both
+    # together.
+    #
+    # Ignored advisories are passed via --ignore and MUST mirror the
+    # [[advisories.ignore]] list in deny.toml. The rationale for each
+    # ignore lives in deny.toml (one source of truth); this list is
+    # the IDs only. Audits of the ignore list happen against the
+    # deny.toml comments.
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit --version 0.22.1
+      - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
