@@ -32,7 +32,7 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::signing_key::SigningKey;
 use crate::{
-    admin_router, create_report_router, did_document_router, spawn_writer, storage,
+    admin_router, create_report_router, did_document_router, health_router, spawn_writer, storage,
     subscribe_router, wellknown_router,
 };
 
@@ -114,7 +114,8 @@ where
         crate::SubscribeConfig::default(),
     ))
     .merge(wellknown_router())
-    .merge(did_document_router(pool.clone(), config.clone()));
+    .merge(did_document_router(pool.clone(), config.clone()))
+    .merge(health_router(pool.clone(), writer.clone()));
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see
     // the module-level note on the L3 ordering invariant.

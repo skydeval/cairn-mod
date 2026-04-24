@@ -38,7 +38,7 @@ pub use error::{Error, Result};
 pub use label::Label;
 pub use server::{
     AdminConfig, CreateReportConfig, SubscribeConfig, admin_router, create_report_router,
-    did_document_router, router as subscribe_router, serve, wellknown_router,
+    did_document_router, health_router, router as subscribe_router, serve, wellknown_router,
 };
 pub use signing::{canonical_bytes, label_to_lex_value_with_sig, sign_label, verify_label};
 pub use signing_key::SigningKey;

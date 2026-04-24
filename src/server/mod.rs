@@ -35,6 +35,7 @@ use crate::writer::WriterHandle;
 pub mod admin;
 mod create_report;
 pub mod did_document;
+pub mod health;
 pub mod limits;
 mod query;
 pub(crate) mod subscribe;
@@ -44,6 +45,7 @@ pub mod xrpc;
 pub use admin::{AdminConfig, admin_router};
 pub use create_report::{CreateReportConfig, create_report_router};
 pub use did_document::did_document_router;
+pub use health::health_router;
 pub use limits::Limiter;
 pub use wellknown::wellknown_router;
 

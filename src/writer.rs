@@ -58,7 +58,7 @@ use crate::signing_key::SigningKey;
 /// a live peer; younger than 10s would be flaky under a single missed
 /// heartbeat, older than ~2× the value risks a genuine zombie blocking a
 /// legitimate restart for too long.
-const LEASE_STALE_MS: i64 = 60_000;
+pub(crate) const LEASE_STALE_MS: i64 = 60_000;
 
 /// Heartbeat interval. 10s × 6 = 60s staleness budget per the threshold.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
