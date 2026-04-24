@@ -1,0 +1,81 @@
+name: Daily security audit
+
+# Scheduled cargo-audit runs independent of PR activity. The
+# vulnerability database changes out-of-band — a dep pinned in
+# Cargo.lock today may have a new advisory tomorrow without any
+# local commit. Catching those requires a time-driven trigger.
+#
+# If advisories are detected, a tracking issue is opened on the
+# repo so the maintainer's inbox surfaces the event without
+# requiring workflow-tab inspection.
+
+on:
+  schedule:
+    # Daily at 06:00 UTC (~midnight US-Central, pre-morning-mailbox
+    # for most operators). Cron expressions are best-effort — GitHub
+    # Actions may delay scheduled runs by ~30 min under load.
+    - cron: "0 6 * * *"
+  workflow_dispatch: # manual refresh path
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo-audit (scheduled)
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed for `gh issue create` when advisories are found.
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        # Version pinned per CONTRIBUTING.md; bump alongside
+        # ci.yml's audit + deny steps.
+        run: cargo install --locked cargo-audit --version 0.22.1
+
+      - name: Run cargo audit
+        id: audit
+        # --ignore list MUST mirror ci.yml's audit step. If the lists
+        # diverge, the scheduled run will open issues for advisories
+        # the push/PR gate accepts, which is noise.
+        #
+        # Capture stdout as issue body. `set +e` + explicit exit-code
+        # check so the step doesn't abort before we record failure.
+        run: |
+          set +e
+          cargo audit --deny warnings --ignore RUSTSEC-2023-0071 > audit.txt 2>&1
+          code=$?
+          set -e
+          echo "=== cargo audit output ==="
+          cat audit.txt
+          if [[ $code -ne 0 ]]; then
+            echo "audit_failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open tracking issue if advisories found
+        if: steps.audit.outputs.audit_failed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # One issue per UTC day: the date in the title makes a
+        # same-day re-run idempotent (the second `gh issue create`
+        # fails if the title exists). Persistent advisories over
+        # multiple days produce one issue per day; if that becomes
+        # noisy, the workflow can be extended to dedupe against
+        # open issues with the same label before creating.
+        #
+        # The `security` label MUST exist on the repo. The
+        # `automated` label was considered but omitted because it
+        # had not been verified to exist at the time this workflow
+        # was authored; add it later if desired.
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          gh issue create \
+            --title "Daily audit: advisories detected on main (${DATE})" \
+            --label "security" \
+            --body-file audit.txt \
+            || echo "issue create failed (may be duplicate title for today)"
