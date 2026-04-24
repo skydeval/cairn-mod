@@ -76,7 +76,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use serde::Serialize;
 use sqlx::{Pool, Sqlite};
-use tokio::sync::watch;
 
 use crate::writer::{LEASE_STALE_MS, WriterHandle, epoch_ms_now};
 
@@ -85,20 +84,23 @@ use crate::writer::{LEASE_STALE_MS, WriterHandle, epoch_ms_now};
 /// Both routes are unauthenticated. Compose into the live binary via
 /// [`axum::Router::merge`] alongside the other per-feature routers.
 pub fn health_router(pool: Pool<Sqlite>, writer: WriterHandle) -> Router {
-    let state = HealthState {
-        pool,
-        shutdown_rx: writer.shutdown_signal(),
-    };
+    let state = HealthState { pool, writer };
     Router::new()
         .route("/health", get(handle_health))
         .route("/ready", get(handle_ready))
         .layer(Extension(state))
 }
 
+/// Router state carries a [`WriterHandle`] (not just
+/// `writer.shutdown_signal()`) deliberately: when the last handle is
+/// dropped, the writer task's mpsc receiver closes and the task
+/// shuts itself down. Storing the handle keeps the writer alive for
+/// as long as the router is serving, rather than having /ready
+/// silently flip to `degraded` the first time it's probed.
 #[derive(Clone)]
 struct HealthState {
     pool: Pool<Sqlite>,
-    shutdown_rx: watch::Receiver<bool>,
+    writer: WriterHandle,
 }
 
 // ----- Status types -----
@@ -160,10 +162,11 @@ async fn handle_health() -> Response {
 }
 
 async fn handle_ready(Extension(state): Extension<HealthState>) -> Response {
+    let shutdown_rx = state.writer.shutdown_signal();
     let (database, signing_key, label_stream) = tokio::join!(
         check_database(&state.pool),
         check_signing_key(&state.pool),
-        check_label_stream(&state.pool, &state.shutdown_rx),
+        check_label_stream(&state.pool, &shutdown_rx),
     );
     let overall = match (database, signing_key, label_stream) {
         (OkOrFailed::Ok, OkOrFailed::Ok, OkOrDegraded::Ok) => OkOrDegraded::Ok,
@@ -206,7 +209,7 @@ async fn check_signing_key(pool: &Pool<Sqlite>) -> OkOrFailed {
 
 async fn check_label_stream(
     pool: &Pool<Sqlite>,
-    shutdown_rx: &watch::Receiver<bool>,
+    shutdown_rx: &tokio::sync::watch::Receiver<bool>,
 ) -> OkOrDegraded {
     if *shutdown_rx.borrow() {
         return OkOrDegraded::Degraded;
