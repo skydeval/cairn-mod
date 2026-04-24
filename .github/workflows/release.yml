@@ -145,7 +145,13 @@ jobs:
       - name: Cargo publish dry-run (pre-commit gate)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --dry-run --locked
+        # --allow-dirty: dry-run intentionally runs AFTER the version
+        # bump + CHANGELOG migration but BEFORE the commit, so it
+        # validates the exact version + content that will ship. The
+        # working tree is knowingly dirty at this step; the real
+        # `cargo publish` below runs post-commit on a clean tree and
+        # does not need the flag.
+        run: cargo publish --dry-run --locked --allow-dirty
 
       - name: Commit version bump + CHANGELOG migration
         run: |
