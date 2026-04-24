@@ -96,6 +96,14 @@ This process catches scope ambiguities early and produces tighter
 commits. Small fixes (typos, doc clarifications, obvious bugs) don't
 need a preceding issue — file a PR directly.
 
+## Code of conduct
+
+Participation in this project is governed by the
+[Contributor Covenant 2.1](CODE_OF_CONDUCT.md). By contributing you
+agree to uphold it. Reports of unacceptable behavior go to the
+enforcement contact in that file (same pipeline as security
+reports — one mailbox, one maintainer).
+
 ## Security
 
 Do **not** file security vulnerabilities as public issues. See

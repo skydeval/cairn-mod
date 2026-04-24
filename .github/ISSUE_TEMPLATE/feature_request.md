@@ -33,3 +33,8 @@ usually need a §29-style drift issue filed alongside.
 
 Is this v1 scope, a v1.1 follow-up, or out-of-scope entirely?
 (Honest estimates welcome — maintainer reviews and may reclassify.)
+
+---
+
+Interactions on this issue are governed by the
+[Contributor Covenant](../../CODE_OF_CONDUCT.md).

@@ -25,3 +25,8 @@ doc helps the maintainer respond with context.
 
 Steps you took or docs you read before filing. Helps avoid suggesting
 things you've already ruled out.
+
+---
+
+Interactions on this issue are governed by the
+[Contributor Covenant](../../CODE_OF_CONDUCT.md).

@@ -39,3 +39,8 @@ intermittent, note the frequency.
 
 If this bug has a security impact, do NOT file it here. See
 [SECURITY.md](../../SECURITY.md) for the private disclosure channel.
+
+---
+
+Interactions on this issue are governed by the
+[Contributor Covenant](../../CODE_OF_CONDUCT.md).
