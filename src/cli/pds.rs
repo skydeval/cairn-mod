@@ -78,6 +78,25 @@ pub struct PutRecordResponse {
     pub cid: String,
 }
 
+/// `com.atproto.repo.getRecord` response shape. Unauthenticated
+/// public endpoint — used by `cairn serve`'s startup verify check
+/// (#8) to fetch the published `app.bsky.labeler.service` record
+/// for comparison against the local config.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetRecordResponse {
+    /// AT-URI of the record (`at://<did>/<collection>/<rkey>`).
+    pub uri: String,
+    /// Content-addressed ID of the record at the time of fetch.
+    /// Optional in the lexicon; some PDS implementations omit it
+    /// for legacy records.
+    #[serde(default)]
+    pub cid: Option<String>,
+    /// The record body itself, opaque on the PdsClient side. The
+    /// caller deserializes into the appropriate per-collection
+    /// shape (e.g. `crate::service_record::ServiceRecord`).
+    pub value: serde_json::Value,
+}
+
 /// Wire shape of an XRPC error body (`{error, message}`), used to
 /// surface meaningful CLI error output without echoing the whole
 /// PDS response.
@@ -364,6 +383,71 @@ impl PdsClient {
                 }
             })
         }
+    }
+
+    /// Fetch a record via `com.atproto.repo.getRecord`. Unauthenticated
+    /// public endpoint — used by `cairn serve`'s startup verify check
+    /// to read the published `app.bsky.labeler.service` record
+    /// without requiring an operator session on the serve host.
+    ///
+    /// Returns:
+    /// - `Ok(Some(_))` — record exists, body deserialized
+    /// - `Ok(None)` — record does not exist (HTTP 404 OR XRPC
+    ///   `RecordNotFound` error body). Distinct from a transport
+    ///   failure: callers that need to differentiate "absent"
+    ///   from "unreachable" branch on this distinction.
+    /// - `Err(PdsError::Network { .. })` — transport-level
+    ///   failure (DNS, TLS, timeout, refused).
+    /// - `Err(PdsError::UnexpectedStatus { .. })` — any other
+    ///   non-2xx (auth-required-on-private-PDS, server error,
+    ///   rate-limit response).
+    pub async fn get_record(
+        &self,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<Option<GetRecordResponse>, PdsError> {
+        const CTX: &str = "getRecord";
+        let url = self.endpoint("com.atproto.repo.getRecord");
+
+        let resp = self
+            .client
+            .get(url.clone())
+            .query(&[("repo", repo), ("collection", collection), ("rkey", rkey)])
+            .send()
+            .await
+            .map_err(|source| PdsError::Network {
+                url: url.to_string(),
+                source,
+            })?;
+
+        if resp.status().is_success() {
+            return resp
+                .json::<GetRecordResponse>()
+                .await
+                .map(Some)
+                .map_err(|source| PdsError::MalformedResponse {
+                    context: CTX,
+                    source,
+                });
+        }
+
+        // Distinguish "record not found" from any other failure.
+        // PDS implementations return either HTTP 400 with
+        // `error: "RecordNotFound"` in the XRPC body, or HTTP 404
+        // — both should map to Ok(None) so the caller can branch
+        // cleanly on absent-vs-unreachable.
+        let status = resp.status();
+        let body = resp.json::<XrpcErrorBody>().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND || body.error == "RecordNotFound" {
+            return Ok(None);
+        }
+        Err(PdsError::UnexpectedStatus {
+            context: CTX,
+            status: status.as_u16(),
+            error: body.error,
+            message: body.message,
+        })
     }
 
     /// Mint a fresh service auth JWT for calling `aud` with the
