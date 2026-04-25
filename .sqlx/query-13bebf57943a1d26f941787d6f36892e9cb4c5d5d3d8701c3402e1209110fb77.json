@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT did, role, added_by, added_at FROM moderators\n             ORDER BY added_at ASC, did ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "did",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_by",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "13bebf57943a1d26f941787d6f36892e9cb4c5d5d3d8701c3402e1209110fb77"
+}

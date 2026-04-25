@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO moderators (did, role, added_by, added_at) VALUES (?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "650d47fca88bbe2ac4a2f0745e5c759c17ffdf139651b618c33dff9a9b4c4f9c"
+}

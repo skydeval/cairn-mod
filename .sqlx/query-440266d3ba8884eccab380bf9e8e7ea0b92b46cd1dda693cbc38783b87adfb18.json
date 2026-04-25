@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM moderators WHERE did = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "440266d3ba8884eccab380bf9e8e7ea0b92b46cd1dda693cbc38783b87adfb18"
+}

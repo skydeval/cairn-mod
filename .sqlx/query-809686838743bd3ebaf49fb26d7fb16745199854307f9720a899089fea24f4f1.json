@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moderators SET role = ?1 WHERE did = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "809686838743bd3ebaf49fb26d7fb16745199854307f9720a899089fea24f4f1"
+}
