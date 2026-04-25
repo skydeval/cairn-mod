@@ -38,7 +38,7 @@
 //!   or `signing_key_id` (§6.2 step 1, §6.1: seq lives on the frame, not
 //!   the label).
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use proto_blue_crypto::{K256Keypair, Keypair as _, format_multikey};
 use sqlx::{Pool, Sqlite};
@@ -63,6 +63,12 @@ pub(crate) const LEASE_STALE_MS: i64 = 60_000;
 
 /// Heartbeat interval. 10s × 6 = 60s staleness budget per the threshold.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Granularity at which the writer checks "is it time to start the
+/// scheduled sweep?". Daily fires bucketed by UTC hour means we don't
+/// need finer than this; 60s keeps the check cost negligible (one
+/// `Instant::now()` comparison + an `Option` peek per minute).
+const SWEEP_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Upper bound on queued write commands. Moderators rarely drive more
 /// than single-digit req/s even on busy operators; 64 is a comfortable
@@ -538,7 +544,44 @@ struct Writer {
     retention: RetentionConfig,
 }
 
+/// Internal accumulator for an in-flight scheduled sweep. Lives only
+/// while [`Writer::run`] is mid-sweep; absent between sweeps.
+struct SweepRunState {
+    started_at: Instant,
+    rows: i64,
+    batches: u64,
+}
+
 impl Writer {
+    /// Compute the next absolute [`Instant`] at which the scheduled
+    /// sweep should fire, or `None` when the sweep is disabled.
+    ///
+    /// "Disabled" = `sweep_enabled = false` OR `retention_days = None`.
+    /// In the second case the sweep would be a no-op anyway; skipping
+    /// the timer entirely keeps the run loop quiet.
+    ///
+    /// Targets the next occurrence of `sweep_run_at_utc_hour:00:00`
+    /// UTC. If we're already past that hour today, target tomorrow at
+    /// the same hour.
+    fn compute_next_sweep_fire(&self) -> Option<Instant> {
+        if !self.retention.sweep_enabled || self.retention_days.is_none() {
+            return None;
+        }
+        let now_utc = OffsetDateTime::now_utc();
+        let target_hour = self.retention.sweep_run_at_utc_hour;
+        let target_today_time = time::Time::from_hms(target_hour, 0, 0)
+            .expect("hour validated < 24 by Config::validate");
+        let target_today = now_utc.replace_time(target_today_time);
+        let target_dt = if target_today <= now_utc {
+            target_today + time::Duration::days(1)
+        } else {
+            target_today
+        };
+        let wait = target_dt - now_utc;
+        let wait_secs = wait.whole_seconds().max(0) as u64;
+        Some(Instant::now() + Duration::from_secs(wait_secs))
+    }
+
     async fn run(mut self) {
         let mut heartbeat_timer = interval(HEARTBEAT_INTERVAL);
         heartbeat_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -546,7 +589,22 @@ impl Writer {
         // with a fresh timestamp, so touching it again is redundant.
         heartbeat_timer.tick().await;
 
+        // Scheduled-sweep wiring (§F4). The check timer wakes the run
+        // loop once a minute to evaluate "is it time to start a sweep?";
+        // when a sweep starts, `sweep_state` is populated and the
+        // immediate-batch arm runs one batch per loop iteration until
+        // `has_more = false`. Inter-batch yielding to incoming commands
+        // is automatic — the biased select prefers `rx.recv()` and
+        // `heartbeat_timer.tick()` over running another batch.
+        let mut sweep_check_timer = interval(SWEEP_CHECK_INTERVAL);
+        sweep_check_timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        sweep_check_timer.tick().await;
+
+        let mut next_scheduled_fire: Option<Instant> = self.compute_next_sweep_fire();
+        let mut sweep_state: Option<SweepRunState> = None;
+
         loop {
+            let sweep_in_progress = sweep_state.is_some();
             tokio::select! {
                 biased;
                 // Prefer draining write commands over heartbeats so a
@@ -604,6 +662,59 @@ impl Writer {
                         // sustained failure is caught at the next-instance
                         // startup check — not at this writer's expense.
                         tracing::error!("lease heartbeat failed: {e}");
+                    }
+                }
+                _ = sweep_check_timer.tick() => {
+                    if sweep_state.is_none()
+                        && let Some(fire_at) = next_scheduled_fire
+                        && Instant::now() >= fire_at
+                    {
+                        sweep_state = Some(SweepRunState {
+                            started_at: Instant::now(),
+                            rows: 0,
+                            batches: 0,
+                        });
+                        next_scheduled_fire = Some(fire_at + Duration::from_secs(86_400));
+                        tracing::info!(
+                            retention_days = ?self.retention_days,
+                            sweep_batch_size = self.retention.sweep_batch_size,
+                            "scheduled retention sweep starting"
+                        );
+                    }
+                }
+                // Always-ready arm gated on sweep_in_progress. With biased
+                // order this ranks below rx.recv() + the two timers, so
+                // normal commands and heartbeats interleave naturally
+                // between batches (§F4 inter-batch yield, §F5 single-
+                // writer invariant).
+                _ = std::future::ready(()), if sweep_in_progress => {
+                    match self.handle_sweep(SweepRequest).await {
+                        Ok(batch) => {
+                            let state = sweep_state
+                                .as_mut()
+                                .expect("sweep_in_progress => sweep_state Some");
+                            state.rows += batch.rows_deleted;
+                            state.batches += 1;
+                            if !batch.has_more {
+                                let final_state = sweep_state.take().expect("just set");
+                                tracing::info!(
+                                    rows_deleted = final_state.rows,
+                                    batches = final_state.batches,
+                                    duration_ms = final_state.started_at.elapsed().as_millis() as u64,
+                                    retention_days_applied = ?batch.retention_days_applied,
+                                    "scheduled retention sweep complete"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let final_state = sweep_state.take();
+                            tracing::error!(
+                                error = %e,
+                                batches_done = final_state.as_ref().map(|s| s.batches).unwrap_or(0),
+                                rows_so_far = final_state.as_ref().map(|s| s.rows).unwrap_or(0),
+                                "scheduled retention sweep batch failed; aborting run (will retry on next schedule)"
+                            );
+                        }
                     }
                 }
             }
