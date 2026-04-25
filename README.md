@@ -234,24 +234,60 @@ Each item links the relevant design-doc section for deeper context.
 
 ### Moderator management
 
-v1 has no dedicated CLI or admin XRPC for moderator membership.
-Manage via direct SQL against the `moderators` table:
+Manage moderator membership via the `cairn moderator` CLI. All
+three subcommands operate on the same SQLite DB the labeler runs
+against and load config the same way `cairn serve` does
+(`--config <path>` or `CAIRN_CONFIG`).
 
-```sql
--- Grant mod role:
-INSERT INTO moderators (did, role, added_at)
-VALUES ('did:plc:example', 'mod', strftime('%s','now') * 1000);
+```
+# Add a moderator with the standard role:
+cairn moderator add did:plc:example --role mod --config /etc/cairn/cairn.toml
 
--- Grant admin role:
-INSERT INTO moderators (did, role, added_at)
-VALUES ('did:plc:example', 'admin', strftime('%s','now') * 1000);
+# Add an admin (gets the elevated `tools.cairn.admin.listAuditLog`
+# permission per §F12):
+cairn moderator add did:plc:example --role admin --config /etc/cairn/cairn.toml
 
--- Revoke (any role):
-DELETE FROM moderators WHERE did = 'did:plc:example';
+# Change an existing moderator's role (errors without --update-role
+# if the DID is already a moderator):
+cairn moderator add did:plc:example --role admin --update-role --config /etc/cairn/cairn.toml
+
+# Remove a moderator:
+cairn moderator remove did:plc:example --config /etc/cairn/cairn.toml
+
+# Removing the last admin is blocked unless --force:
+cairn moderator remove did:plc:example --force --config /etc/cairn/cairn.toml
+
+# List all moderators (tabular):
+cairn moderator list --config /etc/cairn/cairn.toml
+
+# Filter to a single role, or emit JSON for scripts:
+cairn moderator list --role admin --json --config /etc/cairn/cairn.toml
 ```
 
-`cairn moderator {add,remove,list}` subcommands are v1.1 scope
-(§F9).
+The CLI runs as a one-shot — no server startup, no
+single-instance lease acquisition; it is safe to invoke while
+`cairn serve` is running against the same DB.
+
+**`added_by` semantics:** CLI-initiated inserts leave the
+`moderators.added_by` column NULL — the CLI has no attested
+caller identity (no JWT `iss`, no signed request). It is
+populated only for HTTP-admin attribution via the moderator who
+made the change. Operators auditing membership history should
+read NULL as "added via CLI / direct DB write," not "unknown."
+
+**For emergencies when the CLI isn't available** (e.g., bootstrapping
+the first admin before any binary is installed, or recovering from
+a corrupted invocation), the `moderators` table can be manipulated
+directly — the schema is in [the initial migration](migrations/20251008_init.sql)
+and the design contract is [§F12](cairn-design.md#f12-tools-cairn-admin-xrpc-endpoints):
+
+```sql
+INSERT INTO moderators (did, role, added_at)
+VALUES ('did:plc:example', 'admin', strftime('%s','now') * 1000);
+```
+
+Direct SQL skips the last-admin guard and the role-change
+prompts; reach for it only when the CLI path isn't an option.
 
 ### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
 
