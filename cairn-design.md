@@ -611,6 +611,65 @@ When the daily scheduled `cargo-audit` fires on a new advisory, it opens an issu
 - CI's `audit` and `deny` jobs block merges on any failure.
 - The scheduled workflow's `gh issue create` has `issues: write` permission.
 
+### F16. Moderator management CLI (v1.1)
+
+`cairn moderator {add, remove, list}` — three one-shot subcommands for managing the `moderators` table from the host running Cairn. All three accept `--config <path>` with the same semantics as `cairn serve`, open the same SQLite DB, and exit immediately. They acquire **no** single-instance lease and so are safe to run while `cairn serve` is up against the same DB.
+
+**Subcommands:**
+
+```
+cairn moderator add <did> --role <mod|admin> [--update-role] [--json] [--config <path>]
+cairn moderator remove <did> [--force] [--json] [--config <path>]
+cairn moderator list [--role <mod|admin>] [--json] [--config <path>]
+```
+
+**`add` semantics:**
+
+- New DID → row inserted, role assigned, `added_at = now()`.
+- Existing DID with the same role → no-op (`Unchanged`); not an error.
+- Existing DID with a different role → `DuplicateBlocked` unless `--update-role` is set, in which case the role is overwritten and `RoleUpdated` is reported with the previous value.
+- `DuplicateBlocked` is a USAGE-coded error (exit 2).
+
+**`remove` semantics:**
+
+- Existing DID → row deleted (`Removed`).
+- Nonexistent DID → USAGE-coded error (exit 2). The "if it looks weird, tell the operator" posture rules out silent success.
+- Last-admin guard: removing the only `admin`-role row is blocked unless `--force` is set. The guard checks the target's role + `count_admins()` before issuing the DELETE; the SELECT-then-DELETE window is acceptable for a one-shot CLI tool (no concurrent-CLI threat model). `--force` skips the check entirely; use it deliberately.
+
+**`list` semantics:**
+
+- No `--role` → all moderators.
+- `--role mod` or `--role admin` → filtered set.
+- Output ordered by `added_at ASC, did ASC` for deterministic consumption (tests + scripts pipe through `jq` reliably).
+
+**`added_by` semantics (decision C):**
+
+The `moderators.added_by` column is nullable. CLI-initiated inserts leave it `NULL` because the CLI has no attested caller identity — there is no JWT `iss`, no signed request, and the OS user the CLI runs as isn't a DID. Three options were considered and rejected:
+
+- **Sentinel string `"cli"`**: violates the column's DID-shape semantic. A future audit query that joins `moderators.added_by` against the `did` column elsewhere would silently miss CLI-attributed rows.
+- **Required `--added-by <did>` flag**: ceremonial for the bootstrap case (the operator hasn't even shipped a moderator yet). Optional flag: easy to forget, falls back to one of the above.
+- **NULL** (chosen): honest — the column is meant for HTTP-admin attribution via JWT `iss`, and that semantic is preserved cleanly. Operators auditing membership history should read NULL as "added via CLI / direct DB write," not "unknown."
+
+A regression test (`add_emits_null_added_by_from_cli`) pins this so a future "ergonomics" PR that introduces a default sentinel is caught explicitly.
+
+**`--json` output contracts:**
+
+- `add` → `{"action":"add","did":"...","role":"mod"|"admin","result":"inserted"|"role_updated"|"unchanged","previous_role":"..."}` (`previous_role` present only on `role_updated`).
+- `remove` → `{"action":"remove","did":"...","result":"removed"}`. Failures (not found, last admin) emit human errors to stderr + USAGE exit; they do NOT emit a JSON line.
+- `list` → JSON array of `{"did":"...","role":"...","added_by":"..."|null,"added_at":"<RFC 3339 UTC>"}`. Empty list → `[]`.
+
+**Architectural note — shared `Role` type:**
+
+The `Role` enum lives in `src/moderators.rs` (a neutral, non-server module) so both the HTTP admin auth path (`server::admin::common::verify_and_authorize`) and the CLI consume the same value set. The CLI's clap argument is a thin `RoleArg` wrapper with a `From<RoleArg> for Role` adapter — this keeps clap's `ValueEnum` derive out of non-CLI modules while preserving a 1:1 mapping that surfaces in any future PR that adds a role.
+
+**Verification:**
+
+- `cairn moderator add <did> --role mod` inserts a row with role=mod, `added_at` non-zero, `added_by IS NULL`.
+- `cairn moderator add <did> --role admin` on an existing mod errors with USAGE; `--update-role` allows the change and reports the previous role.
+- `cairn moderator remove <did>` on the only admin errors with USAGE; `--force` allows it.
+- `cairn moderator list --json` is a JSON array; the per-row shape parses without coercion.
+- All three subcommands work while `cairn serve` is running against the same DB (no lease conflict).
+
 ## 8. Lexicons
 
 Cairn defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
