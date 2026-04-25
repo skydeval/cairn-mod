@@ -368,6 +368,61 @@ read operations. There is no `cairn audit show <id>` subcommand
 in v1.1 — the corresponding `getAuditLog` HTTP endpoint hasn't
 been written yet (tracked separately).
 
+### Service record verify on startup ([§F19](cairn-design.md#f19-service-record-verify-on-startup-v11))
+
+`cairn serve` performs a **verify-only** check at startup before
+binding the HTTP listener: the local `[labeler]` config is
+rendered into an `app.bsky.labeler.service` record, and its
+content-hash is compared against the published record at
+`<operator.pds_url>/<service_did>`. Drift, absent, or
+unreachable each fail-start with a distinct exit code so
+orchestrators (and operators) can branch.
+
+- [ ] **Configs without a `[labeler]` block skip verify.** If
+  you're running a Cairn deployment that does NOT publish a
+  service record (test harnesses, embedders, custom workflows),
+  this gate doesn't apply and `cairn serve` starts normally.
+  Operator-facing deployments always have `[labeler]`.
+
+- [ ] **Configs with `[labeler]` MUST also have `[operator]`.**
+  Verify needs `operator.pds_url` to know where to fetch the
+  published record from. `[labeler]` declared without
+  `[operator]` fail-starts as a USAGE-coded config error
+  (real misconfig signal, not a drift gate).
+
+**Failure modes and exit codes:**
+
+| Code | Variant | Meaning | Operator action |
+|---|---|---|---|
+| 12 | `SERVICE_RECORD_DRIFT` | Local config differs from PDS record | Run `cairn publish-service-record` to update the PDS |
+| 13 | `SERVICE_RECORD_ABSENT` | No record published yet | Run `cairn publish-service-record` to publish for the first time |
+| 14 | `SERVICE_RECORD_UNREACHABLE` | Could not reach PDS | Transient infra issue; retry. If persistent, check `operator.pds_url` |
+
+The drift exit's stderr message names the fields that differ
+(label values, definition count, reason types, subject types).
+When all four match but content hashes differ, the message
+points at per-definition contents (severity / blurs / locales)
+as the drift surface to inspect.
+
+**Reconciliation flow.** When verify fails with drift or
+absent, the operator runs `cairn publish-service-record` on the
+host that has operator credentials configured (see
+[§5.3](cairn-design.md#53-cli-ergonomics)). After successful
+publish, restart `cairn serve`; verify passes on the next
+startup.
+
+**Lease handling.** Verify happens AFTER the single-instance
+lease is acquired (so a verify failure doesn't waste a PDS
+fetch when another instance already holds the slot). On
+verify failure, the lease is released before serve exits, so a
+subsequent startup attempt isn't blocked.
+
+**No opt-out flag.** v1.1 has no `--skip-verify` or equivalent.
+The whole point of the gate is to catch drift; a flag would
+re-introduce the drift class via forgetfulness. If a real
+emergency case surfaces post-launch, the project will weigh
+adding one as its own tracker entry.
+
 ### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
 
 - [ ] **Only one `cairn serve` against a given DID at a time.**
