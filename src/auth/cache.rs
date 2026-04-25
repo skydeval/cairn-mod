@@ -3,14 +3,41 @@
 //! Both caches wrap `lru::LruCache` with expiration checks on access.
 //! Entries that are expired when looked up are treated as a miss and
 //! evicted, so stale data never influences a decision.
+//!
+//! Time is read through a `Clock` handle so tests can advance it
+//! deterministically — TTL semantics that depend on `Instant::now()`
+//! flake under CI scheduling jitter when tests rely on `thread::sleep`
+//! to cross small thresholds (§F4 #21). Production passes a
+//! `SystemClock`; tests pass `MockClock`.
 
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
 
 use super::did::DidDocument;
+
+/// Source of "now" for the cache TTL checks. Production wires
+/// [`SystemClock`]; tests substitute a mock clock with explicit
+/// `advance` so TTL behavior is deterministic — no `thread::sleep`,
+/// no scheduler-jitter flakes.
+pub(crate) trait Clock: Send + Sync {
+    /// Current monotonic instant. Implementations must return values
+    /// that respect `>=` ordering of real time (or simulated time, in
+    /// the mock case) — the cache's expiry check assumes monotonicity.
+    fn now(&self) -> Instant;
+}
+
+/// Production [`Clock`] backed by [`std::time::Instant::now`].
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 /// Cached DID doc with its expiration. Separate positive/negative TTLs
 /// so we can match §5.4 (60s positive, 5s negative) with one structure.
@@ -27,21 +54,28 @@ pub(crate) struct DidDocCache {
     inner: Mutex<LruCache<String, (CachedResolve, Instant)>>,
     positive_ttl: Duration,
     negative_ttl: Duration,
+    clock: Arc<dyn Clock>,
 }
 
 impl DidDocCache {
-    pub fn new(size: NonZeroUsize, positive_ttl: Duration, negative_ttl: Duration) -> Self {
+    pub fn new(
+        size: NonZeroUsize,
+        positive_ttl: Duration,
+        negative_ttl: Duration,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         Self {
             inner: Mutex::new(LruCache::new(size)),
             positive_ttl,
             negative_ttl,
+            clock,
         }
     }
 
     pub fn get(&self, did: &str) -> Option<CachedResolve> {
         let mut inner = self.inner.lock().expect("cache mutex poisoned");
         let (cached, expires_at) = inner.get(did)?;
-        if Instant::now() >= *expires_at {
+        if self.clock.now() >= *expires_at {
             let key = did.to_owned();
             inner.pop(&key);
             return None;
@@ -50,7 +84,7 @@ impl DidDocCache {
     }
 
     pub fn insert_ok(&self, did: String, doc: DidDocument) {
-        let exp = Instant::now() + self.positive_ttl;
+        let exp = self.clock.now() + self.positive_ttl;
         self.inner
             .lock()
             .expect("cache mutex poisoned")
@@ -58,7 +92,7 @@ impl DidDocCache {
     }
 
     pub fn insert_err(&self, did: String) {
-        let exp = Instant::now() + self.negative_ttl;
+        let exp = self.clock.now() + self.negative_ttl;
         self.inner
             .lock()
             .expect("cache mutex poisoned")
@@ -75,12 +109,14 @@ impl DidDocCache {
 /// its TTL" — intentional tradeoff. Call site documents this.
 pub(crate) struct JtiCache {
     inner: Mutex<LruCache<(String, String), Instant>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl JtiCache {
-    pub fn new(size: NonZeroUsize) -> Self {
+    pub fn new(size: NonZeroUsize, clock: Arc<dyn Clock>) -> Self {
         Self {
             inner: Mutex::new(LruCache::new(size)),
+            clock,
         }
     }
 
@@ -100,7 +136,7 @@ impl JtiCache {
         let mut inner = self.inner.lock().expect("cache mutex poisoned");
         let key = (iss.to_owned(), jti.to_owned());
         if let Some(existing_exp) = inner.get(&key)
-            && Instant::now() < *existing_exp
+            && self.clock.now() < *existing_exp
         {
             return Err(Replay);
         }
@@ -124,14 +160,54 @@ pub struct Replay;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).unwrap()
     }
 
+    /// Test [`Clock`] with explicit, deterministic time control.
+    /// Internally tracks ms since `base` (the `Instant` captured at
+    /// construction) — `advance` adds to that offset; `now` returns
+    /// `base + Duration::from_millis(offset)`.
+    ///
+    /// AtomicU64 lets a `&MockClock` be advanced from any thread
+    /// without taking a lock; cache tests are single-threaded today,
+    /// but the pattern matches the production `Send + Sync` contract.
+    struct MockClock {
+        base: Instant,
+        offset_ms: AtomicU64,
+    }
+
+    impl MockClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                offset_ms: AtomicU64::new(0),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            self.offset_ms
+                .fetch_add(by.as_millis() as u64, Ordering::Relaxed);
+        }
+    }
+
+    impl Clock for MockClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_millis(self.offset_ms.load(Ordering::Relaxed))
+        }
+    }
+
     #[test]
     fn doc_cache_returns_cached_then_expires() {
-        let cache = DidDocCache::new(nz(10), Duration::from_millis(50), Duration::from_millis(5));
+        let clock = Arc::new(MockClock::new());
+        let cache = DidDocCache::new(
+            nz(10),
+            Duration::from_millis(50),
+            Duration::from_millis(5),
+            clock.clone(),
+        );
         let doc = DidDocument {
             id: "did:plc:a".into(),
             verification_method: vec![],
@@ -141,23 +217,38 @@ mod tests {
             CachedResolve::Ok(got) => assert_eq!(got.id, "did:plc:a"),
             _ => panic!("expected Ok"),
         }
-        std::thread::sleep(Duration::from_millis(60));
+        // Advance past the positive TTL boundary. Crossing the >=
+        // threshold is what the cache's expiry check tests — pick a
+        // value strictly greater so the assertion is unambiguous.
+        clock.advance(Duration::from_millis(60));
         assert!(cache.get("did:plc:a").is_none(), "must expire");
     }
 
     #[test]
     fn doc_cache_negative_has_shorter_ttl() {
-        let cache = DidDocCache::new(nz(10), Duration::from_secs(60), Duration::from_millis(5));
+        let clock = Arc::new(MockClock::new());
+        let cache = DidDocCache::new(
+            nz(10),
+            Duration::from_secs(60),
+            Duration::from_millis(5),
+            clock.clone(),
+        );
         cache.insert_err("did:plc:bad".into());
         assert!(matches!(cache.get("did:plc:bad"), Some(CachedResolve::Err)));
-        std::thread::sleep(Duration::from_millis(15));
+        // Past negative_ttl (5ms) but well under positive_ttl (60s).
+        // The mock clock makes the threshold deterministic — the
+        // pre-mockclock version slept 15ms, which flaked under CI
+        // scheduler jitter when the negative entry's expiry hadn't
+        // actually been crossed yet (#21).
+        clock.advance(Duration::from_millis(15));
         assert!(cache.get("did:plc:bad").is_none(), "neg entry must expire");
     }
 
     #[test]
     fn jti_cache_second_use_is_replay() {
-        let cache = JtiCache::new(nz(1000));
-        let exp = Instant::now() + Duration::from_secs(60);
+        let clock = Arc::new(MockClock::new());
+        let cache = JtiCache::new(nz(1000), clock.clone());
+        let exp = clock.now() + Duration::from_secs(60);
         cache
             .check_and_record("did:plc:a", "j1", exp)
             .expect("first ok");
@@ -167,12 +258,13 @@ mod tests {
 
     #[test]
     fn jti_cache_expiry_permits_reuse() {
-        let cache = JtiCache::new(nz(1000));
-        let exp = Instant::now() + Duration::from_millis(5);
+        let clock = Arc::new(MockClock::new());
+        let cache = JtiCache::new(nz(1000), clock.clone());
+        let exp = clock.now() + Duration::from_millis(5);
         cache
             .check_and_record("did:plc:a", "j1", exp)
             .expect("first ok");
-        std::thread::sleep(Duration::from_millis(20));
+        clock.advance(Duration::from_millis(20));
         // Stale entry treated as miss — reinsert succeeds.
         cache
             .check_and_record("did:plc:a", "j1", exp)
@@ -182,8 +274,9 @@ mod tests {
     #[test]
     fn jti_cache_distinguishes_iss() {
         // Same jti, different iss: NOT a replay (replay is per-issuer).
-        let cache = JtiCache::new(nz(1000));
-        let exp = Instant::now() + Duration::from_secs(60);
+        let clock = Arc::new(MockClock::new());
+        let cache = JtiCache::new(nz(1000), clock.clone());
+        let exp = clock.now() + Duration::from_secs(60);
         cache.check_and_record("did:plc:a", "same", exp).unwrap();
         cache
             .check_and_record("did:plc:b", "same", exp)

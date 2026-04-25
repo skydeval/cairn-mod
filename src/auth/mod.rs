@@ -187,12 +187,14 @@ impl AuthContext {
     /// Dependency-inject a resolver. Test code substitutes a
     /// canned-document resolver; production uses [`AuthContext::new`].
     pub fn with_resolver(config: AuthConfig, resolver: Arc<dyn DidResolver>) -> Self {
+        let clock: Arc<dyn cache::Clock> = Arc::new(cache::SystemClock);
         let doc_cache = DidDocCache::new(
             config.doc_cache_size,
             config.positive_cache_ttl,
             config.negative_cache_ttl,
+            clock.clone(),
         );
-        let jti_cache = JtiCache::new(config.jti_cache_size);
+        let jti_cache = JtiCache::new(config.jti_cache_size, clock);
         Self {
             config,
             resolver,
