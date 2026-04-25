@@ -677,6 +677,133 @@ pub fn format_resolve_json(detail: &ReportDetail) -> String {
 }
 
 // ============================================================
+// `cairn report flag` / `cairn report unflag` — both wrap
+// tools.cairn.admin.flagReporter
+// (src/server/admin/flag_reporter.rs). Admin OR moderator role.
+// One handler, two CLI subcommands distinguished by the
+// `suppressed` body param: true → flag, false → unflag. Server
+// audits as `reporter_flagged` / `reporter_unflagged` accordingly.
+// ============================================================
+
+const FLAG_REPORTER_LXM: &str = "tools.cairn.admin.flagReporter";
+
+/// Input to `cairn report flag` / `cairn report unflag`.
+#[derive(Debug, Clone)]
+pub struct ReportFlagInput {
+    /// Reporter DID to flag or unflag. Server requires `did:`
+    /// prefix; CLI echoes the same constraint.
+    pub did: String,
+    /// `true` = flag (suppress future reports from this DID).
+    /// `false` = unflag (remove suppression). Idempotent in either
+    /// direction per the handler doc — repeating the same call
+    /// produces another audit row but no row-state change.
+    pub suppressed: bool,
+    /// Optional moderator-facing rationale stored in the audit
+    /// row's reason payload.
+    pub reason: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    pub cairn_server_override: Option<String>,
+}
+
+/// Synthetic response for `cairn report {flag, unflag}`. The
+/// server's response body is `{}` — operationally we only care
+/// that the call succeeded (2xx). The struct echoes the input
+/// fields the CLI prints.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportFlagResponse {
+    /// Reporter DID acted on.
+    pub did: String,
+    /// `true` if the call flagged, `false` if it unflagged.
+    pub suppressed: bool,
+}
+
+/// Flag or unflag a reporter.
+///
+/// Wraps the `tools.cairn.admin.flagReporter` handler at
+/// [src/server/admin/flag_reporter.rs](..) — POST body shape:
+/// ```json
+/// { "did": "...", "suppressed": true | false, "reason": "..."? }
+/// ```
+/// Server enforces role (`verify_and_authorize`, mod OR admin),
+/// validates the `did:` prefix, writes the
+/// `suppressed_reporters` row + `reporter_{flagged,unflagged}`
+/// audit entry in one transaction, and returns `{}`. The
+/// [`ReportFlagResponse`] returned here is synthetic — the
+/// handler's empty body carries no fields, so the CLI echoes the
+/// input did + suppressed for the format_* renderers to use.
+pub async fn flag(
+    session: &mut SessionFile,
+    session_path: &Path,
+    input: ReportFlagInput,
+) -> Result<ReportFlagResponse, CliError> {
+    if !input.did.starts_with("did:") {
+        return Err(CliError::Config(format!(
+            "DID must start with 'did:'; got {:?}",
+            input.did
+        )));
+    }
+    let cairn_server = input
+        .cairn_server_override
+        .as_deref()
+        .unwrap_or(&session.cairn_server_url)
+        .trim_end_matches('/')
+        .to_string();
+    let pds = PdsClient::new(&session.pds_url)?;
+    let token = acquire_service_auth(&pds, session, session_path, FLAG_REPORTER_LXM).await?;
+
+    let body = json!({
+        "did": input.did,
+        "suppressed": input.suppressed,
+        "reason": input.reason,
+    });
+    let url = format!("{cairn_server}/xrpc/{FLAG_REPORTER_LXM}");
+    let client = build_client();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|source| CliError::Http {
+            url: url.clone(),
+            source,
+        })?;
+    // Discard the empty `{}` response body once 2xx is confirmed —
+    // we don't need to parse it. cairn_response<Value> parses any
+    // JSON; if the server returns a non-2xx, the error path runs
+    // and we get a CairnStatus. On success we synthesize the
+    // response shape from the input.
+    let _: serde_json::Value = cairn_response::<serde_json::Value>(url, resp).await?;
+    Ok(ReportFlagResponse {
+        did: input.did,
+        suppressed: input.suppressed,
+    })
+}
+
+/// Human one-liner for `cairn report flag` / `cairn report unflag`.
+pub fn format_flag_human(resp: &ReportFlagResponse) -> String {
+    let verb = if resp.suppressed {
+        "Flagged"
+    } else {
+        "Unflagged"
+    };
+    format!("{verb} reporter {}", resp.did)
+}
+
+/// JSON output for `cairn report flag` / `cairn report unflag`.
+/// Includes an `action` discriminator so scripts can branch
+/// without re-reading `suppressed`.
+pub fn format_flag_json(resp: &ReportFlagResponse) -> String {
+    let action = if resp.suppressed { "flag" } else { "unflag" };
+    let body = json!({
+        "action": action,
+        "did": resp.did,
+        "suppressed": resp.suppressed,
+    });
+    serde_json::to_string_pretty(&body).expect("flag JSON serializes")
+}
+
+// ============================================================
 // Shared helpers
 // ============================================================
 

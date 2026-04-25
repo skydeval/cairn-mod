@@ -141,6 +141,14 @@ enum ReportSub {
     /// AND applies a label in one server transaction; omitting it
     /// resolves without a label (the "dismiss" workflow).
     Resolve(ReportResolveArgs),
+    /// Flag a reporter (tools.cairn.admin.flagReporter with
+    /// `suppressed: true`). Suppresses future reports from this
+    /// DID. Admin OR moderator role.
+    Flag(ReportFlagArgs),
+    /// Unflag a reporter (tools.cairn.admin.flagReporter with
+    /// `suppressed: false`). Removes suppression. Admin OR
+    /// moderator role.
+    Unflag(ReportFlagArgs),
 }
 
 #[derive(Debug, Args)]
@@ -173,6 +181,23 @@ struct ReportViewArgs {
     #[arg(long = "cairn-server")]
     cairn_server: Option<String>,
     /// Emit JSON instead of the human-readable multi-line output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReportFlagArgs {
+    /// Reporter DID to flag (`flag` subcommand) or unflag
+    /// (`unflag` subcommand). Server requires `did:` prefix.
+    did: String,
+    /// Optional moderator rationale stored in the audit row's
+    /// reason payload.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable one-liner.
     #[arg(long)]
     json: bool,
 }
@@ -379,6 +404,12 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Report {
             sub: ReportSub::Resolve(args),
         } => run_report_resolve(args).await,
+        Command::Report {
+            sub: ReportSub::Flag(args),
+        } => run_report_flag(args, true).await,
+        Command::Report {
+            sub: ReportSub::Unflag(args),
+        } => run_report_flag(args, false).await,
         Command::Serve(args) => run_serve(args).await,
         Command::OperatorLogin(args) => run_operator_login(args).await,
         Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
@@ -483,6 +514,25 @@ async fn run_report_view(args: ReportViewArgs) -> Result<(), CliError> {
         println!("{}", report::format_view_json(&resp));
     } else {
         println!("{}", report::format_view_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_report_flag(args: ReportFlagArgs, suppressed: bool) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = report::ReportFlagInput {
+        did: args.did,
+        suppressed,
+        reason: args.reason,
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = report::flag(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", report::format_flag_json(&resp));
+    } else {
+        println!("{}", report::format_flag_human(&resp));
     }
     Ok(())
 }
