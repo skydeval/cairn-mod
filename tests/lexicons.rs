@@ -76,8 +76,13 @@ fn lexicon_ids_match_file_paths() {
 #[test]
 fn procedures_have_input_queries_have_parameters() {
     // §F12: procedures = JSON body, queries = query-string.
-    let procedures: HashSet<&str> =
-        HashSet::from(["applyLabel", "negateLabel", "resolveReport", "flagReporter"]);
+    let procedures: HashSet<&str> = HashSet::from([
+        "applyLabel",
+        "negateLabel",
+        "resolveReport",
+        "flagReporter",
+        "retentionSweep",
+    ]);
     let queries: HashSet<&str> =
         HashSet::from(["listLabels", "listReports", "getReport", "listAuditLog"]);
 
@@ -257,6 +262,7 @@ fn expected_endpoint_files_all_present() {
         "resolveReport",
         "flagReporter",
         "listAuditLog",
+        "retentionSweep",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

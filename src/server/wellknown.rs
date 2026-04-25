@@ -47,9 +47,9 @@ pub const LEXICON_BUNDLE: Dir<'static> =
 /// build time (via the unit test below) and at runtime lookup.
 pub const LEXICON_NSID_PREFIX: &str = "tools.cairn.admin";
 
-/// Expected bundle contents — the 9 files §8 enumerates. The unit
-/// tests below assert set-equality so an accidental file addition or
-/// removal surfaces immediately.
+/// Expected bundle contents — the §8 set plus retentionSweep (#12,
+/// §F4). The unit tests below assert set-equality so an accidental
+/// file addition or removal surfaces immediately.
 pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "applyLabel",
     "defs",
@@ -60,6 +60,7 @@ pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "listReports",
     "negateLabel",
     "resolveReport",
+    "retentionSweep",
 ];
 
 /// Build a router exposing the `.well-known/lexicons/…` read endpoint.

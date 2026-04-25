@@ -123,6 +123,23 @@ pub const AUDIT_REASON_RESOLVE_REPORT: &str =
 pub const AUDIT_REASON_FLAG_REPORTER: &str =
     "reporter_flagged / reporter_unflagged: { did, suppressed, moderator_reason }";
 
+/// Audit-log `reason` JSON schema for `retention_sweep` (§F4 — written
+/// only by the operator-initiated admin path; the scheduled-fire
+/// path does NOT audit per Q6/D2). Captures the result of the sweep
+/// run for reconstruction-friendly ops queries.
+///
+/// ```json
+/// {
+///   "rows_deleted": <i64>,
+///   "batches": <u64>,
+///   "duration_ms": <u64>,
+///   "retention_days_applied": <u32> | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.retention_sweep")]
+pub const AUDIT_REASON_RETENTION_SWEEP: &str =
+    "retention_sweep: { rows_deleted, batches, duration_ms, retention_days_applied }";
+
 /// Closed set of `audit_log.action` values emitted by Cairn write paths.
 ///
 /// §F10: audit rows only for moderation decisions, not for input/operational
@@ -141,6 +158,7 @@ pub const AUDIT_ACTION_VALUES: &[&str] = &[
     "report_resolved",
     "reporter_flagged",
     "reporter_unflagged",
+    "retention_sweep",
 ];
 
 /// Closed set of `audit_log.outcome` values matching the SQL `CHECK`
@@ -1282,6 +1300,20 @@ fn build_resolve_audit_reason(
     serde_json::json!({
         "applied_label_val": applied_label_val,
         "resolution_reason": resolution_reason,
+    })
+    .to_string()
+}
+
+/// `retention_sweep` audit reason JSON — see
+/// [`AUDIT_REASON_RETENTION_SWEEP`] for the schema. Shared with the
+/// retentionSweep admin handler (audited only on the operator-
+/// initiated path per Q6/D2).
+pub(crate) fn build_retention_sweep_audit_reason(result: &SweepResult) -> String {
+    serde_json::json!({
+        "rows_deleted": result.rows_deleted,
+        "batches": result.batches,
+        "duration_ms": result.duration_ms,
+        "retention_days_applied": result.retention_days_applied,
     })
     .to_string()
 }

@@ -27,6 +27,7 @@ mod list_reports;
 mod negate_label;
 mod report_view;
 mod resolve_report;
+mod retention_sweep;
 
 /// Operator configuration for admin endpoints. Kept separate from the
 /// subscribe/query configs so operators can tune label-value policy
@@ -92,6 +93,10 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.listAuditLog",
             get(list_audit_log::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.retentionSweep",
+            post(retention_sweep::handler),
         )
         .layer(Extension(state))
 }

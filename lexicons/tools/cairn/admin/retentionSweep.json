@@ -1,0 +1,46 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.retentionSweep",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Admin-role-only. Trigger the §F4 retention sweep on demand. Loops batched DELETEs until no more old rows match the configured `retention_days` cutoff. The scheduled-fire path (daily at the configured UTC hour) does NOT use this endpoint and does NOT audit; only operator-initiated runs through this endpoint write an audit_log row (action=`retention_sweep`, actor_did=JWT iss). Callers with the `mod` role receive Forbidden.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "rowsDeleted",
+            "batches",
+            "durationMs"
+          ],
+          "properties": {
+            "rowsDeleted": {
+              "type": "integer",
+              "description": "Total rows deleted across all batches."
+            },
+            "batches": {
+              "type": "integer",
+              "description": "Number of batched DELETE round-trips issued."
+            },
+            "durationMs": {
+              "type": "integer",
+              "description": "Wall-clock duration of the full sweep, in milliseconds."
+            },
+            "retentionDaysApplied": {
+              "type": "integer",
+              "description": "Cutoff days actually applied. Absent when the labeler was started with no retention cutoff configured (sweep is a no-op in that case)."
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason FROM audit_log\n         WHERE action = 'retention_sweep' AND actor_did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5b664dcf7a6b8c5e88b57f4f4ba6be644c60a712e3215aabcfe3c3374ee3ea3a"
+}
