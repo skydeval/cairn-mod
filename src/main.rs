@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_mod::cli::{
+    audit,
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
@@ -79,6 +80,55 @@ enum Command {
         #[command(subcommand)]
         sub: ModeratorSub,
     },
+
+    /// Audit log queries (`tools.cairn.admin.listAuditLog`).
+    /// **Admin role required** — the server's auth check uses
+    /// `verify_and_authorize_admin_only`, so moderator-role
+    /// sessions receive 403.
+    Audit {
+        #[command(subcommand)]
+        sub: AuditSub,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditSub {
+    /// List audit entries, optionally filtered by actor/action/
+    /// outcome/time-window. Newest first; pagination via
+    /// `--cursor`.
+    List(AuditListArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuditListArgs {
+    /// Filter by actor DID.
+    #[arg(long)]
+    actor: Option<String>,
+    /// Filter by action discriminator (e.g. `label_applied`,
+    /// `report_resolved`).
+    #[arg(long)]
+    action: Option<String>,
+    /// Filter by outcome (`success` or `failure`).
+    #[arg(long)]
+    outcome: Option<String>,
+    /// RFC-3339 inclusive lower bound on `created_at`.
+    #[arg(long)]
+    since: Option<String>,
+    /// RFC-3339 inclusive upper bound on `created_at`.
+    #[arg(long)]
+    until: Option<String>,
+    /// Max rows to return. Server clamps to [1, 250]; default 50.
+    #[arg(long)]
+    limit: Option<i64>,
+    /// Opaque pagination cursor from a prior response.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable table.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -422,7 +472,33 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Moderator {
             sub: ModeratorSub::List(args),
         } => run_moderator_list(args).await,
+        Command::Audit {
+            sub: AuditSub::List(args),
+        } => run_audit_list(args).await,
     }
+}
+
+async fn run_audit_list(args: AuditListArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = audit::AuditListInput {
+        actor: args.actor,
+        action: args.action,
+        outcome: args.outcome,
+        since: args.since,
+        until: args.until,
+        limit: args.limit,
+        cursor: args.cursor,
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = audit::list(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", audit::format_list_json(&resp));
+    } else {
+        println!("{}", audit::format_list_human(&resp));
+    }
+    Ok(())
 }
 
 async fn run_login(args: LoginArgs) -> Result<(), CliError> {
