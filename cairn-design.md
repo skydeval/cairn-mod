@@ -1093,7 +1093,7 @@ Per §14: library/CLI/XRPC surface follows semver. DB migrations run automatical
 
 ### 20.4 Maintenance handoff
 
-If the project is unmaintained for six months (no commits, no issue responses), a MAINTAINERS.md in the repo names a fallback path: preference to transfer ownership to a named Guild or ATProto-Rust community member if they accept. Better than silent abandonment. The specific handoff target is TBD and will be named before v1.0 release.
+Handoff policy lives in [MAINTAINERS.md](MAINTAINERS.md) — the durable source of truth. The v1.0 posture is archive-on-silence (if the maintainer becomes unresponsive for ~6 months, the repo is archived; users should fork if long-term continuity matters). The policy may change in future versions; check MAINTAINERS.md for the current state.
 
 ## 21. Decomposition Sketch (for Crosslink)
 
