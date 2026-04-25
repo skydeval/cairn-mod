@@ -51,6 +51,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::label::Label;
+use crate::server::RetentionConfig;
 use crate::signing::sign_label;
 use crate::signing_key::SigningKey;
 
@@ -217,6 +218,7 @@ enum WriteCommand {
         ResolveReportRequest,
         oneshot::Sender<Result<ResolvedReport>>,
     ),
+    Sweep(SweepRequest, oneshot::Sender<Result<SweepBatchResult>>),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -271,6 +273,52 @@ pub struct ResolvedReport {
     /// `apply_label`. Signed, broadcast, and committed as part of
     /// the same transaction as the report UPDATE.
     pub label_event: Option<LabelEvent>,
+}
+
+/// Trigger for the retention sweep (§F4). Carries no per-call
+/// parameters today — the cutoff comes from `retention_days` baked
+/// into the writer at spawn time, not from the request — but is
+/// kept as a typed unit so a future "sweep with explicit override
+/// for this one run" remains a non-breaking change to the variant.
+#[derive(Debug, Clone, Default)]
+pub struct SweepRequest;
+
+/// Per-batch outcome from one sweep dispatch through the writer's
+/// internal `WriteCommand::Sweep` channel. The writer task processes
+/// ONE batch per command so its main `select!` can interleave
+/// incoming label writes between batches (§F4 + §F5 — single-writer
+/// invariant + bounded latency). Callers who want a full sweep loop
+/// until [`Self::has_more`] is `false`; the [`WriterHandle::sweep`]
+/// convenience wrapper does this internally.
+#[derive(Debug, Clone)]
+pub struct SweepBatchResult {
+    /// Rows deleted in this batch. Zero means "no more old rows
+    /// match the cutoff" — caller stops looping.
+    pub rows_deleted: i64,
+    /// `true` when the batch hit the configured `sweep_batch_size`
+    /// limit and a follow-up batch may find more rows. `false`
+    /// indicates the batch was partial (last batch) and the sweep
+    /// is complete.
+    pub has_more: bool,
+    /// Cutoff days actually applied. `None` when the writer was
+    /// spawned with `retention_days = None` — the sweep is a no-op
+    /// in that configuration and `rows_deleted` is always 0.
+    pub retention_days_applied: Option<u32>,
+}
+
+/// Aggregate result of a full sweep run (returned by
+/// [`WriterHandle::sweep`] after looping over batches).
+#[derive(Debug, Clone)]
+pub struct SweepResult {
+    /// Total rows deleted across all batches.
+    pub rows_deleted: i64,
+    /// Number of batches issued.
+    pub batches: u64,
+    /// Wall-clock duration of the full sweep, in milliseconds.
+    pub duration_ms: u64,
+    /// Cutoff days actually applied, or `None` when the writer's
+    /// `retention_days` is `None` (sweep is a no-op).
+    pub retention_days_applied: Option<u32>,
 }
 
 /// Cheap handle to the writer task. Clones share the same underlying
@@ -340,6 +388,47 @@ impl WriterHandle {
             .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
     }
 
+    /// Trigger a §F4 retention sweep through the writer task. Loops
+    /// over single-batch dispatches until a batch returns
+    /// `has_more = false`, aggregating rows + duration.
+    /// Other writer commands interleave between batches (single-writer
+    /// invariant + bounded latency).
+    ///
+    /// Returns `rows_deleted = 0, batches = 0` when the writer was
+    /// spawned with `retention_days = None` (sweep configured off):
+    /// the first batch returns immediately and the loop exits with
+    /// the no-op result.
+    pub async fn sweep(&self, _req: SweepRequest) -> Result<SweepResult> {
+        let start = std::time::Instant::now();
+        let mut total_rows: i64 = 0;
+        let mut batches: u64 = 0;
+
+        loop {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.tx
+                .send(WriteCommand::Sweep(SweepRequest, reply_tx))
+                .await
+                .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+            let batch = reply_rx
+                .await
+                .map_err(|_| Error::Signing("writer dropped reply channel".into()))??;
+
+            total_rows += batch.rows_deleted;
+            // Count the no-op early-exit batch too — it represents
+            // the round-trip the caller paid for. Useful for tracing.
+            batches += 1;
+
+            if !batch.has_more {
+                return Ok(SweepResult {
+                    rows_deleted: total_rows,
+                    batches,
+                    duration_ms: start.elapsed().as_millis() as u64,
+                    retention_days_applied: batch.retention_days_applied,
+                });
+            }
+        }
+    }
+
     /// Subscribe to committed events. The returned receiver lags past
     /// the internal broadcast buffer; the consumer (subscribeLabels, #7)
     /// turns `RecvError::Lagged` into a connection close.
@@ -386,10 +475,21 @@ impl WriterHandle {
 /// `service_did` stamps `labels.src` on every emitted event. `key` must
 /// be the private key whose public form is recorded (or will be recorded)
 /// in `signing_keys`.
+///
+/// `retention_days` is the §F4 retention cutoff in days. `None` disables
+/// the retention sweep entirely (`WriteCommand::Sweep` becomes a no-op
+/// returning `rows_deleted = 0`); `Some(N)` lets the sweep delete labels
+/// whose `created_at` is older than `now - N days`. Source of truth is
+/// [`crate::SubscribeConfig::retention_days`] — pass it through verbatim.
+///
+/// `retention` is the sweep execution policy (schedule + batching);
+/// distinct from `retention_days` per the [§F4 split](crate::RetentionConfig).
 pub async fn spawn(
     pool: Pool<Sqlite>,
     key: SigningKey,
     service_did: String,
+    retention_days: Option<u32>,
+    retention: RetentionConfig,
 ) -> Result<WriterHandle> {
     let instance_id = acquire_lease(&pool).await?;
     let signing_key_id = ensure_signing_key_row(&pool, &key).await?;
@@ -407,6 +507,8 @@ pub async fn spawn(
         rx,
         broadcast_tx: broadcast_tx.clone(),
         shutdown_tx,
+        retention_days,
+        retention,
     };
 
     tokio::spawn(writer.run());
@@ -429,6 +531,11 @@ struct Writer {
     rx: mpsc::Receiver<WriteCommand>,
     broadcast_tx: broadcast::Sender<LabelEvent>,
     shutdown_tx: watch::Sender<bool>,
+    /// Retention cutoff in days. `None` makes the sweep a no-op.
+    /// Source of truth is [`crate::SubscribeConfig::retention_days`].
+    retention_days: Option<u32>,
+    /// Sweep execution policy (schedule + batching).
+    retention: RetentionConfig,
 }
 
 impl Writer {
@@ -458,6 +565,15 @@ impl Writer {
                         }
                         Some(WriteCommand::ResolveReport(req, reply)) => {
                             let res = self.handle_resolve_report(req).await;
+                            let _ = reply.send(res);
+                        }
+                        Some(WriteCommand::Sweep(req, reply)) => {
+                            // Single-batch dispatch — the caller loops
+                            // until has_more=false. Per-batch return
+                            // lets the writer's biased select pick up
+                            // pending Apply / Negate / ResolveReport
+                            // commands between batches (§F4 + §F5).
+                            let res = self.handle_sweep(req).await;
                             let _ = reply.send(res);
                         }
                         Some(WriteCommand::Shutdown(reply)) => {
@@ -492,6 +608,55 @@ impl Writer {
                 }
             }
         }
+    }
+
+    /// Process one batch of the §F4 retention sweep. Single-batch
+    /// dispatch — see [`WriteCommand::Sweep`] for the loop ordering.
+    ///
+    /// Returns immediately with `rows_deleted = 0, has_more = false`
+    /// when `retention_days` is `None`. Otherwise issues one
+    /// `DELETE FROM labels WHERE created_at < cutoff LIMIT N` in its
+    /// own transaction; sets `has_more = true` iff the batch hit the
+    /// `sweep_batch_size` limit (suggesting more rows may match).
+    ///
+    /// Errors are propagated as `Err(_)` rather than swallowed: a
+    /// transient DB failure should surface to the operator on a
+    /// manual sweep, and to the schedule-loop logger on a scheduled
+    /// sweep. Idempotency (Q5) means the next sweep retries cleanly.
+    async fn handle_sweep(&self, _req: SweepRequest) -> Result<SweepBatchResult> {
+        let Some(days) = self.retention_days else {
+            return Ok(SweepBatchResult {
+                rows_deleted: 0,
+                has_more: false,
+                retention_days_applied: None,
+            });
+        };
+
+        let cutoff_ms = epoch_ms_now() - (days as i64) * 86_400_000;
+        let limit = self.retention.sweep_batch_size;
+
+        let mut tx = self.pool.begin().await?;
+        // SQLite's DELETE doesn't support LIMIT without the
+        // SQLITE_ENABLE_UPDATE_DELETE_LIMIT compile flag (off in
+        // bundled builds). The rowid IN (SELECT ... LIMIT) trick is
+        // the canonical portable workaround.
+        let result = sqlx::query!(
+            "DELETE FROM labels WHERE rowid IN (
+               SELECT rowid FROM labels WHERE created_at < ?1 LIMIT ?2
+             )",
+            cutoff_ms,
+            limit,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        let rows = result.rows_affected() as i64;
+        Ok(SweepBatchResult {
+            rows_deleted: rows,
+            has_more: rows >= limit,
+            retention_days_applied: Some(days),
+        })
     }
 
     async fn handle_apply(&self, req: ApplyLabelRequest) -> Result<LabelEvent> {

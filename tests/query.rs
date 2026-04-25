@@ -43,9 +43,15 @@ async fn spawn_harness() -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("cairn.db");
     let pool = storage::open(&path).await.expect("open pool");
-    let writer = spawn_writer(pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn writer");
+    let writer = spawn_writer(
+        pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn writer");
 
     let router = subscribe_router(pool.clone(), writer.clone(), SubscribeConfig::default());
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

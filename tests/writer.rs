@@ -72,9 +72,15 @@ fn negate_req(uri: &str, val: &str) -> NegateLabelRequest {
 #[tokio::test]
 async fn apply_writes_label_and_audit_and_sig_verifies() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let uri = "at://did:plc:subject000000000000000000/app.bsky.feed.post/aaa";
     let event = handle
@@ -126,9 +132,15 @@ async fn apply_writes_label_and_audit_and_sig_verifies() {
 #[tokio::test]
 async fn concurrent_applies_produce_contiguous_unique_seqs() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
     let handle = Arc::new(handle);
 
     const N: usize = 100;
@@ -159,9 +171,15 @@ async fn concurrent_applies_produce_contiguous_unique_seqs() {
 #[tokio::test]
 async fn rapid_same_tuple_emissions_have_strictly_increasing_cts() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let uri = "at://did:plc:subjectX0000000000000000000/app.bsky.feed.post/yyy";
     let e1 = handle.apply_label(apply_req(uri, "spam")).await.unwrap();
@@ -189,9 +207,15 @@ async fn rapid_same_tuple_emissions_have_strictly_increasing_cts() {
 #[tokio::test]
 async fn negate_flow_and_reapply() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let uri = "at://did:plc:subjectZ0000000000000000000/app.bsky.feed.post/zzz";
 
@@ -235,9 +259,15 @@ async fn negate_flow_and_reapply() {
 #[tokio::test]
 async fn negate_without_prior_apply_returns_label_not_found() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let err = handle
         .negate_label(negate_req(
@@ -254,15 +284,27 @@ async fn negate_without_prior_apply_returns_label_not_found() {
 #[tokio::test]
 async fn second_spawn_against_live_lease_returns_lease_held() {
     let db = fresh_db().await;
-    let first = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("first spawn");
+    let first = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("first spawn");
 
     // Second spawn against the same pool must fail — the first writer's
     // lease is fresh (we literally just acquired it).
-    let err = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect_err("second spawn must fail");
+    let err = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect_err("second spawn must fail");
     assert!(matches!(err, Error::LeaseHeld { .. }), "got {err:?}");
 
     first.shutdown().await.expect("shutdown");
@@ -290,9 +332,15 @@ async fn stale_lease_is_taken_over_on_next_spawn() {
     .unwrap();
 
     // Spawn should take over the stale lease (INSERT OR REPLACE path).
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn must succeed against stale lease");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn must succeed against stale lease");
 
     let holder: String =
         sqlx::query_scalar!("SELECT instance_id FROM server_instance_lease WHERE id = 1")
@@ -307,9 +355,15 @@ async fn stale_lease_is_taken_over_on_next_spawn() {
 #[tokio::test]
 async fn shutdown_releases_lease_row() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     // Pre-shutdown: row exists.
     let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM server_instance_lease")
@@ -330,9 +384,15 @@ async fn shutdown_releases_lease_row() {
 #[tokio::test]
 async fn first_spawn_bootstraps_signing_keys_row() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let row = sqlx::query!("SELECT public_key_multibase, valid_to FROM signing_keys WHERE id = 1")
         .fetch_one(&db.pool)
@@ -347,16 +407,28 @@ async fn first_spawn_bootstraps_signing_keys_row() {
 #[tokio::test]
 async fn second_spawn_with_different_key_errors() {
     let db = fresh_db().await;
-    let first = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("first spawn");
+    let first = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("first spawn");
     first.shutdown().await.expect("shutdown");
 
     // Different 32-byte key.
     let other_key = SigningKey::from_bytes([0x11; 32]);
-    let err = spawn_writer(db.pool.clone(), other_key, SERVICE_DID.to_string())
-        .await
-        .expect_err("mismatched key must error");
+    let err = spawn_writer(
+        db.pool.clone(),
+        other_key,
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect_err("mismatched key must error");
 
     // Swapping the signing key without going through the (deferred)
     // rotation path is explicitly rejected — §F8.
@@ -369,9 +441,15 @@ async fn second_spawn_with_different_key_errors() {
 #[tokio::test]
 async fn broadcast_delivers_events_to_subscribers() {
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     let mut rx = handle.subscribe();
     let event = handle
@@ -397,9 +475,15 @@ async fn apply_with_no_broadcast_receiver_still_succeeds() {
     // Verifies the documented rule that `broadcast::send` returning Err
     // when no receivers exist is NOT a write failure.
     let db = fresh_db().await;
-    let handle = spawn_writer(db.pool.clone(), test_key(), SERVICE_DID.to_string())
-        .await
-        .expect("spawn");
+    let handle = spawn_writer(
+        db.pool.clone(),
+        test_key(),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .expect("spawn");
 
     // Nobody has called .subscribe(). The initial receiver created inside
     // spawn is dropped on function return, so there are zero live

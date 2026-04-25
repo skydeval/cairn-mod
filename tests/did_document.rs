@@ -67,6 +67,8 @@ async fn spawn_router_with_writer() -> (Harness, cairn_mod::WriterHandle) {
         h.pool.clone(),
         SigningKey::from_bytes(hex::decode(TEST_PRIV_HEX).unwrap().try_into().unwrap()),
         SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
     )
     .await
     .unwrap();

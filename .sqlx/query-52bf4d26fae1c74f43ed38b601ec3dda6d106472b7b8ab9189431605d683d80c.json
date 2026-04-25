@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM labels WHERE rowid IN (\n               SELECT rowid FROM labels WHERE created_at < ?1 LIMIT ?2\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "52bf4d26fae1c74f43ed38b601ec3dda6d106472b7b8ab9189431605d683d80c"
+}

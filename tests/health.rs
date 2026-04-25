@@ -69,9 +69,15 @@ async fn harness(dir: &TempDir) -> (Pool<Sqlite>, SocketAddr, tokio::task::JoinH
     let pool = storage::open(&db_path).await.unwrap();
     let key_path = write_signing_key(dir);
     let key = SigningKey::load_from_file(&key_path).unwrap();
-    let writer = spawn_writer(pool.clone(), key, TEST_SERVICE_DID.into())
-        .await
-        .unwrap();
+    let writer = spawn_writer(
+        pool.clone(),
+        key,
+        TEST_SERVICE_DID.into(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
     let router = health_router(pool.clone(), writer);
 
     let bind_addr = free_port();

@@ -115,6 +115,8 @@ async fn spawn(config: AdminConfig) -> Harness {
         pool.clone(),
         cairn_mod::SigningKey::from_bytes(hex::decode(TEST_PRIV_HEX).unwrap().try_into().unwrap()),
         SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
     )
     .await
     .unwrap();

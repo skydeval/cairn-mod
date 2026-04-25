@@ -80,9 +80,15 @@ where
     // Writer's lease also gates the whole write path, so if two
     // `cairn serve` start simultaneously the loser exits here with
     // `LeaseConflict`.
-    let writer = spawn_writer(pool.clone(), key, config.service_did.clone())
-        .await
-        .map_err(map_spawn_writer_error)?;
+    let writer = spawn_writer(
+        pool.clone(),
+        key,
+        config.service_did.clone(),
+        crate::SubscribeConfig::default().retention_days,
+        config.retention.clone().into(),
+    )
+    .await
+    .map_err(map_spawn_writer_error)?;
 
     // Step 3.5: §F1 startup verify (#8). Compare local [labeler]
     // config against the published `app.bsky.labeler.service`

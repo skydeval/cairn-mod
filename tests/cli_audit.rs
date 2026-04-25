@@ -83,6 +83,8 @@ async fn spawn_cairn() -> CairnHarness {
                 .unwrap(),
         ),
         CAIRN_SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
     )
     .await
     .unwrap();
