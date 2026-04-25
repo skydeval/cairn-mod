@@ -429,41 +429,58 @@ async fn open_pool_from_config(
 
 async fn run_moderator_add(args: ModeratorAddArgs) -> Result<(), CliError> {
     let pool = open_pool_from_config(args.config.as_ref()).await?;
-    moderator::add(
+    let json = args.json;
+    let result = moderator::add(
         &pool,
         moderator::AddInput {
             did: args.did,
             role: args.role.into(),
             update_role: args.update_role,
-            json: args.json,
         },
     )
-    .await
+    .await?;
+    if json {
+        println!("{}", moderator::format_add_json(&result));
+    } else {
+        println!("{}", moderator::format_add_human(&result));
+    }
+    Ok(())
 }
 
 async fn run_moderator_remove(args: ModeratorRemoveArgs) -> Result<(), CliError> {
     let pool = open_pool_from_config(args.config.as_ref()).await?;
-    moderator::remove(
+    let json = args.json;
+    let result = moderator::remove(
         &pool,
         moderator::RemoveInput {
             did: args.did,
             force: args.force,
-            json: args.json,
         },
     )
-    .await
+    .await?;
+    if json {
+        println!("{}", moderator::format_remove_json(&result));
+    } else {
+        println!("{}", moderator::format_remove_human(&result));
+    }
+    Ok(())
 }
 
 async fn run_moderator_list(args: ModeratorListArgs) -> Result<(), CliError> {
     let pool = open_pool_from_config(args.config.as_ref()).await?;
-    moderator::list(
+    let mods = moderator::list(
         &pool,
         moderator::ListInput {
             role: args.role.map(Into::into),
-            json: args.json,
         },
     )
-    .await
+    .await?;
+    if args.json {
+        println!("{}", moderator::format_list_json(&mods));
+    } else {
+        println!("{}", moderator::format_list_human(&mods));
+    }
+    Ok(())
 }
 
 fn load_config(explicit_path: Option<&std::path::Path>) -> Result<Config, CliError> {

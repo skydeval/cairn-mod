@@ -69,12 +69,20 @@ impl std::fmt::Display for Role {
 /// insertions via the JWT `iss`, and left NULL for CLI-initiated
 /// inserts (#24 decision C — no attested caller identity at the
 /// CLI boundary).
+///
+/// Public so the `cairn moderator list` orchestrator in the
+/// binary crate can return `Vec<Moderator>`.
 #[derive(Debug, Clone)]
-pub(crate) struct Moderator {
+pub struct Moderator {
+    /// DID identifier of the moderator.
     pub did: String,
+    /// Role assigned to this DID.
     pub role: Role,
+    /// Optional attribution: the caller-DID that performed the
+    /// add operation, populated only on HTTP-admin inserts. NULL
+    /// for CLI-initiated inserts (no attested caller identity).
     pub added_by: Option<String>,
-    /// Unix epoch milliseconds.
+    /// Unix epoch milliseconds when the row was inserted.
     pub added_at: i64,
 }
 
