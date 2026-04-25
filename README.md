@@ -11,7 +11,7 @@ community moderation.
 <!-- TODO (#27 CI hardening): GitHub Actions badge once workflows exist. -->
 <!-- TODO (#28 release workflow): crates.io + docs.rs badges once published. -->
 
-> **Latest stable release:** [v1.0.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.0.0) · install with `cargo install cairn-mod`
+> **Latest stable release:** [v1.1.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0) · install with `cargo install cairn-mod`
 >
 > The `main` branch contains active development toward the next release. For production deployments, pin to a released version.
 
@@ -30,7 +30,7 @@ than Skyware; it does not try to be either.
 
 ## Status
 
-**v1.0.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.0.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.0.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
+**v1.1.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.1.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
 **v1.1 is in active development on `main`.** Scope includes `/health` and `/ready` endpoints, a moderator management CLI, CI security scanning, the subscribeLabels retention sweep (`tools.cairn.admin.retentionSweep` + `cairn retention sweep`), and operator/admin CLI surfaces wrapping the admin XRPC endpoints.
 
