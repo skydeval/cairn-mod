@@ -7,6 +7,35 @@ license = "MIT OR Apache-2.0"
 description = "Lightweight, Rust-native ATProto labeler"
 repository = "https://github.com/skydeval/cairn-mod"
 
+# Trim the crates.io tarball to what `cargo install cairn-mod` users
+# actually need: the binary, lib source, embedded lexicons, the
+# .sqlx/ offline cache, deployment templates, and load-bearing docs
+# (LICENSE, README, CHANGELOG, CONTRIBUTING, SECURITY).
+#
+# `.sqlx/` (~95 entries) is a hard floor — required for downstream
+# offline builds when sqlx-cli isn't installed. Cutting below ~170
+# files would require splitting the cache into lib-only vs
+# all-targets variants; deferred as a #22 follow-up.
+exclude = [
+    # Internal dev tooling / agent runtime — not for downstream.
+    ".chainlink/",
+    ".claude/",
+    ".github/",
+    ".gitignore",
+    "deny.toml",
+    # Internal docs — design narrative, governance, history. The
+    # crates.io README + CHANGELOG carry what users need; the rest
+    # is for contributors who clone the git repo.
+    "cairn-design.md",
+    "docs/",
+    "RETROSPECTIVE.md",
+    "MAINTAINERS.md",
+    "CODE_OF_CONDUCT.md",
+    # Tests + fixtures — `cargo install` doesn't run them; they
+    # add ~70 files of weight (signature corpus alone is ~40).
+    "tests/",
+]
+
 [lib]
 name = "cairn_mod"
 path = "src/lib.rs"
