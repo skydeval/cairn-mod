@@ -289,6 +289,85 @@ VALUES ('did:plc:example', 'admin', strftime('%s','now') * 1000);
 Direct SQL skips the last-admin guard and the role-change
 prompts; reach for it only when the CLI path isn't an option.
 
+### Report management ([§F17](cairn-design.md#f17-report-management-cli-v11))
+
+Admin-side report workflow via `cairn report {list, view, resolve,
+flag, unflag}`. All five subcommands wrap the
+`tools.cairn.admin.*` HTTP endpoints, so they require a logged-in
+session (`cairn login`) and a moderator-or-admin role row in the
+`moderators` table on the target Cairn instance.
+
+```
+# List pending reports.
+cairn report list --status pending
+
+# Filter by reporter; emit JSON for piping through jq.
+cairn report list --reported-by did:plc:reporter --json
+
+# Page through results via the cursor a previous response emitted.
+cairn report list --cursor <c-from-prior-response>
+
+# Inspect one report (full body included; admin-authenticated).
+cairn report view 42
+
+# Resolve a report without applying a label (the "dismiss" workflow).
+cairn report resolve 42 --reason "not actionable"
+
+# Resolve AND apply a label in one transaction.
+cairn report resolve 42 \
+  --apply-label-val spam \
+  --apply-label-uri did:plc:offender \
+  --reason "definitely spam"
+
+# Suppress future reports from a noisy reporter; reverse with unflag.
+cairn report flag did:plc:noisyreporter --reason "false reports"
+cairn report unflag did:plc:noisyreporter
+```
+
+**Audit attribution.** Every mutating action (`resolve`, `flag`,
+`unflag`) is recorded in `audit_log` with the moderator's DID as
+the actor — taken from the JWT `iss` Cairn's session-auth
+produces. The CLI is HTTP-wrapped (not a direct DB tool)
+specifically so this attribution is correct; bypassing the HTTP
+path would write `actor_did = NULL` rows, corrupting the audit
+trail for exactly the events operators most want to reconstruct.
+
+**Pagination.** Auto-pagination is intentionally out of scope.
+`--cursor <c>` is the operator's mechanism for chaining calls.
+JSON output includes a top-level `cursor` field when more results
+are available; human output appends a trailing `next cursor: ...`
+line.
+
+### Audit log queries ([§F18](cairn-design.md#f18-audit-log-cli-v11))
+
+Read-only audit log inspection via `cairn audit list`.
+
+```
+# Newest 50 entries.
+cairn audit list
+
+# Filter by actor / action / outcome.
+cairn audit list --actor did:plc:moderator --action label_applied
+cairn audit list --outcome failure
+
+# Time-window scan (RFC-3339 inclusive bounds).
+cairn audit list --since 2026-04-01T00:00:00Z --until 2026-05-01T00:00:00Z
+
+# Page through; emit JSON for downstream tooling.
+cairn audit list --limit 250 --cursor <c-from-prior-response> --json
+```
+
+**Admin role required.** Moderators querying the audit log
+receive 403. The audit log records the moderator's own actions;
+read access to the full set is reserved for admins to avoid the
+"moderators silently auditing one another" pattern.
+
+**Read-only contract.** The `audit_log` table has SQL triggers
+that abort UPDATE and DELETE; the CLI matches by exposing only
+read operations. There is no `cairn audit show <id>` subcommand
+in v1.1 — the corresponding `getAuditLog` HTTP endpoint hasn't
+been written yet (tracked separately).
+
 ### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
 
 - [ ] **Only one `cairn serve` against a given DID at a time.**

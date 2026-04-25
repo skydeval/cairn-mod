@@ -670,6 +670,60 @@ The `Role` enum lives in `src/moderators.rs` (a neutral, non-server module) so b
 - `cairn moderator list --json` is a JSON array; the per-row shape parses without coercion.
 - All three subcommands work while `cairn serve` is running against the same DB (no lease conflict).
 
+### F17. Report management CLI (v1.1)
+
+Admin-side report workflow via `cairn report {list, view, resolve, flag, unflag}` (#7). All five subcommands wrap the `tools.cairn.admin.*` HTTP endpoints — they are NOT direct-DB tools.
+
+**Architectural choice — HTTP over direct-DB.** Considered direct-DB during scoping (parallel to `cairn moderator`'s pattern from §F16) and rejected for three load-bearing reasons:
+
+1. **Audit attribution.** The mutating subcommands (`resolve`, `flag`, `unflag`) write `audit_log` rows. HTTP path: server uses JWT `iss` → `actor_did` is the real moderator DID. Direct DB: no attested caller → `actor_did = NULL`, silently corrupting the audit trail for exactly the events operators most want to reconstruct.
+2. **§F11 reason-leak invariant.** The server enforces "report body never returned by list-style endpoints" at the type level (`ReportListEntry` has no `reason` field; `ReportDetail` does). A direct-DB CLI would have to re-implement that invariant — a load-bearing duplication risk.
+3. **No bootstrap problem.** `cairn moderator` is direct-DB because of bootstrap (no admin exists when reports are being processed, by definition admins exist). The chicken-and-egg argument that justifies direct-DB for `moderator` doesn't apply.
+
+**Subcommands and the handlers they wrap:**
+
+- `cairn report list [--status <s>] [--reported-by <did>] [--limit N] [--cursor <c>] [--json]`
+  Wraps `tools.cairn.admin.listReports` (mod OR admin role). Returns the reason-less `ReportListEntry` projection per §F11.
+- `cairn report view <id> [--json]`
+  Wraps `tools.cairn.admin.getReport` (mod OR admin role). Returns `ReportDetail` with the reason body included — admin-authenticated access permits this per §F11.
+- `cairn report resolve <id> [--apply-label-val <v> --apply-label-uri <u> [--apply-label-cid <c>] [--apply-label-exp <ts>]] [--reason <text>] [--json]`
+  Wraps `tools.cairn.admin.resolveReport` (mod OR admin role). The `--apply-label-*` group is all-or-none — clap's `requires` attribute pairs `--apply-label-val` with `--apply-label-uri`. Omitting the group resolves without applying a label (the "dismiss" workflow); the schema has no separate `'dismissed'` status.
+- `cairn report flag <did> [--reason <text>] [--json]`
+- `cairn report unflag <did> [--reason <text>] [--json]`
+  Both wrap `tools.cairn.admin.flagReporter` (mod OR admin role) with `suppressed: true` and `suppressed: false` respectively. Server audits as `reporter_flagged` / `reporter_unflagged`.
+
+**Pagination.** `list` exposes `--cursor` and emits the next-cursor in both human (trailing `next cursor: ...` line) and JSON (top-level `cursor` field) output. Auto-pagination is deliberately out of scope; consumers chain calls themselves.
+
+**Verification:**
+
+- Each subcommand's `format_*_human` and `format_*_json` are pure functions of the typed response, tested without HTTP mocking.
+- `tests/cli_report_admin.rs::resolve_with_label_applies_and_resolves` asserts `audit_log.actor_did = <moderator DID>` after resolve — the load-bearing attribution check.
+- `tests/cli_report_admin.rs::list_returns_seeded_reports` asserts the JSON output contains no `reason` field, mirroring §F11's reason-leak invariant in test form.
+
+### F18. Audit log CLI (v1.1)
+
+`cairn audit list` (#6). Read-only inspection of the `audit_log` table via the `tools.cairn.admin.listAuditLog` HTTP endpoint.
+
+**Admin role only.** Server uses `verify_and_authorize_admin_only`; moderators receive 403. The rationale: the audit log records moderator actions, and read access to the full set is reserved for admins to avoid the "moderators silently auditing one another" pattern.
+
+**Subcommand:**
+
+- `cairn audit list [--actor <did>] [--action <a>] [--outcome success|failure] [--since <rfc3339>] [--until <rfc3339>] [--limit N] [--cursor <c>] [--json]`
+
+`--since` and `--until` are RFC-3339 strings on the wire; the server parses them via `parse_rfc3339_ms`. The CLI does no client-side conversion (server-side parser stays the source of truth).
+
+**No `cairn audit show <id>`.** The corresponding `getAuditLog` HTTP endpoint doesn't exist; it's tracked as a separate v1.2 follow-up. v1.1 ships list-only.
+
+**Read-only contract.** The `audit_log` table has SQL triggers that abort UPDATE and DELETE; the CLI surface mirrors this by exposing only a read operation. There is no `--force` flag or mutation path on this subcommand.
+
+**Pagination.** Same shape as `cairn report list`: `--cursor` + emitted `next cursor` in both output formats.
+
+**Verification:**
+
+- `tests/cli_audit.rs::list_admin_only_moderator_role_receives_403` asserts the admin-only contract — seeds the moderator as `mod` (not `admin`) and confirms the 403 response.
+- Each filter (`actor`, `action`, `outcome`) has its own happy-path test.
+- `format_list_*` are pure-function tested with synthetic typed responses.
+
 ## 8. Lexicons
 
 Cairn defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
