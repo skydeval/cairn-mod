@@ -84,6 +84,24 @@ where
         .await
         .map_err(map_spawn_writer_error)?;
 
+    // Step 3.5: §F1 startup verify (#8). Compare local [labeler]
+    // config against the published `app.bsky.labeler.service`
+    // record on the operator's PDS. Drift / absent / unreachable
+    // each fail-start with a distinct exit code so orchestrators
+    // (and operators) can branch.
+    //
+    // Placed AFTER spawn_writer so we benefit from the
+    // single-instance lease (no point verifying for a server that
+    // can't run anyway) and BEFORE bind so a drifting labeler
+    // doesn't accept traffic. Failure releases the lease via
+    // writer.shutdown() before returning the error.
+    if let Err(verify_err) = verify::verify_service_record(&config).await {
+        if let Err(e) = writer.shutdown().await {
+            tracing::warn!(error = %e, "writer shutdown failed during verify-induced exit");
+        }
+        return Err(verify_err);
+    }
+
     // Step 4: auth context (DID resolver + JWT replay cache, #11).
     // No network IO at construction — only when a request arrives.
     let auth = Arc::new(AuthContext::new(AuthConfig {
@@ -217,5 +235,300 @@ fn map_spawn_writer_error(e: Error) -> CliError {
             age_secs,
         },
         other => CliError::Startup(format!("writer spawn: {other}")),
+    }
+}
+
+/// §F1 startup verify (#8). Inline `mod verify` to keep the
+/// scope local to `serve.rs` per the session decision; extract
+/// to a free-standing module if the surface grows past ~80
+/// lines.
+mod verify {
+    use crate::cli::error::CliError;
+    use crate::cli::pds::{PdsClient, PdsError};
+    use crate::config::Config;
+    use crate::service_record::{self, RECORD_COLLECTION, RECORD_RKEY};
+    use serde_json::Value;
+
+    /// Verify that the local `[labeler]` config renders to the same
+    /// content-hash as the `app.bsky.labeler.service` record
+    /// currently published on the operator's PDS.
+    ///
+    /// Returns Ok(()) on a match (also logs an info-level success
+    /// line). Returns one of three [`CliError`] variants on
+    /// failure:
+    ///
+    /// - `ServiceRecordDrift`        — record exists but differs
+    /// - `ServiceRecordAbsent`       — record not found on PDS
+    /// - `ServiceRecordUnreachable`  — transport failure during fetch
+    ///
+    /// Local-render failures (`service_record::render` returning
+    /// `Err(RenderError)`) surface as `CliError::Config` per the
+    /// session D2 fail-closed decision: those signal a malformed
+    /// `[labeler]` block, distinct from PDS-comparison failures.
+    pub(super) async fn verify_service_record(config: &Config) -> Result<(), CliError> {
+        // Labeler-absent → no §F1 service record applies → verify
+        // is a no-op. This intentionally narrows the verify gate
+        // to deployments that have declared a labeler. Configs
+        // without a [labeler] block are running some other
+        // workflow (test harness, custom embedder); refusing to
+        // start would be heavy-handed for a feature that doesn't
+        // apply. NOT a general opt-out — operator-facing
+        // deployments that publish a labeler always have
+        // [labeler] set.
+        let Some(labeler_cfg) = config.labeler.as_ref() else {
+            tracing::info!(
+                "no [labeler] config block — skipping service record verify (#8 narrow scope)"
+            );
+            return Ok(());
+        };
+        // [labeler] without [operator] is a real misconfig: the
+        // operator declared a labeler but didn't tell us where to
+        // verify against. Fail-closed per session D2.
+        let operator_cfg = config.operator.as_ref().ok_or_else(|| {
+            CliError::Config(
+                "[labeler] is configured but [operator] is missing — verify needs operator.pds_url"
+                    .into(),
+            )
+        })?;
+
+        // Render the local record with a sentinel createdAt — the
+        // value is irrelevant since content_hash strips it.
+        let local_record = service_record::render(labeler_cfg, "1970-01-01T00:00:00.000Z")
+            .map_err(|e| CliError::Config(format!("could not render local service record: {e}")))?;
+        let local_hash = service_record::content_hash(&local_record);
+
+        let pds = PdsClient::new(&operator_cfg.pds_url).map_err(|e| {
+            CliError::ServiceRecordUnreachable {
+                pds_url: operator_cfg.pds_url.clone(),
+                cause: e.to_string(),
+            }
+        })?;
+        let fetched = match pds
+            .get_record(&config.service_did, RECORD_COLLECTION, RECORD_RKEY)
+            .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return Err(CliError::ServiceRecordAbsent {
+                    pds_url: operator_cfg.pds_url.clone(),
+                    service_did: config.service_did.clone(),
+                });
+            }
+            Err(PdsError::Network { source, .. }) => {
+                return Err(CliError::ServiceRecordUnreachable {
+                    pds_url: operator_cfg.pds_url.clone(),
+                    cause: source.to_string(),
+                });
+            }
+            Err(other) => {
+                return Err(CliError::ServiceRecordUnreachable {
+                    pds_url: operator_cfg.pds_url.clone(),
+                    cause: other.to_string(),
+                });
+            }
+        };
+
+        let pds_hash = service_record::content_hash_value(fetched.value.clone());
+        if local_hash == pds_hash {
+            tracing::info!(
+                cid = ?fetched.cid,
+                "service record verified: local config matches PDS"
+            );
+            return Ok(());
+        }
+
+        // Drift: build a per-field human-readable summary so the
+        // operator-facing error message names exactly what differs
+        // without dumping raw JSON.
+        let summary = drift_summary(&local_record, &fetched.value);
+        tracing::error!(
+            pds_url = %operator_cfg.pds_url,
+            "service record drift detected — see error for details"
+        );
+        Err(CliError::ServiceRecordDrift {
+            pds_url: operator_cfg.pds_url.clone(),
+            service_did: config.service_did.clone(),
+            summary,
+        })
+    }
+
+    /// Build the drift summary block. Compares the four
+    /// comparison-relevant fields of an
+    /// `app.bsky.labeler.service` record (label values,
+    /// definition count, reason types, subject types) and
+    /// surfaces only the ones that differ. Inputs:
+    ///
+    /// - `local`  — the rendered local `ServiceRecord`
+    /// - `pds`    — the PDS-returned record body, opaque
+    ///   `serde_json::Value`. We read scalar fields out of the
+    ///   Value rather than deserializing into `ServiceRecord`
+    ///   to avoid the `&'static str` problem on the struct.
+    fn drift_summary(local: &service_record::ServiceRecord, pds: &Value) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        let local_lv = &local.policies.label_values;
+        let pds_lv = pds_label_values(pds);
+        if local_lv != &pds_lv {
+            let _ = writeln!(out, "  - label values:");
+            let _ = writeln!(out, "      local:     {local_lv:?}");
+            let _ = writeln!(out, "      published: {pds_lv:?}");
+        }
+
+        let local_defs = local.policies.label_value_definitions.len();
+        let pds_defs = pds_definition_count(pds);
+        if local_defs != pds_defs {
+            let _ = writeln!(out, "  - label value definitions:");
+            let _ = writeln!(out, "      local:     {local_defs} entries");
+            let _ = writeln!(out, "      published: {pds_defs} entries");
+        }
+
+        let local_rt = &local.reason_types;
+        let pds_rt = pds_string_array(pds, "reasonTypes");
+        if local_rt != &pds_rt {
+            let _ = writeln!(out, "  - reason types:");
+            let _ = writeln!(out, "      local:     {local_rt:?}");
+            let _ = writeln!(out, "      published: {pds_rt:?}");
+        }
+
+        let local_st = &local.subject_types;
+        let pds_st = pds_string_array(pds, "subjectTypes");
+        if local_st != &pds_st {
+            let _ = writeln!(out, "  - subject types:");
+            let _ = writeln!(out, "      local:     {local_st:?}");
+            let _ = writeln!(out, "      published: {pds_st:?}");
+        }
+
+        // The hashes are unequal but our four-field comparison
+        // didn't surface anything. That's a definition-content
+        // drift (severity / blurs / locales drift inside a
+        // definition with the same identifier set). Name it
+        // explicitly so the operator knows what to look at.
+        if out.is_empty() {
+            out.push_str(
+                "  - per-label definition contents (severity / blurs / locales) differ; \
+                 inspect the published record alongside the local config to identify which.\n",
+            );
+        }
+
+        // Trim trailing newline; the `#[error("...")]` template
+        // already includes one.
+        if out.ends_with('\n') {
+            out.pop();
+        }
+        out
+    }
+
+    fn pds_label_values(v: &Value) -> Vec<String> {
+        v.get("policies")
+            .and_then(|p| p.get("labelValues"))
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn pds_definition_count(v: &Value) -> usize {
+        v.get("policies")
+            .and_then(|p| p.get("labelValueDefinitions"))
+            .and_then(|x| x.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    }
+
+    fn pds_string_array(v: &Value, key: &str) -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::config::{
+            BlursToml, LabelValueDefinitionToml, LabelerConfigToml, LocaleToml, SeverityToml,
+        };
+
+        fn sample_cfg() -> LabelerConfigToml {
+            LabelerConfigToml {
+                label_values: vec!["spam".into()],
+                label_value_definitions: vec![LabelValueDefinitionToml {
+                    identifier: "spam".into(),
+                    severity: SeverityToml::Alert,
+                    blurs: BlursToml::None,
+                    default_setting: None,
+                    adult_only: None,
+                    locales: vec![LocaleToml {
+                        lang: "en".into(),
+                        name: "Spam".into(),
+                        description: "x".into(),
+                    }],
+                }],
+                reason_types: vec![],
+                subject_types: vec!["account".into()],
+                subject_collections: vec![],
+            }
+        }
+
+        #[test]
+        fn drift_summary_label_values_differ() {
+            let local = service_record::render(&sample_cfg(), "1970-01-01T00:00:00.000Z").unwrap();
+            let pds_value = serde_json::json!({
+                "policies": { "labelValues": ["other"] },
+            });
+            let s = drift_summary(&local, &pds_value);
+            assert!(s.contains("label values"));
+            assert!(s.contains("\"spam\""));
+            assert!(s.contains("\"other\""));
+            assert!(!s.contains("reason types"), "no drift on reasonTypes here");
+        }
+
+        #[test]
+        fn drift_summary_definition_count_differs() {
+            let local = service_record::render(&sample_cfg(), "1970-01-01T00:00:00.000Z").unwrap();
+            let pds_value = serde_json::json!({
+                "policies": {
+                    "labelValues": ["spam"],
+                    "labelValueDefinitions": [],
+                },
+                "subjectTypes": ["account"],
+            });
+            let s = drift_summary(&local, &pds_value);
+            assert!(s.contains("label value definitions"));
+            assert!(s.contains("local:     1 entries"));
+            assert!(s.contains("published: 0 entries"));
+        }
+
+        #[test]
+        fn drift_summary_falls_back_when_no_top_level_field_differs() {
+            let local = service_record::render(&sample_cfg(), "1970-01-01T00:00:00.000Z").unwrap();
+            // Same top-level shape; only inner definition contents
+            // differ — the four scalar comparisons don't catch it.
+            let pds_value = serde_json::json!({
+                "policies": {
+                    "labelValues": ["spam"],
+                    "labelValueDefinitions": [{
+                        "identifier": "spam",
+                        "severity": "inform",
+                        "blurs": "content",
+                        "locales": [{ "lang": "fr", "name": "Spam", "description": "y" }],
+                    }],
+                },
+                "subjectTypes": ["account"],
+            });
+            let s = drift_summary(&local, &pds_value);
+            assert!(
+                s.contains("per-label definition contents"),
+                "fallback message expected; got: {s}"
+            );
+        }
     }
 }

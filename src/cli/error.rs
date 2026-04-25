@@ -41,6 +41,19 @@ pub mod code {
     /// branch ("another instance is running, don't restart") vs.
     /// genuine internal failure.
     pub const LEASE_CONFLICT: i32 = 11;
+    /// Service record verify (§F1, #8): local `[labeler]` config
+    /// differs from the published `app.bsky.labeler.service` record
+    /// on the PDS. Operator action required: reconcile via
+    /// `cairn publish-service-record`.
+    pub const SERVICE_RECORD_DRIFT: i32 = 12;
+    /// Service record verify (§F1, #8): no record published yet.
+    /// Operator action required: run
+    /// `cairn publish-service-record` for the first time.
+    pub const SERVICE_RECORD_ABSENT: i32 = 13;
+    /// Service record verify (§F1, #8): PDS unreachable during
+    /// the verify fetch. Transient infra issue; orchestrators
+    /// should retry rather than treating as a config drift.
+    pub const SERVICE_RECORD_UNREACHABLE: i32 = 14;
 }
 
 /// Error sources the CLI dispatcher knows about. The human-readable
@@ -131,6 +144,49 @@ pub enum CliError {
     /// surfaces as INTERNAL.
     #[error("startup failure: {0}")]
     Startup(String),
+    /// `cairn serve` startup verify (§F1, #8): the published
+    /// `app.bsky.labeler.service` record on the operator's PDS
+    /// differs from what the local `[labeler]` config block would
+    /// render. Reconcile via `cairn publish-service-record`.
+    #[error(
+        "service record verification failed: local [labeler] config differs from the published record at {pds_url}/{service_did}.\n\nDifferences:\n{summary}\n\nThe local config and the published record must agree before `cairn serve` will start. To reconcile, review the differences above, then on the operator's host run:\n\n    cairn publish-service-record --config <path>\n\nto update the PDS record."
+    )]
+    ServiceRecordDrift {
+        /// PDS URL the verify check fetched from.
+        pds_url: String,
+        /// Labeler service DID whose record was fetched.
+        service_did: String,
+        /// Per-field drift summary built by `serve::verify`. Not
+        /// raw JSON — a human-readable enumeration of the fields
+        /// that differ.
+        summary: String,
+    },
+    /// `cairn serve` startup verify (§F1, #8): no
+    /// `app.bsky.labeler.service` record exists on the operator's
+    /// PDS for the labeler's DID. The labeler hasn't published
+    /// its declaration yet.
+    #[error(
+        "service record verification failed: app.bsky.labeler.service record not found at {pds_url} for repo {service_did}.\n\nThis labeler has not yet published its declaration to the PDS. On the operator's host (where operator credentials are configured), run:\n\n    cairn publish-service-record --config <path>\n\nthen restart `cairn serve`."
+    )]
+    ServiceRecordAbsent {
+        /// PDS URL the verify check fetched from.
+        pds_url: String,
+        /// Labeler service DID whose record was searched.
+        service_did: String,
+    },
+    /// `cairn serve` startup verify (§F1, #8): could not reach
+    /// the PDS to perform the verify fetch. Transient infra
+    /// issue, distinct from drift / absent — orchestrators should
+    /// retry.
+    #[error(
+        "service record verification failed: could not reach PDS at {pds_url} to fetch app.bsky.labeler.service.\n\nUnderlying error: {cause}\n\nThis is likely a transient infrastructure issue (PDS down, network flaky, rate limit). Verify the PDS is reachable then retry. If the issue persists, check `operator.pds_url` in your config and confirm the labeler DID's home PDS."
+    )]
+    ServiceRecordUnreachable {
+        /// PDS URL the verify check tried to fetch from.
+        pds_url: String,
+        /// Underlying error message (transport, status, etc.).
+        cause: String,
+    },
 }
 
 impl CliError {
@@ -168,6 +224,9 @@ impl CliError {
             CliError::LeaseConflict { .. } => code::LEASE_CONFLICT,
             CliError::BindFailed { .. } => code::NETWORK,
             CliError::Startup(_) => code::INTERNAL,
+            CliError::ServiceRecordDrift { .. } => code::SERVICE_RECORD_DRIFT,
+            CliError::ServiceRecordAbsent { .. } => code::SERVICE_RECORD_ABSENT,
+            CliError::ServiceRecordUnreachable { .. } => code::SERVICE_RECORD_UNREACHABLE,
         }
     }
 }

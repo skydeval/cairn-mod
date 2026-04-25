@@ -228,9 +228,22 @@ fn default_setting_str(d: DefaultSettingToml) -> &'static str {
 ///
 /// Returns 32 raw bytes; callers hex-encode for persistence.
 pub fn content_hash(record: &ServiceRecord) -> [u8; 32] {
-    let mut v = serde_json::to_value(record).expect("ServiceRecord serializes");
-    // Remove createdAt in-place so two renders differing only in
-    // that field hash identically.
+    content_hash_value(serde_json::to_value(record).expect("ServiceRecord serializes"))
+}
+
+/// `Value`-side of [`content_hash`]. Hashes any
+/// `app.bsky.labeler.service`-shaped JSON object via the same
+/// canonicalize-then-SHA-256 path, with `createdAt` excluded.
+///
+/// Used by `cairn serve`'s startup verify check (#8): the PDS
+/// returns the record body as `serde_json::Value` (the
+/// `GetRecordResponse.value` field), and the verify path hashes
+/// it directly without round-tripping through a `ServiceRecord`
+/// struct. The struct's `Serialize`-only derives use `&'static str`
+/// for several fields, which would prevent a symmetric `Deserialize`
+/// without a parallel read-side type — `Value` parsing sidesteps
+/// that.
+pub(crate) fn content_hash_value(mut v: Value) -> [u8; 32] {
     if let Value::Object(map) = &mut v {
         map.remove("createdAt");
     }
