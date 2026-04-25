@@ -14,9 +14,12 @@
 #   .chainlink/rules/             — project coding standards
 
 # === Legacy crosslink leftovers (post-migration) ===
-# Directory is untracked at remote; these entries keep transient
-# files from re-appearing if crosslink is re-run against this repo.
+# Pre-migration tracker state lives in .crosslink.archive/ (read-only;
+# do not modify — see docs/tracker-history.md). The .crosslink/ entry
+# remains defensively in case crosslink tooling is re-run against this
+# repo and re-creates the directory.
 .crosslink/
+.crosslink.archive/
 
 # .claude/ — auto-generated hooks, not project source
 .claude/hooks/
