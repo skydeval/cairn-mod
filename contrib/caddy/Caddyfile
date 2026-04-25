@@ -67,13 +67,22 @@ labeler.example.com {
 	# }
 	# --------------------------------------------------------------
 
-	tls {
-		# Default Caddy ACME issuer (Let's Encrypt production).
-		# For staging during first-run testing, uncomment:
-		# issuer acme {
-		# 	dir https://acme-staging-v02.api.letsencrypt.org/directory
-		# }
-	}
+	# TLS: Caddy auto-provisions a Let's Encrypt certificate for
+	# the site address by default — no explicit `tls` directive
+	# needed. (An empty `tls { }` block was rejected by newer
+	# Caddy versions with "wrong argument count or unexpected
+	# line ending after '}'", so it has to be either populated
+	# or absent. Absent is the right choice for the production-
+	# ACME default.)
+	#
+	# For staging during first-run testing, REPLACE the implicit
+	# default by adding this block (uncomment + adjust):
+	#
+	#   tls {
+	#       issuer acme {
+	#           dir https://acme-staging-v02.api.letsencrypt.org/directory
+	#       }
+	#   }
 
 	log {
 		output file /var/log/caddy/cairn.access.log
