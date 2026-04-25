@@ -1,9 +1,3 @@
-// Temporary file-level allow while the CLI wire-up lands in the
-// next commit of #24. The DB helpers below have no in-tree callers
-// yet; commit 3 (`feat(cli): cairn moderator ...`) consumes them
-// and removes this attribute.
-#![allow(dead_code)]
-
 //! Moderator identity + role-based authorization primitives shared
 //! between the HTTP admin surface and the `cairn moderator` CLI
 //! (#24).
@@ -13,12 +7,11 @@
 //!
 //! - [`Role`] — enum mirroring the `moderators.role` column's
 //!   CHECK constraint (`'mod' | 'admin'`).
-//! - [`Moderator`] — record struct mapping one row.
-//! - [`Error`] — thiserror-wrapped DB + corruption variants.
-//! - [`add`], [`remove`], [`list`], [`count_admins`] — the DB
-//!   helpers `cairn moderator` invokes. No caller is updated to
-//!   use these in this commit; the CLI wire-up lands in the next
-//!   commit of #24.
+//! - `Moderator` — record struct mapping one row.
+//! - `Error` — thiserror-wrapped DB + corruption variants.
+//! - `add`, `remove`, `list`, `count_admins` — the DB helpers
+//!   `cairn moderator` invokes (pub(crate); links omitted because
+//!   the public-API docs would treat them as broken).
 
 use sqlx::{Pool, Sqlite};
 
@@ -27,9 +20,17 @@ use crate::writer::epoch_ms_now;
 /// Role values persisted in `moderators.role`. The schema CHECK
 /// constrains the column to exactly these two strings, so any
 /// other value in a read means corrupt data, not an unknown role.
+///
+/// Public so the `cairn moderator` CLI in the binary crate can
+/// construct values for the helpers below; helpers themselves stay
+/// `pub(crate)` — moderator-table mutation is not part of the
+/// library's external API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Role {
+pub enum Role {
+    /// Standard moderator role: can apply, negate, and resolve.
     Mod,
+    /// Elevated role: everything `Mod` can do, plus
+    /// `tools.cairn.admin.listAuditLog` (§F12).
     Admin,
 }
 

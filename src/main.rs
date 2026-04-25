@@ -10,12 +10,13 @@ use cairn_mod::cli::{
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
-    operator_login,
+    moderator, operator_login,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     session,
 };
 use cairn_mod::config::Config;
+use cairn_mod::moderators::Role;
 use cairn_mod::{serve, storage};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -69,6 +70,15 @@ enum Command {
     /// (§F1). Idempotent — no PDS write if the content hash matches
     /// the last-published value.
     PublishServiceRecord(ServeArgs),
+
+    /// Moderator management. Direct manipulation of the
+    /// `moderators` SQLite table — bypasses the HTTP admin
+    /// surface, so adds + removes via this command leave
+    /// `moderators.added_by` NULL (no attested CLI-caller DID).
+    Moderator {
+        #[command(subcommand)]
+        sub: ModeratorSub,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -118,6 +128,87 @@ struct LoginArgs {
 enum ReportSub {
     /// Submit a new report (com.atproto.moderation.createReport).
     Create(ReportCreateArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ModeratorSub {
+    /// Add a moderator. Errors on a duplicate DID unless
+    /// `--update-role` is passed.
+    Add(ModeratorAddArgs),
+    /// Remove a moderator. Errors if the DID is not a moderator.
+    /// Refuses to remove the last admin unless `--force` is set.
+    Remove(ModeratorRemoveArgs),
+    /// List moderators, optionally filtered by `--role`.
+    List(ModeratorListArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorAddArgs {
+    /// DID of the moderator (e.g. `did:plc:...`, `did:web:...`).
+    did: String,
+    /// Role to assign.
+    #[arg(long, value_enum)]
+    role: RoleArg,
+    /// Allow updating the role of an existing moderator. Without
+    /// this flag, an attempt to add a DID that's already a
+    /// moderator with a different role errors.
+    #[arg(long)]
+    update_role: bool,
+    /// Emit JSON instead of a human one-liner.
+    #[arg(long)]
+    json: bool,
+    /// Path to the TOML config file (same semantics as
+    /// `cairn serve --config`).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorRemoveArgs {
+    /// DID of the moderator to remove.
+    did: String,
+    /// Skip the last-admin guard.
+    #[arg(long)]
+    force: bool,
+    /// Emit JSON instead of a human one-liner.
+    #[arg(long)]
+    json: bool,
+    /// Path to the TOML config file.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorListArgs {
+    /// Filter to a specific role. If omitted, list everyone.
+    #[arg(long, value_enum)]
+    role: Option<RoleArg>,
+    /// Emit JSON instead of the human-readable table.
+    #[arg(long)]
+    json: bool,
+    /// Path to the TOML config file.
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+/// Clap-side wrapper over [`Role`]. Kept distinct from the shared
+/// [`Role`] type so `clap::ValueEnum` doesn't leak into non-CLI
+/// modules; the variants are by-construction 1:1 with `Role`, so
+/// adding a role would require touching both — surfaced as a diff
+/// in any future PR.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RoleArg {
+    Mod,
+    Admin,
+}
+
+impl From<RoleArg> for Role {
+    fn from(r: RoleArg) -> Role {
+        match r {
+            RoleArg::Mod => Role::Mod,
+            RoleArg::Admin => Role::Admin,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -205,6 +296,15 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Serve(args) => run_serve(args).await,
         Command::OperatorLogin(args) => run_operator_login(args).await,
         Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Add(args),
+        } => run_moderator_add(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Remove(args),
+        } => run_moderator_remove(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::List(args),
+        } => run_moderator_list(args).await,
     }
 }
 
@@ -316,6 +416,54 @@ async fn run_publish_service_record(args: ServeArgs) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+async fn open_pool_from_config(
+    config: Option<&PathBuf>,
+) -> Result<sqlx::Pool<sqlx::Sqlite>, CliError> {
+    let cfg = load_config(config.map(PathBuf::as_path))?;
+    storage::open(&cfg.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))
+}
+
+async fn run_moderator_add(args: ModeratorAddArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    moderator::add(
+        &pool,
+        moderator::AddInput {
+            did: args.did,
+            role: args.role.into(),
+            update_role: args.update_role,
+            json: args.json,
+        },
+    )
+    .await
+}
+
+async fn run_moderator_remove(args: ModeratorRemoveArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    moderator::remove(
+        &pool,
+        moderator::RemoveInput {
+            did: args.did,
+            force: args.force,
+            json: args.json,
+        },
+    )
+    .await
+}
+
+async fn run_moderator_list(args: ModeratorListArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    moderator::list(
+        &pool,
+        moderator::ListInput {
+            role: args.role.map(Into::into),
+            json: args.json,
+        },
+    )
+    .await
 }
 
 fn load_config(explicit_path: Option<&std::path::Path>) -> Result<Config, CliError> {
