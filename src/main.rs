@@ -136,6 +136,11 @@ enum ReportSub {
     /// Admin OR moderator role. Reason body included per §F11
     /// admin-authenticated access.
     View(ReportViewArgs),
+    /// Resolve a report (tools.cairn.admin.resolveReport). Admin
+    /// OR moderator role. Optional `--apply-label-*` group resolves
+    /// AND applies a label in one server transaction; omitting it
+    /// resolves without a label (the "dismiss" workflow).
+    Resolve(ReportResolveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -168,6 +173,36 @@ struct ReportViewArgs {
     #[arg(long = "cairn-server")]
     cairn_server: Option<String>,
     /// Emit JSON instead of the human-readable multi-line output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReportResolveArgs {
+    /// Report row primary key to resolve.
+    id: i64,
+    /// Operator-facing resolution rationale.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Label value to apply on resolve. Both `--apply-label-val`
+    /// and `--apply-label-uri` are required together; the other
+    /// `--apply-label-*` flags are optional within that group.
+    /// Omitting the entire group resolves without applying a label.
+    #[arg(long = "apply-label-val", requires = "apply_label_uri")]
+    apply_label_val: Option<String>,
+    /// Subject URI (`at://...` or `did:...`) the label targets.
+    #[arg(long = "apply-label-uri", requires = "apply_label_val")]
+    apply_label_uri: Option<String>,
+    /// Optional CID pin for `at://` subjects.
+    #[arg(long = "apply-label-cid", requires = "apply_label_val")]
+    apply_label_cid: Option<String>,
+    /// Optional RFC-3339 expiration for the applied label.
+    #[arg(long = "apply-label-exp", requires = "apply_label_val")]
+    apply_label_exp: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable one-liner.
     #[arg(long)]
     json: bool,
 }
@@ -341,6 +376,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Report {
             sub: ReportSub::View(args),
         } => run_report_view(args).await,
+        Command::Report {
+            sub: ReportSub::Resolve(args),
+        } => run_report_resolve(args).await,
         Command::Serve(args) => run_serve(args).await,
         Command::OperatorLogin(args) => run_operator_login(args).await,
         Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
@@ -445,6 +483,40 @@ async fn run_report_view(args: ReportViewArgs) -> Result<(), CliError> {
         println!("{}", report::format_view_json(&resp));
     } else {
         println!("{}", report::format_view_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_report_resolve(args: ReportResolveArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    // Build the optional ApplyLabelArg group. Clap's `requires`
+    // attributes already enforce val + uri together; we only need
+    // to compose the struct here.
+    let apply_label = match (args.apply_label_val, args.apply_label_uri) {
+        (Some(val), Some(uri)) => Some(report::ApplyLabelArg {
+            uri,
+            cid: args.apply_label_cid,
+            val,
+            exp: args.apply_label_exp,
+        }),
+        (None, None) => None,
+        // Unreachable: clap's `requires` constraint pairs val + uri.
+        _ => unreachable!("clap requires should pair --apply-label-val and --apply-label-uri"),
+    };
+
+    let input = report::ReportResolveInput {
+        id: args.id,
+        apply_label,
+        reason: args.reason,
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = report::resolve(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", report::format_resolve_json(&resp));
+    } else {
+        println!("{}", report::format_resolve_human(&resp));
     }
     Ok(())
 }

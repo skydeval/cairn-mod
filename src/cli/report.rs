@@ -563,6 +563,120 @@ pub fn format_view_json(detail: &ReportDetail) -> String {
 }
 
 // ============================================================
+// `cairn report resolve` — wraps tools.cairn.admin.resolveReport
+// (src/server/admin/resolve_report.rs). Admin OR moderator role.
+// Resolve with `apply_label = Some(...)` to apply a label and
+// resolve in one transaction; `apply_label = None` resolves
+// without applying (the "dismiss" semantic in operator UX terms).
+// ============================================================
+
+const RESOLVE_REPORT_LXM: &str = "tools.cairn.admin.resolveReport";
+
+/// Optional label-application sub-object on `cairn report resolve`.
+/// Mirrors the server handler's `InputApplyLabel` shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyLabelArg {
+    /// AT-URI or DID the label targets. Server enforces
+    /// `at://` or `did:` prefix.
+    pub uri: String,
+    /// CID pin for record subjects. Required iff `uri` is `at://`
+    /// per §F11 strongRef shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cid: Option<String>,
+    /// Label value. Server clamps to 1..=128 bytes and (when
+    /// configured) checks against the labeler's allowlist.
+    pub val: String,
+    /// Optional RFC-3339 expiration for the applied label.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exp: Option<String>,
+}
+
+/// Input to `cairn report resolve`.
+#[derive(Debug, Clone)]
+pub struct ReportResolveInput {
+    /// Report row primary key to resolve.
+    pub id: i64,
+    /// Optional inline label application. `None` resolves without
+    /// applying a label (the "dismiss" workflow); `Some(_)` resolves
+    /// AND applies in one server transaction.
+    pub apply_label: Option<ApplyLabelArg>,
+    /// Operator-facing rationale. Stored on the report row and
+    /// echoed back in the response.
+    pub reason: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    pub cairn_server_override: Option<String>,
+}
+
+/// Resolve a report.
+///
+/// Wraps the `tools.cairn.admin.resolveReport` handler at
+/// [src/server/admin/resolve_report.rs](..) — POST body shape:
+/// ```json
+/// { "id": <i64>, "applyLabel": { ... }?, "reason": <string>? }
+/// ```
+/// Server enforces role (`verify_and_authorize`, mod OR admin),
+/// validates `applyLabel.val` length + URI prefix + label-allowlist
+/// pre-dispatch, and returns the resolved `ReportDetail`. Audit
+/// attribution is the JWT iss the CLI's session-auth produces.
+pub async fn resolve(
+    session: &mut SessionFile,
+    session_path: &Path,
+    input: ReportResolveInput,
+) -> Result<ReportDetail, CliError> {
+    let cairn_server = input
+        .cairn_server_override
+        .as_deref()
+        .unwrap_or(&session.cairn_server_url)
+        .trim_end_matches('/')
+        .to_string();
+    let pds = PdsClient::new(&session.pds_url)?;
+    let token = acquire_service_auth(&pds, session, session_path, RESOLVE_REPORT_LXM).await?;
+
+    // Build the wire body. `applyLabel` is camelCase per the
+    // lexicon; serde's rename + the Serialize derive on
+    // `ApplyLabelArg` handle the rest.
+    let mut body = json!({ "id": input.id });
+    if let Some(apply) = &input.apply_label {
+        body["applyLabel"] = serde_json::to_value(apply).expect("ApplyLabelArg serializes");
+    }
+    if let Some(r) = &input.reason {
+        body["reason"] = json!(r);
+    }
+
+    let url = format!("{cairn_server}/xrpc/{RESOLVE_REPORT_LXM}");
+    let client = build_client();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|source| CliError::Http {
+            url: url.clone(),
+            source,
+        })?;
+    cairn_response::<ReportDetail>(url, resp).await
+}
+
+/// Human one-liner for `cairn report resolve`. Names whether a
+/// label was applied so the operator sees the side-effect at a
+/// glance.
+pub fn format_resolve_human(detail: &ReportDetail) -> String {
+    let label = detail
+        .resolution_label
+        .as_deref()
+        .map(|v| format!(" with label {v}"))
+        .unwrap_or_default();
+    format!("Resolved report {}{}", detail.id, label)
+}
+
+/// JSON output for `cairn report resolve` — the resolved
+/// [`ReportDetail`].
+pub fn format_resolve_json(detail: &ReportDetail) -> String {
+    serde_json::to_string_pretty(detail).expect("ReportDetail serializes")
+}
+
+// ============================================================
 // Shared helpers
 // ============================================================
 
