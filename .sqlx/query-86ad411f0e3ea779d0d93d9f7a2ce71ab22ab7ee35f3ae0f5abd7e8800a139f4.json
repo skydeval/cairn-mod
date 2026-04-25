@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT actor_did FROM audit_log WHERE action = 'report_resolved' ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "actor_did",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "86ad411f0e3ea779d0d93d9f7a2ce71ab22ab7ee35f3ae0f5abd7e8800a139f4"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO moderators (did, role, added_at)\n         VALUES (?1, 'admin', strftime('%s', 'now') * 1000)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fe15ac5845c2dce7b63fc5821e9da61123c233793266bbd8eab37a2080629df9"
+}
