@@ -125,3 +125,18 @@ jobs:
       - name: Install cargo-audit
         run: cargo install --locked cargo-audit --version 0.22.1
       - run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+
+  e2e-quickstart:
+    # Walks the README's operator workflow end-to-end against a
+    # mock PDS — catches silent README drift (config field renames,
+    # CLI surface regressions, /.well-known/did.json shape breaks).
+    # Script lives at tests/e2e/quickstart.sh; mock PDS binary at
+    # examples/mock_pds.rs. See #10 for the chartered scope and
+    # the rpassword-no-TTY workaround.
+    name: e2e quickstart rot-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: tests/e2e/quickstart.sh
