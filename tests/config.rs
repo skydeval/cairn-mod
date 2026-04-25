@@ -73,3 +73,71 @@ fn admin_toml_converts_to_runtime_admin_config() {
     let runtime: cairn_mod::AdminConfig = toml.into();
     assert_eq!(runtime.label_values, Some(vec!["spam".into()]));
 }
+
+#[test]
+fn retention_block_defaults_when_absent() {
+    let cfg: Config = serde_json::from_value(minimum_required()).unwrap();
+    assert!(cfg.retention.sweep_enabled);
+    assert_eq!(cfg.retention.sweep_run_at_utc_hour, 4);
+    assert_eq!(cfg.retention.sweep_batch_size, 1000);
+}
+
+#[test]
+fn retention_block_accepts_custom_values() {
+    let mut v = minimum_required();
+    v["retention"] = serde_json::json!({
+        "sweep_enabled": false,
+        "sweep_run_at_utc_hour": 3,
+        "sweep_batch_size": 500
+    });
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    assert!(!cfg.retention.sweep_enabled);
+    assert_eq!(cfg.retention.sweep_run_at_utc_hour, 3);
+    assert_eq!(cfg.retention.sweep_batch_size, 500);
+}
+
+#[test]
+fn retention_block_partial_override_inherits_other_defaults() {
+    let mut v = minimum_required();
+    v["retention"] = serde_json::json!({
+        "sweep_run_at_utc_hour": 6
+    });
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    assert!(cfg.retention.sweep_enabled, "default true preserved");
+    assert_eq!(cfg.retention.sweep_run_at_utc_hour, 6);
+    assert_eq!(cfg.retention.sweep_batch_size, 1000, "default preserved");
+}
+
+#[test]
+fn validate_rejects_out_of_range_sweep_hour() {
+    let mut v = minimum_required();
+    v["retention"] = serde_json::json!({"sweep_run_at_utc_hour": 24});
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    let err = cfg.validate().expect_err("hour=24 must reject");
+    assert!(format!("{err}").contains("sweep_run_at_utc_hour"));
+}
+
+#[test]
+fn validate_rejects_zero_or_negative_batch_size() {
+    let mut v = minimum_required();
+    v["retention"] = serde_json::json!({"sweep_batch_size": 0});
+    let cfg: Config = serde_json::from_value(v).unwrap();
+    assert!(
+        cfg.validate().is_err(),
+        "batch_size=0 must reject (DELETE LIMIT 0 is a no-op loop)"
+    );
+}
+
+#[test]
+fn retention_toml_converts_to_runtime_retention_config() {
+    use cairn_mod::config::RetentionConfigToml;
+    let toml = RetentionConfigToml {
+        sweep_enabled: false,
+        sweep_run_at_utc_hour: 2,
+        sweep_batch_size: 250,
+    };
+    let runtime: cairn_mod::RetentionConfig = toml.into();
+    assert!(!runtime.sweep_enabled);
+    assert_eq!(runtime.sweep_run_at_utc_hour, 2);
+    assert_eq!(runtime.sweep_batch_size, 250);
+}

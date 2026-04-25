@@ -44,6 +44,48 @@ pub mod xrpc;
 
 pub use admin::{AdminConfig, admin_router};
 pub use create_report::{CreateReportConfig, create_report_router};
+
+/// Sweep-execution policy for the subscribeLabels retention sweep (§F4
+/// retention task). Distinct from [`SubscribeConfig::retention_days`] —
+/// that field is the cutoff source of truth (read-side floor + write-
+/// side cutoff); this struct holds *how* the sweep runs, not *when*
+/// the cutoff lies. Operators tune the two independently:
+///
+/// - `[subscribe].retention_days` (logical owner: [`SubscribeConfig`])
+///   sets the rolling window ("180 days back").
+/// - `[retention]` (logical owner: this struct) sets sweep schedule
+///   and batching ("run at 04:00 UTC, 1000 rows per transaction").
+///
+/// Defaults match §F4 prose: sweep enabled, runs daily at 04:00 UTC,
+/// 1000-row batches.
+#[derive(Debug, Clone)]
+pub struct RetentionConfig {
+    /// Master toggle for the scheduled sweep. When `false`, no
+    /// scheduled sweep runs; the manual CLI / admin-XRPC path still
+    /// works (operators retain explicit control). Default `true`.
+    pub sweep_enabled: bool,
+    /// UTC hour-of-day (0..=23) at which the scheduled sweep fires.
+    /// Default 4 (04:00 UTC — quiet hour for most operator regions,
+    /// matches §F4 example).
+    pub sweep_run_at_utc_hour: u8,
+    /// Rows per DELETE transaction. Larger batches are throughput-
+    /// efficient but hold the writer for longer; smaller batches let
+    /// normal label writes interleave with finer granularity. Default
+    /// 1000. Distinct from [`SubscribeConfig::batch_size`] (replay
+    /// batching is latency-sensitive, sweep batching is throughput-
+    /// sensitive — tune independently).
+    pub sweep_batch_size: i64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            sweep_enabled: true,
+            sweep_run_at_utc_hour: 4,
+            sweep_batch_size: 1000,
+        }
+    }
+}
 pub use did_document::did_document_router;
 pub use health::health_router;
 pub use limits::Limiter;

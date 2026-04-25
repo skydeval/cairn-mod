@@ -74,6 +74,14 @@ pub struct Config {
     /// (§5.2) and distinct from Cairn's own signing key (§5.1).
     #[serde(default)]
     pub operator: Option<OperatorConfigToml>,
+    /// Retention sweep execution policy (§F4 sweep task). Holds
+    /// schedule + batching knobs only — the cutoff itself
+    /// (`retention_days`) is owned by [`crate::SubscribeConfig`] so
+    /// the read-side floor and the sweep cutoff stay tied to a
+    /// single source of truth. Defaults match §F4 prose: enabled,
+    /// 04:00 UTC, 1000-row batches.
+    #[serde(default)]
+    pub retention: RetentionConfigToml,
 }
 
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
@@ -193,6 +201,49 @@ pub struct LocaleToml {
     pub description: String,
 }
 
+/// TOML projection of [`crate::RetentionConfig`]. Field names match
+/// the runtime struct one-for-one; serde defaults mirror
+/// [`crate::RetentionConfig::default()`] so an absent `[retention]`
+/// block produces the §F4 default policy without operator opt-in.
+///
+/// `retention_days` is *not* on this struct — it lives under
+/// [`crate::SubscribeConfig`] and is consumed by both the read-side
+/// floor (`query_oldest_retained`) and the sweep cutoff. Splitting
+/// it would risk drift between the floor and the sweep window.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RetentionConfigToml {
+    /// Master toggle for the scheduled sweep. Default `true`.
+    #[serde(default = "default_sweep_enabled")]
+    pub sweep_enabled: bool,
+    /// UTC hour-of-day (0..=23) for the scheduled sweep. Default 4.
+    /// Validated by [`Config::validate`].
+    #[serde(default = "default_sweep_run_at_utc_hour")]
+    pub sweep_run_at_utc_hour: u8,
+    /// Rows per DELETE transaction. Default 1000.
+    #[serde(default = "default_sweep_batch_size")]
+    pub sweep_batch_size: i64,
+}
+
+impl Default for RetentionConfigToml {
+    fn default() -> Self {
+        Self {
+            sweep_enabled: default_sweep_enabled(),
+            sweep_run_at_utc_hour: default_sweep_run_at_utc_hour(),
+            sweep_batch_size: default_sweep_batch_size(),
+        }
+    }
+}
+
+fn default_sweep_enabled() -> bool {
+    true
+}
+fn default_sweep_run_at_utc_hour() -> u8 {
+    4
+}
+fn default_sweep_batch_size() -> i64 {
+    1000
+}
+
 /// Operator-side PDS auth config (§F1). Scope is narrow — just the
 /// PDS URL + session file path. Named `[operator]` today; if future
 /// operator-identity fields land (contact, alerts, etc.) the table
@@ -225,6 +276,18 @@ impl Config {
         url::Url::parse(&self.service_endpoint).map_err(|e| {
             crate::error::Error::Signing(format!("config.service_endpoint is not a valid URL: {e}"))
         })?;
+        if self.retention.sweep_run_at_utc_hour >= 24 {
+            return Err(crate::error::Error::Signing(format!(
+                "config.retention.sweep_run_at_utc_hour={} is out of range (0..=23)",
+                self.retention.sweep_run_at_utc_hour
+            )));
+        }
+        if self.retention.sweep_batch_size <= 0 {
+            return Err(crate::error::Error::Signing(format!(
+                "config.retention.sweep_batch_size={} must be > 0",
+                self.retention.sweep_batch_size
+            )));
+        }
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the
@@ -275,6 +338,16 @@ impl From<AdminConfigToml> for crate::AdminConfig {
     fn from(t: AdminConfigToml) -> Self {
         crate::AdminConfig {
             label_values: t.label_values,
+        }
+    }
+}
+
+impl From<RetentionConfigToml> for crate::RetentionConfig {
+    fn from(t: RetentionConfigToml) -> Self {
+        crate::RetentionConfig {
+            sweep_enabled: t.sweep_enabled,
+            sweep_run_at_utc_hour: t.sweep_run_at_utc_hour,
+            sweep_batch_size: t.sweep_batch_size,
         }
     }
 }
