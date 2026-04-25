@@ -32,7 +32,7 @@ than Skyware; it does not try to be either.
 
 **v1.0.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.0.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.0.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
-**v1.1 is in active development on `main`.** Scope includes `/health` and `/ready` endpoints, a moderator management CLI, CI security scanning, and subscribeLabels retention.
+**v1.1 is in active development on `main`.** Scope includes `/health` and `/ready` endpoints, a moderator management CLI, CI security scanning, the subscribeLabels retention sweep (`tools.cairn.admin.retentionSweep` + `cairn retention sweep`), and operator/admin CLI surfaces wrapping the admin XRPC endpoints.
 
 Production deployments should pin to the stable release, not the `main` branch.
 

@@ -354,7 +354,12 @@ WebSocket event stream per the Lexicon (`message` union of `#labels` and `#info`
 
 **Retention:**
 - Default: 180 days (rolling window). Older frames are dropped from the replay log.
-- Config option `retention.max_sequence_age_days` tunes or disables retention.
+- The cutoff lives in `[subscribe].retention_days` (`SubscribeConfig::retention_days`, source of truth — read by both `query_oldest_retained` and the sweep). `None` disables retention; the sweep then becomes a no-op.
+- Sweep execution policy lives in `[retention]` (separate block per the C2 split): `sweep_enabled` (default `true`), `sweep_run_at_utc_hour` (0..=23, default 4 — quiet hour), `sweep_batch_size` (default 1000). Validated at config-load time; out-of-range values fail-start.
+- The sweep runs through the writer task (§F5 single-writer invariant). `WriteCommand::Sweep` is dispatched ONE batch at a time so the writer's biased select can interleave Apply/Negate/ResolveReport between batches — sweep latency impact on normal writes is bounded by the per-batch DELETE cost (~ms on SQLite, even with 1000-row batches).
+- Two trigger paths: (1) the writer's internal `sweep_check_timer` fires daily at the configured UTC hour, runs the sweep directly via `handle_sweep`, and emits INFO/ERROR tracing logs (no audit row — scheduled sweeps are maintenance, not moderation); (2) operator-initiated via `tools.cairn.admin.retentionSweep` (admin role only), which writes one `audit_log` row per call with `action = retention_sweep`, `actor_did = JWT iss`, and a JSON `reason` carrying `{rows_deleted, batches, duration_ms, retention_days_applied}`. The CLI surface is `cairn retention sweep`.
+- Mid-run failure logs and exits the current run; batched DELETEs are naturally idempotent (no resumption cursor needed) — the next scheduled fire or the next manual run continues from whatever rows remain.
+- The retention floor is computed by SQL filter (`WHERE created_at >= cutoff_ms`) rather than a stored marker, so sweep deletions do not move the floor — the read-side `OutdatedCursor` decision is invariant under sweep. `tests/writer.rs::sweep_does_not_change_subscriber_visible_floor` is the load-bearing assertion guarding this contract.
 
 **Connection lifecycle:**
 - Client sends only WebSocket control frames (ping/pong). Any application data frame received from the client results in immediate connection close.
