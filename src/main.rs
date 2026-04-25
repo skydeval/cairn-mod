@@ -14,7 +14,7 @@ use cairn_mod::cli::{
     moderator, operator_login,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
-    session,
+    retention, session,
 };
 use cairn_mod::config::Config;
 use cairn_mod::moderators::Role;
@@ -89,6 +89,33 @@ enum Command {
         #[command(subcommand)]
         sub: AuditSub,
     },
+
+    /// Retention management — operator-initiated sweeps of the
+    /// labels table (§F4). **Admin role required.**
+    Retention {
+        #[command(subcommand)]
+        sub: RetentionSub,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RetentionSub {
+    /// Trigger a one-shot retention sweep through the running
+    /// labeler's admin endpoint. The cutoff (`retention_days`) is
+    /// configured at server startup; this command does NOT pass a
+    /// per-call override. Writes one audit_log row per invocation.
+    Sweep(RetentionSweepArgs),
+}
+
+#[derive(Debug, Args)]
+struct RetentionSweepArgs {
+    /// Per-invocation override of the session's stored Cairn
+    /// server URL.
+    #[arg(long)]
+    cairn_server: Option<String>,
+    /// JSON output instead of the human-readable single-line summary.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -475,7 +502,26 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
+        Command::Retention {
+            sub: RetentionSub::Sweep(args),
+        } => run_retention_sweep(args).await,
     }
+}
+
+async fn run_retention_sweep(args: RetentionSweepArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = retention::SweepInput {
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = retention::sweep(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", retention::format_sweep_json(&resp));
+    } else {
+        println!("{}", retention::format_sweep_human(&resp));
+    }
+    Ok(())
 }
 
 async fn run_audit_list(args: AuditListArgs) -> Result<(), CliError> {

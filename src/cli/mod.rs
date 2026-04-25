@@ -21,4 +21,5 @@ pub mod operator_session;
 pub mod pds;
 pub mod publish_service_record;
 pub mod report;
+pub mod retention;
 pub mod session;
