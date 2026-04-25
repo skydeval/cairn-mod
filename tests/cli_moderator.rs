@@ -59,6 +59,27 @@ async fn seed(pool: &Pool<Sqlite>, did: &str, role: Role) {
     .expect("seed add");
 }
 
+/// Test-only helper. Bypasses `moderator::add()`'s `epoch_ms_now()`
+/// so ordering tests can specify deterministic, well-separated
+/// timestamps. Without this, fast CI runners (test-msrv on GitHub
+/// Actions ubuntu-latest) can land sequential inserts in the same
+/// millisecond, making the production `ORDER BY added_at ASC, did
+/// ASC` tie-break to the alphabetical `did` and breaking insert-
+/// order assertions. Same nondeterminism class as #21's cache TTL
+/// flake — determinism via explicit values, not timing margins.
+async fn seed_at(pool: &Pool<Sqlite>, did: &str, role: Role, added_at_ms: i64) {
+    let role_str = role.to_string();
+    sqlx::query!(
+        "INSERT INTO moderators (did, role, added_at) VALUES (?1, ?2, ?3)",
+        did,
+        role_str,
+        added_at_ms,
+    )
+    .execute(pool)
+    .await
+    .expect("seed_at insert");
+}
+
 // ============ add ============
 
 #[tokio::test]
@@ -314,19 +335,25 @@ async fn last_admin_remove_proceeds_with_force() {
 #[tokio::test]
 async fn list_returns_all_sorted_deterministically() {
     let (_dir, pool) = fresh_pool().await;
-    // Insert in non-alphabetical order; the seed-add path uses
-    // `epoch_ms_now()` which advances monotonically — so insertion
-    // order matches added_at ASC ordering.
-    seed(&pool, BOB, Role::Mod).await;
-    seed(&pool, ALICE, Role::Admin).await;
-    seed(&pool, CAROL, Role::Mod).await;
+    // Explicit, well-separated timestamps so the production
+    // `ORDER BY added_at ASC, did ASC` lands on the primary key
+    // unambiguously. The earlier version used the seed-add path
+    // and relied on `epoch_ms_now()` advancing between calls;
+    // that worked locally but flaked on test-msrv CI runners where
+    // sequential inserts can share a millisecond, kicking the
+    // tie-break to `did ASC` and breaking the BOB/ALICE/CAROL
+    // assertion (alphabetical: alice < bob < carol).
+    seed_at(&pool, BOB, Role::Mod, 1_000_000_000_000).await;
+    seed_at(&pool, ALICE, Role::Admin, 2_000_000_000_000).await;
+    seed_at(&pool, CAROL, Role::Mod, 3_000_000_000_000).await;
 
     let mods = moderator::list(&pool, ListInput { role: None })
         .await
         .expect("list");
 
     assert_eq!(mods.len(), 3);
-    // added_at ASC order matches the seed sequence.
+    // added_at ASC order matches the seed sequence — insertion
+    // order, not alphabetical.
     assert_eq!(mods[0].did, BOB);
     assert_eq!(mods[1].did, ALICE);
     assert_eq!(mods[2].did, CAROL);
