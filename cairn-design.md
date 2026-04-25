@@ -724,6 +724,55 @@ Admin-side report workflow via `cairn report {list, view, resolve, flag, unflag}
 - Each filter (`actor`, `action`, `outcome`) has its own happy-path test.
 - `format_list_*` are pure-function tested with synthetic typed responses.
 
+### F19. Service record verify on startup (v1.1)
+
+`cairn serve` performs a verify-only check at startup before binding the HTTP listener (#8). The local `[labeler]` config is rendered into an `app.bsky.labeler.service` record body; its content-hash (excluding `createdAt` per §F1 idempotency) is compared against the published record fetched from `<operator.pds_url>/<service_did>` via the unauthenticated `com.atproto.repo.getRecord`. Drift / absent / unreachable each fail-start with a distinct exit code so orchestrators (and operators) can branch.
+
+**Architectural choice — verify-only, not auto-publish.** Two paths were considered when #8 was scoped:
+
+- **Path A (full auto-publish)**: serve startup calls into `publish_service_record::publish`, doing a PDS write if local drift is detected. Requires operator credentials on the serve host. Considered and rejected.
+- **Path B (verify-only)**: serve startup does an unauthenticated read; mismatch → fail-start; reconciliation goes through the explicit `cairn publish-service-record` subcommand on the operator's host. Adopted.
+
+Three load-bearing reasons the verify-only path won:
+
+1. Identity-domain / label-emission separation. The labeler protocol distinguishes the operator (publishes records to the operator's PDS, owns the DID) from the labeler server (signs and broadcasts labels). Auto-publish blurs this — serve becomes a PDS writer, which means operator credentials live on the long-running serve host.
+2. Explicit > implicit. Auto-publish hides operator intent: a config edit silently rewrites the published record on next restart. Verify-only surfaces the change as a fail-start, requiring the operator to deliberately publish via the existing CLI.
+3. The `cairn publish-service-record` subcommand already exists as the explicit place for PDS mutations. Duplicating that capability into serve would create two write surfaces with overlapping but not identical preconditions.
+
+**Failure modes and exit codes:**
+
+| Code | `CliError` variant | Meaning |
+|---|---|---|
+| 12 | `ServiceRecordDrift { pds_url, service_did, summary }` | Record exists, content-hash differs |
+| 13 | `ServiceRecordAbsent { pds_url, service_did }` | No record published yet |
+| 14 | `ServiceRecordUnreachable { pds_url, cause }` | Could not reach PDS to fetch |
+
+The codes intentionally separate transient infra failure (14, retry) from operator-action-required cases (12 + 13). `systemd` and orchestrator restart loops can branch.
+
+**Drift summary.** The drift error message names which fields drifted — label values, definition count, reason types, subject types — with side-by-side local vs. published values. When all four match but content hashes differ, the message points at per-definition contents (severity / blurs / locales) as the drift surface to inspect. Not raw JSON dumps; human-readable enumeration.
+
+**Labeler-absent narrow scope.** Configs without a `[labeler]` block skip verify with an info-log. NOT a general opt-out — operator-facing deployments declare a labeler. Test harnesses, embedders, and custom workflows that don't publish a service record are out of scope for the gate. `[labeler]` present + `[operator]` missing remains a fail-start (real misconfig, not a hole in the gate).
+
+**Lease cleanup.** Verify happens after `spawn_writer` (lease acquired) and before HTTP bind. On verify failure, `writer.shutdown()` is called before returning the error so the `server_instance_lease` row is released; a subsequent startup attempt isn't blocked. Asserted in `tests/serve_verify.rs` via `COUNT(*) FROM server_instance_lease = 0` post-failure across all four failure-path tests.
+
+**No opt-out flag.** v1.1 has no `--skip-verify` or equivalent. The whole point of the gate is to catch drift; a flag would re-introduce the drift class via forgetfulness. Decided explicitly during scoping; revisit only if a real emergency case surfaces post-launch.
+
+**Implementation notes:**
+
+- `service_record::content_hash_value(serde_json::Value)` was added alongside the existing `content_hash(&ServiceRecord)` so the verify path can hash the PDS-returned record without round-tripping through a `ServiceRecord` struct. The struct's `Serialize`-only derives use `&'static str` for several fields, which would prevent symmetric `Deserialize` without a parallel read-side type.
+- `PdsClient::get_record(repo, collection, rkey)` was added (#8 commit 1) — `Result<Option<GetRecordResponse>, PdsError>` shape: `Ok(None)` covers HTTP 404 OR XRPC `RecordNotFound` body (PDS implementations vary), `Err(PdsError::Network)` covers transport-level failures, other errors map through the unreachable code.
+- The verify code lives inline in `serve.rs` as `mod verify` per the session decision. Extract to a free-standing module if it grows past ~80 lines.
+
+**Verification:**
+
+- `tests/serve_verify.rs::serve_starts_when_pds_record_matches` — happy path.
+- `tests/serve_verify.rs::serve_fails_with_drift_exit_code_when_records_differ` — exit code 12 + drift summary names the field.
+- `tests/serve_verify.rs::serve_fails_with_absent_exit_code_when_record_404s` — exit code 13.
+- `tests/serve_verify.rs::serve_fails_with_unreachable_exit_code_on_pds_503` — exit code 14 via UnexpectedStatus.
+- `tests/serve_verify.rs::serve_fails_with_unreachable_exit_code_on_truly_unreachable_pds` — exit code 14 via Network/transport error (uses an unbound port to force connection-refused).
+- All four failure-path tests assert `COUNT(*) FROM server_instance_lease = 0` post-failure (lease release invariant).
+- Inline `serve::verify::tests` covers the drift-summary helper (label_values drift, definition_count drift, per-definition fallback).
+
 ## 8. Lexicons
 
 Cairn defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
