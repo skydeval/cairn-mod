@@ -176,9 +176,9 @@ async fn format_helpers_produce_usable_output() {
         reported_by: MODERATOR_DID.into(),
         subject: serde_json::json!({"$type": "com.atproto.admin.defs#repoRef"}),
     };
-    let human = report::format_human(&resp);
+    let human = report::format_create_human(&resp);
     assert!(human.contains("Report 42"), "got: {human}");
-    let json = report::format_json(&resp);
+    let json = report::format_create_json(&resp);
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed["id"], 42);
 }

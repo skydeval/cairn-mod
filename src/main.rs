@@ -128,6 +128,48 @@ struct LoginArgs {
 enum ReportSub {
     /// Submit a new report (com.atproto.moderation.createReport).
     Create(ReportCreateArgs),
+    /// List reports (tools.cairn.admin.listReports). Admin OR
+    /// moderator role on the session file. Returns the reason-less
+    /// list projection per §F11.
+    List(ReportListArgs),
+    /// Fetch one report with full body (tools.cairn.admin.getReport).
+    /// Admin OR moderator role. Reason body included per §F11
+    /// admin-authenticated access.
+    View(ReportViewArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReportListArgs {
+    /// Filter by status (`pending` or `resolved`).
+    #[arg(long)]
+    status: Option<String>,
+    /// Filter by reporter DID.
+    #[arg(long = "reported-by")]
+    reported_by: Option<String>,
+    /// Max rows to return. Server clamps to [1, 250]; default 50.
+    #[arg(long)]
+    limit: Option<i64>,
+    /// Opaque pagination cursor from a prior response.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable table.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ReportViewArgs {
+    /// Report row primary key.
+    id: i64,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable multi-line output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -293,6 +335,12 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Report {
             sub: ReportSub::Create(args),
         } => run_report_create(args).await,
+        Command::Report {
+            sub: ReportSub::List(args),
+        } => run_report_list(args).await,
+        Command::Report {
+            sub: ReportSub::View(args),
+        } => run_report_view(args).await,
         Command::Serve(args) => run_serve(args).await,
         Command::OperatorLogin(args) => run_operator_login(args).await,
         Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
@@ -357,9 +405,46 @@ async fn run_report_create(args: ReportCreateArgs) -> Result<(), CliError> {
     let resp = report::create(&mut session, &path, input).await?;
 
     if args.json {
-        println!("{}", report::format_json(&resp));
+        println!("{}", report::format_create_json(&resp));
     } else {
-        println!("{}", report::format_human(&resp));
+        println!("{}", report::format_create_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_report_list(args: ReportListArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = report::ReportListInput {
+        status: args.status,
+        reported_by: args.reported_by,
+        limit: args.limit,
+        cursor: args.cursor,
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = report::list(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", report::format_list_json(&resp));
+    } else {
+        println!("{}", report::format_list_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_report_view(args: ReportViewArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = report::ReportViewInput {
+        id: args.id,
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = report::view(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", report::format_view_json(&resp));
+    } else {
+        println!("{}", report::format_view_human(&resp));
     }
     Ok(())
 }
