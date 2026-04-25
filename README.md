@@ -278,7 +278,7 @@ read NULL as "added via CLI / direct DB write," not "unknown."
 **For emergencies when the CLI isn't available** (e.g., bootstrapping
 the first admin before any binary is installed, or recovering from
 a corrupted invocation), the `moderators` table can be manipulated
-directly — the schema is in [the initial migration](migrations/20251008_init.sql)
+directly — the schema is in [the initial migration](migrations/0001_init.sql)
 and the design contract is [§F12](cairn-design.md#f12-tools-cairn-admin-xrpc-endpoints):
 
 ```sql
