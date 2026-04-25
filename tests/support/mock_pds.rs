@@ -54,8 +54,21 @@ pub struct MockPdsState {
     pub delete_session_calls: AtomicUsize,
     pub get_service_auth_calls: AtomicUsize,
     pub put_record_calls: AtomicUsize,
+    pub get_record_calls: AtomicUsize,
     pub force_get_service_auth_401_next: AtomicUsize,
     pub force_refresh_401: AtomicUsize,
+    /// One-shot: cause the next `getRecord` to respond 404
+    /// (`RecordNotFound`). Used by `cairn serve`'s startup verify
+    /// tests (#8) to exercise the absent-record path.
+    pub force_get_record_404: AtomicUsize,
+    /// One-shot: cause the next `getRecord` to respond 503. Tests
+    /// the unreachable / unexpected-status path on the verify
+    /// side (mapped to `CliError::ServiceRecordUnreachable`).
+    pub force_get_record_503: AtomicUsize,
+    /// Body the mock returns from `getRecord` for the canonical
+    /// `app.bsky.labeler.service` record. Tests seed this to
+    /// match (verify success) or differ (verify drift).
+    pub get_record_value: Mutex<Option<serde_json::Value>>,
     /// Current access token the mock accepts. Rotated on each
     /// `refreshSession`.
     pub current_access: Mutex<String>,
@@ -110,6 +123,7 @@ pub async fn spawn(moderator_did: impl Into<String>) -> MockPds {
         current_access: Mutex::new("initial-access-jwt".into()),
         current_refresh: Mutex::new("initial-refresh-jwt".into()),
         current_service_record_cid: Mutex::new(None),
+        get_record_value: Mutex::new(None),
         ..Default::default()
     });
     let inner = Inner {
@@ -135,6 +149,7 @@ pub async fn spawn(moderator_did: impl Into<String>) -> MockPds {
             get(get_service_auth),
         )
         .route("/xrpc/com.atproto.repo.putRecord", post(put_record))
+        .route("/xrpc/com.atproto.repo.getRecord", get(get_record))
         .with_state(inner);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -417,6 +432,59 @@ async fn put_record(
     // the currently-stored CID via put_record_calls + state.
     let _ = body.record;
     Json(json!({ "uri": uri, "cid": new_cid })).into_response()
+}
+
+/// `com.atproto.repo.getRecord` mock handler. Unauthenticated.
+/// Reads `force_get_record_*` flags + the seeded
+/// `get_record_value` to produce the response shape the test
+/// requested (#8 verify scenarios: match / drift / absent /
+/// unreachable).
+async fn get_record(
+    State(inner): State<Inner>,
+    axum::extract::Query(params): axum::extract::Query<GetRecordParams>,
+) -> Response {
+    inner.state.get_record_calls.fetch_add(1, Ordering::SeqCst);
+
+    if inner.state.force_get_record_503.swap(0, Ordering::SeqCst) > 0 {
+        return xrpc_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "InternalServerError",
+            "PDS unavailable (forced by test)",
+        );
+    }
+    if inner.state.force_get_record_404.swap(0, Ordering::SeqCst) > 0 {
+        return xrpc_error(
+            StatusCode::BAD_REQUEST,
+            "RecordNotFound",
+            "record not found",
+        );
+    }
+
+    let value_guard = inner.state.get_record_value.lock().await;
+    let Some(value) = value_guard.as_ref() else {
+        // No seeded record + no forced flags → return 404 to match
+        // the natural "no record published yet" state.
+        return xrpc_error(
+            StatusCode::BAD_REQUEST,
+            "RecordNotFound",
+            "record not found",
+        );
+    };
+
+    let uri = format!("at://{}/{}/{}", params.repo, params.collection, params.rkey);
+    Json(json!({
+        "uri": uri,
+        "cid": "bafy-mock-getrecord",
+        "value": value,
+    }))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct GetRecordParams {
+    repo: String,
+    collection: String,
+    rkey: String,
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
