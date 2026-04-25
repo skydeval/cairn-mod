@@ -173,8 +173,17 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/caddy-stable.list
           sudo apt-get update -y
           sudo apt-get install -y caddy
-      - name: caddy validate (Caddyfile)
-        run: caddy validate --config contrib/caddy/Caddyfile --adapter caddyfile
+      - name: caddy adapt (Caddyfile syntax-only)
+        # `caddy validate` is more aggressive than syntax checking —
+        # it opens configured log paths and other resources to verify
+        # them usable at runtime. CI's non-root runner can't write
+        # /var/log/caddy/cairn.access.log, so validate fails on a
+        # syntactically-correct file. `caddy adapt` parses the
+        # Caddyfile and emits JSON without opening resources; non-
+        # zero exit on syntax error, zero on success — the right
+        # tool for syntax-only smoke. Output discarded; only the
+        # exit code matters.
+        run: caddy adapt --config contrib/caddy/Caddyfile --adapter caddyfile > /dev/null
       - name: install nginx
         run: sudo apt-get install -y nginx
       - name: nginx -t (cairn.conf — wrapped because it's an http-block snippet)
