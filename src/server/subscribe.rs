@@ -440,6 +440,28 @@ async fn query_current_head(pool: &Pool<Sqlite>) -> Result<i64> {
     Ok(v.unwrap_or(0))
 }
 
+/// Live retention floor: oldest visible `seq` whose row's `created_at`
+/// is within `retention_days` of `now`. Returns `None` for an empty
+/// (or wholly-expired) table. When `retention_days = None`, returns
+/// the `MIN(seq)` across ALL rows (no cutoff applied).
+///
+/// This is the same logic the subscribeLabels handler uses for its
+/// `OutdatedCursor` decisions — exposed as a public helper so the §F4
+/// sweep invariant test (#12) can assert that running the sweep does
+/// **not** change this value for a fixed `retention_days` config. If
+/// a future refactor switches floor computation from live SQL to a
+/// stored value, that test catches the regression.
+pub async fn current_retention_floor(
+    pool: &Pool<Sqlite>,
+    retention_days: Option<u32>,
+) -> Result<Option<i64>> {
+    let cfg = SubscribeConfig {
+        retention_days,
+        ..SubscribeConfig::default()
+    };
+    query_oldest_retained(pool, &cfg).await
+}
+
 async fn query_oldest_retained(
     pool: &Pool<Sqlite>,
     config: &SubscribeConfig,

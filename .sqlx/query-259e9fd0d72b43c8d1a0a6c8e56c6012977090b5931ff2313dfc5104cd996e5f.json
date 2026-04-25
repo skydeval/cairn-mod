@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE labels SET created_at = ?1 WHERE seq <= ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "259e9fd0d72b43c8d1a0a6c8e56c6012977090b5931ff2313dfc5104cd996e5f"
+}

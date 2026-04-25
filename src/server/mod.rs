@@ -44,6 +44,7 @@ pub mod xrpc;
 
 pub use admin::{AdminConfig, admin_router};
 pub use create_report::{CreateReportConfig, create_report_router};
+pub use subscribe::current_retention_floor;
 
 /// Sweep-execution policy for the subscribeLabels retention sweep (§F4
 /// retention task). Distinct from [`SubscribeConfig::retention_days`] —
