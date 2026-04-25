@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT added_by FROM moderators WHERE did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "added_by",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a5da79737f000b27472d1a0cbec2af5e187ff4c69abb5e4affdc14c87ef85828"
+}
