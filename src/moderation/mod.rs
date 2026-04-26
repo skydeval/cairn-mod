@@ -13,10 +13,17 @@
 //!   `(current_count, reason, policy, position_in_window)` and
 //!   returns the resolved [`StrikeApplication`](strike::StrikeApplication)
 //!   to record on the new `subject_actions` row. (#49)
-//!
-//! Future submodules:
-//! - `decay` — pure decay calculator. (#50)
+//! - [`types`] — shared [`ActionType`](types::ActionType) enum and
+//!   [`ActionRecord`](types::ActionRecord) read-side projection.
+//!   Used by the decay calculator and consumed by the recorder
+//!   (#51) and history/strikes surfaces (#52/#53/#54). (#50)
+//! - [`decay`] — pure decay calculator. Walks an
+//!   [`ActionRecord`](types::ActionRecord) history and returns a
+//!   [`StrikeState`](decay::StrikeState) summary at a given clock.
+//!   (#50)
 
+pub mod decay;
 pub mod policy;
 pub mod reasons;
 pub mod strike;
+pub mod types;
