@@ -1019,44 +1019,74 @@ The signals exist because they're real release-quality indicators. They are soft
 
 cairn-mod is a single-maintainer project. The release procedure minimizes the number of simultaneous moving parts and makes every step reversible (where possible) or pre-verified (where not).
 
-### 19.1 Pre-release (1 week before target date)
+### 19.1 Pre-release prerequisites
+
+These must be true before starting §19.2's procedure. Items 1 and 2 verify per-release; items 3–5 are setup invariants that should still hold and are spot-checked at release time so silent drift surfaces here rather than in production.
 
 1. **All hard gates (§16.1) pass on `main`.**
-2. **All soft gates (§16.2) checked.** First external installer has tested a release-candidate branch. Adversarial findings resolved or explicitly deferred.
+2. **All soft gates (§16.2) checked.**
 3. **Cargo.toml metadata complete:** `description`, `license` (MIT OR Apache-2.0 — matching `proto-blue` and Rust ecosystem norm), `repository`, `homepage`, `documentation`, `readme`, `keywords`, `categories`. `include` explicitly lists `src/**`, `migrations/**`, `lexicons/**`, `contrib/**`, `README.md`, `LICENSE-MIT`, `LICENSE-APACHE`.
-4. **`cargo publish --dry-run` succeeds.** Inspect the generated `.crate` file contents; confirm no stray large assets and no secrets.
-5. **CHANGELOG.md v1.0.0 entry drafted.** Following Keep a Changelog format.
-6. **Announcement post drafts prepared** for target surfaces (Bluesky post at minimum; potentially Guild channel, no HN post in week 1). **Announcement drafts exist but are NOT pre-scheduled** — posting must be a manual step on release day, after the publish completes. This prevents the failure mode of announcements going live while publish is still failing.
-7. **GitHub issue templates in place:** bug report, feature request, and a redirect-to-SECURITY.md for vulnerability reports.
-8. **SECURITY.md published** (see §20).
-9. **Tag created but not pushed.** `git tag -s v1.0.0` (signed tag using the SSH signing key established at repo init).
+4. **GitHub issue templates in place:** bug report, feature request, and a redirect-to-SECURITY.md for vulnerability reports.
+5. **SECURITY.md published** (see §20).
 
-### 19.2 Release day
+### 19.2 Release procedure
 
-Order of operations (each step waits for the previous to succeed):
+The release procedure is a manual sequence run from the maintainer's host. v1.0's design envisioned a GitHub Actions workflow (`.github/workflows/release.yml`) doing some of this automatically; that workflow is no longer the canonical path. The manual flow documented here is what's been used for v1.1, v1.2, and v1.3.
 
-1. **`cargo publish`.** Crate goes to crates.io. Verify published page loads.
-2. **Push tag.** `git push origin v1.0.0`. Triggers the GitHub Actions release workflow.
-3. **CI builds binaries** for each target. Wait for completion. Verify every target produced a binary.
-4. **GitHub Release published.** Release notes attach binaries + SHA-256 checksums. Uses CHANGELOG v1.0.0 entry as the body.
-5. **`cairn.tools` deployed.** Install instructions point at the now-published version. `.well-known/lexicons/` bundle live.
-6. **Announcement posted** to prepared surfaces.
-7. **Post-release issue opened in chainlink** for tracking any week-1 feedback and hotfix coordination.
+**Phase C is the irreversibility point.** Step 10 (`cargo publish`) consumes the version on crates.io if any bytes are accepted; a partial-publish failure cannot be retried at the same version. See §19.3 for rollback posture.
+
+#### Phase A: Readiness
+
+1. **Make the release commit.** Single commit that bumps `Cargo.toml` version to `<X.Y.Z>`, fills the `[<X.Y.Z>] - <YYYY-MM-DD>` entry in `CHANGELOG.md` (with `[Unreleased]` reset above it), updates the README stable-release callout (link + "current stable release" prose), and regenerates `Cargo.lock` via `cargo build`.
+2. **Push and verify CI is green** on `origin/main` for the release commit. Do not proceed past green.
+
+#### Phase B: Manual end-to-end verification
+
+Exercise the new version's user-visible features against a real PDS deployment (e.g., `modtest22`). The release crate is identical to what `cargo install cairn-mod` consumers will get; this phase catches behavior gaps CI couldn't reach because CI doesn't run against actual PDS endpoints.
+
+3. **Build:** `cargo build --release` from the repo root.
+4. **Stage the binary:** `cp target/release/cairn ~/cairn-test/cairn && chmod +x ~/cairn-test/cairn`. Use a clean test directory so artifacts from prior releases don't pollute the verification.
+5. **Sanity-check:** `~/cairn-test/cairn --version` prints `cairn <X.Y.Z>`.
+6. **Exercise each user-visible feature** added in this version against the test PDS. Cover happy paths and the documented edge cases (lease conflict, unauthenticated, etc.).
+7. **If anything fails, stop.** Fix in a new commit on `main`, push, re-verify CI is green, then resume from step 3. Do not proceed to publish with a known regression.
+
+#### Phase C: Release ceremony
+
+8. **`cargo publish --dry-run`** from the repo root. Inspect the output:
+   - Test-fixture skip warnings are normal.
+   - Confirm the published `.crate` size is sane (no stray large assets).
+   - Confirm the dry-run's compile step succeeds — this is the same compile crates.io will run at real publish.
+9. **`cargo publish`.** Wait for completion, then visit `https://crates.io/crates/cairn-mod` and confirm `<X.Y.Z>` is listed as the latest version. Irreversible — see §19.3 if it fails.
+10. **Sign and push the release tag:**
+    ```
+    git tag -s v<X.Y.Z> -m "v<X.Y.Z> — <theme>"
+    git push origin v<X.Y.Z>
+    ```
+    The signing key is the SSH key established at repo init.
+11. **Extract the release notes** from CHANGELOG:
+    ```
+    sed -n '/^## \[<X.Y.Z>\]/,/^## \[/p' CHANGELOG.md | sed '$d' > /tmp/v<X.Y>-notes.md
+    cat /tmp/v<X.Y>-notes.md
+    ```
+    The `cat` is for eyeball-verification — confirm the right section was extracted with no truncation.
+12. **Create the GitHub Release:**
+    ```
+    gh release create v<X.Y.Z> \
+      --title "v<X.Y.Z> — <theme>" \
+      --notes-file /tmp/v<X.Y>-notes.md
+    ```
+13. **Verify:** `gh release view v<X.Y.Z>` and visit `https://github.com/skydeval/cairn-mod/releases/tag/v<X.Y.Z>` in a browser. Confirm the page renders with the right title, notes, and source archives (GitHub auto-generates source tarball + zip from the tag — no separate upload needed).
 
 ### 19.3 Failure modes and rollback
 
-- **`cargo publish` fails** (missing metadata, name taken, etc.): fix, bump to `1.0.1` if the registry recorded a partial attempt (rare), re-run `--dry-run`, re-publish. The failed `1.0.0` attempt on crates.io cannot be retried — if any bytes were accepted, `1.0.0` is consumed.
-- **Binary build fails on one target:** either delay release until fixed, or ship without that target and document the gap. Do not publish a GitHub Release with incomplete binaries and fill them in later — users who downloaded during the gap have mismatched versions.
-- **Post-publish critical bug discovered:** `cargo yank --version 1.0.0` immediately. Yanking does not delete but prevents new dependents. Investigate, prepare `1.0.1`, publish the fix. Document the issue and the fix in the next release notes honestly.
-- **Announcement went out before publish completed:** acknowledge openly. Fix the publish, note the timeline in the announcement thread.
+- **`cargo publish --dry-run` fails** (Phase C step 8): fix the issue in a new commit on `main`, push, re-verify CI is green, then re-run dry-run. No state on crates.io is affected.
+- **`cargo publish` fails** (Phase C step 9, the real one): if the registry accepted any bytes, the version on crates.io is consumed and cannot be retried. Bump to `<X.Y.Z+1>`, fix the underlying issue in a new release commit, restart from Phase A. crates.io is append-only — the failed `<X.Y.Z>` cannot be reused.
+- **Post-publish critical bug discovered:** `cargo yank --version <X.Y.Z>` immediately. Yanking does not delete but prevents new dependents. Investigate, prepare `<X.Y.Z+1>`, publish the fix. Document the issue and the fix honestly in the next release notes.
+- **`gh release create` fails after the tag is pushed** (Phase C step 12): the tag is fine on `origin`. `gh release create v<X.Y.Z> --title ... --notes-file ...` is idempotent against an existing tag — re-running creates the missing Release object. If `gh release view v<X.Y.Z>` returns nothing, retry the create command.
 
-### 19.4 Week-1 post-release
+### 19.4 Post-release monitoring
 
-1. Monitor GitHub issues daily.
-2. Check chainlink for logged issue patterns.
-3. Respond to security-sensitive reports within 48 hours (see §20 SLA).
-4. Defer non-urgent feature requests to v1.1 planning, not same-week fixes.
-5. Hold a retrospective entry in chainlink: what slipped, what worked, what v1.1 needs.
+Release-cadence-agnostic monitoring is part of normal maintenance per §20.2's issue-triage SLA: security reports get a 48-hour acknowledgment regardless of how recent the last release was, bug reports flow through weekly triage, feature requests batch into the next minor. A retrospective note in chainlink for each release ("what slipped, what worked, what next-version needs") is good practice but is not a gated part of the runbook.
 
 ## 20. Maintenance & Disclosure
 
