@@ -14,6 +14,7 @@ use figment::{
     providers::{Env, Format, Toml},
 };
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -82,6 +83,41 @@ pub struct Config {
     /// 04:00 UTC, 1000-row batches.
     #[serde(default)]
     pub retention: RetentionConfigToml,
+    /// Reason vocabulary for the v1.4 graduated-action moderation
+    /// model (§F20, #47). TOML projection of the operator's
+    /// `[moderation_reasons.<identifier>]` blocks; resolve to a
+    /// runtime [`crate::moderation::reasons::ReasonVocabulary`] via
+    /// `ReasonVocabulary::from_config`.
+    ///
+    /// Three states:
+    /// - `None` — operator declared no blocks; the resolver loads
+    ///   shipped defaults (eight reasons covering common categories).
+    /// - `Some(empty)` — operator wrote a bare `[moderation_reasons]`
+    ///   header with no sub-blocks; rejected at validate time as a
+    ///   probable typo.
+    /// - `Some(non_empty)` — operator's vocabulary is the complete
+    ///   set; defaults are NOT merged in.
+    #[serde(default)]
+    pub moderation_reasons: Option<BTreeMap<String, ReasonDefToml>>,
+}
+
+/// TOML projection of one entry in
+/// [`Config::moderation_reasons`]. The runtime equivalent
+/// (with validated identifier) is
+/// [`crate::moderation::reasons::ReasonDef`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReasonDefToml {
+    /// Strike weight applied at action time, before dampening.
+    /// Validated at config-load time as `>= 1`.
+    pub base_weight: u32,
+    /// When `true`, this reason bypasses the dampening curve
+    /// regardless of the subject's standing. Defaults to `false`
+    /// when omitted from the TOML.
+    #[serde(default)]
+    pub severe: bool,
+    /// Operator-facing label describing what the reason means.
+    /// Required and non-empty; validated at config-load time.
+    pub description: String,
 }
 
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
@@ -288,6 +324,13 @@ impl Config {
                 self.retention.sweep_batch_size
             )));
         }
+        // Reason vocabulary (§F20, #47): build via the canonical
+        // resolver and discard. If the operator declared an empty
+        // [moderation_reasons] section, an invalid identifier, a
+        // zero base_weight, or an empty description, the resolver
+        // returns an Error::Signing here that surfaces as a
+        // config-load failure at startup.
+        let _ = crate::moderation::reasons::ReasonVocabulary::from_config(self)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the

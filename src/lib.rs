@@ -24,6 +24,7 @@ pub mod config;
 pub mod credential_file;
 pub mod error;
 pub mod label;
+pub mod moderation;
 pub mod moderators;
 pub mod report;
 pub mod serve;
