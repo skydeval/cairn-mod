@@ -14,7 +14,7 @@ use cairn_mod::cli::{
     moderator, operator_login,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
-    retention, session,
+    retention, session, trust_chain,
 };
 use cairn_mod::config::Config;
 use cairn_mod::moderators::Role;
@@ -96,6 +96,34 @@ enum Command {
         #[command(subcommand)]
         sub: RetentionSub,
     },
+
+    /// Trust-chain transparency surface
+    /// (`tools.cairn.admin.getTrustChain`). Returns declared
+    /// signing keys, maintainer roster, service-record summary,
+    /// and instance metadata. **Admin role required.**
+    #[command(name = "trust-chain")]
+    TrustChain {
+        #[command(subcommand)]
+        sub: TrustChainSub,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TrustChainSub {
+    /// Fetch the trust-chain envelope. Read-only; no audit_log
+    /// entry on the server.
+    Show(TrustChainShowArgs),
+}
+
+#[derive(Debug, Args)]
+struct TrustChainShowArgs {
+    /// Per-invocation override of the session's stored Cairn
+    /// server URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable sectioned output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -505,6 +533,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Retention {
             sub: RetentionSub::Sweep(args),
         } => run_retention_sweep(args).await,
+        Command::TrustChain {
+            sub: TrustChainSub::Show(args),
+        } => run_trust_chain_show(args).await,
     }
 }
 
@@ -520,6 +551,22 @@ async fn run_retention_sweep(args: RetentionSweepArgs) -> Result<(), CliError> {
         println!("{}", retention::format_sweep_json(&resp));
     } else {
         println!("{}", retention::format_sweep_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_trust_chain_show(args: TrustChainShowArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = trust_chain::TrustChainShowInput {
+        cairn_server_override: args.cairn_server,
+    };
+    let resp = trust_chain::show(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", trust_chain::format_show_json(&resp));
+    } else {
+        println!("{}", trust_chain::format_show_human(&resp));
     }
     Ok(())
 }

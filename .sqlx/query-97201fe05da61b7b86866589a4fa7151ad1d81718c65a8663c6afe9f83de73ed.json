@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO labeler_config (key, value, updated_at)\n         VALUES ('service_record_content_hash', ?1, ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "97201fe05da61b7b86866589a4fa7151ad1d81718c65a8663c6afe9f83de73ed"
+}
