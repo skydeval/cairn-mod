@@ -17,6 +17,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.3.0] - 2026-04-26
+
+> v1.3 "Audit integrity" makes audit-log tampering cryptographically
+> detectable. Every audit row now carries a SHA-256 hash chained to
+> the previous row's hash; operators verify chain integrity via
+> `cairn audit verify`, backfill pre-v1.3 rows via `cairn audit-rebuild`,
+> and inspect individual hashes via the extended `cairn audit show`
+> output. The release also reconciles the design doc against four
+> releases of drift — §11/§14/§16.1/§18 reflect what shipped, §19's
+> release runbook documents the manual flow that v1.1/v1.2/v1.3
+> actually used, and the unused GitHub Actions release workflow is
+> marked deprecated.
+
+### Added
+- Hash-chained audit log: every `audit_log` row carries `prev_hash` and `row_hash` columns (SHA-256 over DAG-CBOR canonical encoding of the row's content). Tampering with any row's content or stored hash produces a recomputation mismatch detectable via `cairn audit verify`. `WriteCommand::AppendAudit` routes audit-row writes through the writer task; cross-process callers (`cairn publish-service-record` / `cairn unpublish-service-record`) use a parallel `append_via_pool` path that shares the same `compute_audit_row_hash` function — single canonical hash implementation, no risk of drift between paths (#39)
+- `cairn audit-rebuild` CLI subcommand. One-shot operator command that walks `audit_log` in id order and fills `prev_hash` + `row_hash` for every row using the canonical hash function. Idempotent — re-running on an already-rebuilt log is a no-op success. Acquires the writer's `server_instance_lease` for the duration of the rebuild; lease conflict surfaces as exit 11 `LEASE_CONFLICT` so the operator stops `cairn serve` first. The §F10 `audit_log_no_update` trigger is dropped + recreated inside a single `BEGIN IMMEDIATE` transaction so partial-failure ROLLBACK restores the trigger atomically (#40)
+- `cairn audit verify` CLI subcommand. Read-only operator command that walks the chain, recomputes each attested row's hash from its stored content + the running prev_hash, and compares against the stored `row_hash`. Reports the first divergence (row id, expected hex hash, actual hex hash, count of rows verified before divergence) and exits with the new exit code 15 `AUDIT_DIVERGENCE`. Pre-attestation rows (NULL `row_hash`, predating `cairn audit-rebuild` on a legacy install) are skipped with a horizon notice rather than flagged as errors. Safe to run while `cairn serve` is live — read-only, no lease (#41)
+- `cairn audit show <id>` output gains `row_hash` and `prev_hash` fields in both human and JSON output. Pre-attestation rows display the `(pre-attestation)` sentinel; the genesis row's `prev_hash` displays as the all-zeros 64-char hex string. `tools.cairn.admin.defs#auditEntry` gains optional `prevHash` and `rowHash` fields; `tools.cairn.admin.listAuditLog` also exposes them on the wire (the human-table formatter stays terse), so `cairn audit list --json | jq` surfaces hashes for free (#42)
+
+### Changed
+- [`cairn-design.md`](cairn-design.md) §11/§14/§16.1/§18 reconciled to reflect what shipped through v1.0/v1.1/v1.2/v1.3 versus what's still aspirational. §18 renamed from "v1.1 Roadmap" to "Future Roadmap" (anchor moves from `#18-v11-roadmap` to `#18-future-roadmap`). Cross-platform binary commitments (Windows + multi-target) dropped from §14 and §16.1 — cairn-mod is server software designed for Linux deployment behind a reverse proxy, and `cargo install cairn-mod` is the canonical install path (#43)
+- [`cairn-design.md`](cairn-design.md) §19 release runbook rewritten to match the manual flow that v1.1, v1.2, and v1.3 have actually used: a 13-step procedure across three phases (Readiness, Manual end-to-end verification, Release ceremony). Cadence-bound framings ("1 week before target date," "Week-1 post-release") replaced with cadence-agnostic language; §19.4 now defers to §20.2's existing monitoring SLA rather than duplicating it (#44)
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) marked deprecated via header comment. The workflow has never been used successfully — three v1.0 `workflow_dispatch` attempts failed on 2026-04-24, and v1.1/v1.2/v1.3 all shipped via the manual flow now documented in §19.2. The file is preserved (not deleted) as historical record of the v1.0 release-automation design intent (#45)
+
+### Fixed
+
+### Removed
+
+### Security
+
 ## [1.2.0] - 2026-04-26
 
 > v1.2 "Trust-chain transparency" makes the labeler's trust posture

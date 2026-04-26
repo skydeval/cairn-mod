@@ -11,7 +11,7 @@ community moderation.
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-informational.svg)](Cargo.toml)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-> **Latest stable release:** [v1.2.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.2.0) · install with `cargo install cairn-mod`
+> **Latest stable release:** [v1.3.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.3.0) · install with `cargo install cairn-mod`
 >
 > The `main` branch contains active development toward the next release. For production deployments, pin to a released version.
 
@@ -30,9 +30,9 @@ than Skyware; it does not try to be either.
 
 ## Status
 
-**v1.2.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.2.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.2.0). v1.2's "trust-chain transparency" theme adds `tools.cairn.admin.getTrustChain` (with `cairn trust-chain show`) for instance trust posture, `tools.cairn.admin.getAuditLog` (with `cairn audit show <id>`) for per-id audit detail, and `cairn unpublish-service-record` to close the service-record lifecycle. Items deferred to v1.3 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
+**v1.3.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.3.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.3.0). v1.3's "audit integrity" theme adds the hash-chained audit log: every audit_log row now carries `prev_hash` and `row_hash` columns (SHA-256 over DAG-CBOR canonical encoding), and operators can verify chain integrity via `cairn audit verify`, backfill pre-v1.3 rows via `cairn audit-rebuild`, and inspect individual hashes via the extended `cairn audit show` output. v1.3 also reconciles the design doc against four releases of drift (§11/§14/§16.1/§18/§19). Items deferred to v1.4 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
-**v1.3 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-future-roadmap) include signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions).
+**v1.4 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-future-roadmap) include signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions).
 
 Production deployments should pin to the stable release, not the `main` branch.
 
