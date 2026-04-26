@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_cid, reason FROM audit_log\n         WHERE action = 'service_record_unpublished'\n         ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_cid",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "0577fc06854bf0cf518985384c90c10a916e79e410bfc73f2e62e8a6f59384ac"
+}

@@ -150,6 +150,17 @@ cairn publish-service-record --config /etc/cairn/cairn.toml
 The publish step is idempotent — re-running with unchanged config is
 a no-op.
 
+To remove the published record (e.g., decommissioning a test
+deployment), run the inverse:
+
+```
+cairn unpublish-service-record --config /etc/cairn/cairn.toml
+```
+
+Idempotent — running it when nothing is published is also a no-op.
+The next `cairn serve` after an unpublish will fail-start with exit
+13 SERVICE_RECORD_ABSENT until you republish.
+
 ### 5. Run
 
 ```

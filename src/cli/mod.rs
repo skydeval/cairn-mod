@@ -26,3 +26,4 @@ pub mod report;
 pub mod retention;
 pub mod session;
 pub mod trust_chain;
+pub mod unpublish_service_record;

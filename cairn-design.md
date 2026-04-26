@@ -445,7 +445,7 @@ Labels can be created with an `exp` timestamp. Expired labels are excluded from 
 
 Every moderation action writes an immutable row.
 
-**Actions logged:** label applied, label negated, report resolved, reporter flagged, moderator granted/revoked, signing key added, labeler service record published or updated.
+**Actions logged:** label applied, label negated, report resolved, reporter flagged, moderator granted/revoked, signing key added, labeler service record published or updated, labeler service record unpublished.
 
 **Verification:**
 - Every F1/F6/F9/F11 action produces exactly one audit entry.

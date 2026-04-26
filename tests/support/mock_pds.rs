@@ -55,6 +55,7 @@ pub struct MockPdsState {
     pub get_service_auth_calls: AtomicUsize,
     pub put_record_calls: AtomicUsize,
     pub get_record_calls: AtomicUsize,
+    pub delete_record_calls: AtomicUsize,
     pub force_get_service_auth_401_next: AtomicUsize,
     pub force_refresh_401: AtomicUsize,
     /// One-shot: cause the next `getRecord` to respond 404
@@ -150,6 +151,7 @@ pub async fn spawn(moderator_did: impl Into<String>) -> MockPds {
         )
         .route("/xrpc/com.atproto.repo.putRecord", post(put_record))
         .route("/xrpc/com.atproto.repo.getRecord", get(get_record))
+        .route("/xrpc/com.atproto.repo.deleteRecord", post(delete_record))
         .with_state(inner);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -485,6 +487,65 @@ struct GetRecordParams {
     repo: String,
     collection: String,
     rkey: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteRecordBody {
+    #[allow(dead_code)]
+    repo: String,
+    #[allow(dead_code)]
+    collection: String,
+    #[allow(dead_code)]
+    rkey: String,
+    swap_record: Option<String>,
+}
+
+/// `com.atproto.repo.deleteRecord` mock handler. Mirrors `putRecord`
+/// auth + swap semantics. Idempotent on already-absent records: a
+/// delete with no swap and no stored CID returns 200 (matches real
+/// PDS behavior). Used by `cairn unpublish-service-record` (#34).
+async fn delete_record(
+    State(inner): State<Inner>,
+    headers: HeaderMap,
+    Json(body): Json<DeleteRecordBody>,
+) -> Response {
+    inner
+        .state
+        .delete_record_calls
+        .fetch_add(1, Ordering::SeqCst);
+
+    let bearer = match extract_bearer(&headers) {
+        Some(b) => b,
+        None => {
+            return xrpc_error(
+                StatusCode::UNAUTHORIZED,
+                "AuthenticationRequired",
+                "missing bearer",
+            );
+        }
+    };
+    if bearer != *inner.state.current_access.lock().await {
+        return xrpc_error(
+            StatusCode::UNAUTHORIZED,
+            "AuthenticationRequired",
+            "stale access token",
+        );
+    }
+
+    let mut current_cid = inner.state.current_service_record_cid.lock().await;
+    match (&*current_cid, body.swap_record.as_deref()) {
+        (Some(have), Some(want)) if have != want => {
+            return xrpc_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidSwap",
+                "record was modified externally; swap CID stale",
+            );
+        }
+        _ => {}
+    }
+    *current_cid = None;
+    Json(json!({})).into_response()
 }
 
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {

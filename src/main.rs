@@ -15,6 +15,7 @@ use cairn_mod::cli::{
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
+    unpublish_service_record::{self, UnpublishOutcome},
 };
 use cairn_mod::config::Config;
 use cairn_mod::moderators::Role;
@@ -71,6 +72,15 @@ enum Command {
     /// (§F1). Idempotent — no PDS write if the content hash matches
     /// the last-published value.
     PublishServiceRecord(ServeArgs),
+
+    /// Remove the published `app.bsky.labeler.service` record from
+    /// the operator's PDS (#34). Idempotent — running when nothing
+    /// is published is a no-op success, not an error. Clears the
+    /// local `labeler_config` state on a real delete; the next
+    /// `cairn serve` startup verify (§F19) will then exit 13
+    /// SERVICE_RECORD_ABSENT until a fresh
+    /// `cairn publish-service-record` runs.
+    UnpublishServiceRecord(ServeArgs),
 
     /// Moderator management. Direct manipulation of the
     /// `moderators` SQLite table — bypasses the HTTP admin
@@ -534,6 +544,7 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Serve(args) => run_serve(args).await,
         Command::OperatorLogin(args) => run_operator_login(args).await,
         Command::PublishServiceRecord(args) => run_publish_service_record(args).await,
+        Command::UnpublishServiceRecord(args) => run_unpublish_service_record(args).await,
         Command::Moderator {
             sub: ModeratorSub::Add(args),
         } => run_moderator_add(args).await,
@@ -825,6 +836,30 @@ async fn run_publish_service_record(args: ServeArgs) -> Result<(), CliError> {
         }
         PublishOutcome::Published { cid, created_at } => {
             println!("published service record: cid={cid}, createdAt={created_at}");
+        }
+    }
+    Ok(())
+}
+
+async fn run_unpublish_service_record(args: ServeArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let operator_cfg = config
+        .operator
+        .as_ref()
+        .ok_or_else(|| CliError::Config("missing [operator] section in config".into()))?
+        .clone();
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+
+    let outcome =
+        unpublish_service_record::unpublish(&pool, &config, &operator_cfg.session_path).await?;
+    match outcome {
+        UnpublishOutcome::NoChange => {
+            println!("no service record published; nothing to unpublish");
+        }
+        UnpublishOutcome::Unpublished { cid } => {
+            println!("unpublished service record: cid={cid}");
         }
     }
     Ok(())

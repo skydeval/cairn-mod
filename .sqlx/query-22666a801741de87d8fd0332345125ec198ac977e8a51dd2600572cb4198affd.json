@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM labeler_config WHERE key = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "22666a801741de87d8fd0332345125ec198ac977e8a51dd2600572cb4198affd"
+}

@@ -450,6 +450,83 @@ impl PdsClient {
         })
     }
 
+    /// Delete a record at (repo, collection, rkey) via
+    /// `com.atproto.repo.deleteRecord`. When `swap_record` is `Some`,
+    /// the request is conditional on the PDS's current record having
+    /// that CID — same swap-race semantics as `put_record`. Used by
+    /// `cairn unpublish-service-record` (#34) to remove the published
+    /// `app.bsky.labeler.service` record.
+    ///
+    /// **Idempotency on the wire:** real PDSes return 200 even when
+    /// the target record is already absent, matching the ATProto
+    /// spec. Callers that want a "did we actually delete something"
+    /// distinction should consult their own state (e.g.,
+    /// `labeler_config`) before calling — that's the path the
+    /// unpublish flow takes.
+    pub async fn delete_record(
+        &self,
+        access_jwt: &str,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+        swap_record: Option<&str>,
+    ) -> Result<(), PdsError> {
+        const CTX: &str = "deleteRecord";
+        let url = self.endpoint("com.atproto.repo.deleteRecord");
+
+        let mut body = serde_json::json!({
+            "repo": repo,
+            "collection": collection,
+            "rkey": rkey,
+        });
+        if let Some(cid) = swap_record {
+            body.as_object_mut()
+                .expect("json object")
+                .insert("swapRecord".into(), serde_json::Value::String(cid.into()));
+        }
+
+        let resp = self
+            .client
+            .post(url.clone())
+            .bearer_auth(access_jwt)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| PdsError::Network {
+                url: url.to_string(),
+                source,
+            })?;
+        if resp.status().is_success() {
+            // PDS may return `{ "commit": ... }` or an empty body;
+            // we don't look at it — a 2xx is the contract.
+            return Ok(());
+        }
+        // Surface InvalidSwap as its own variant — same posture as
+        // put_record so concurrent operator workflows can distinguish
+        // a swap-race from an auth/transport failure.
+        let status = resp.status();
+        let body = resp.json::<XrpcErrorBody>().await.unwrap_or_default();
+        if body.error == "InvalidSwap" {
+            return Err(PdsError::SwapRace {
+                message: body.message,
+            });
+        }
+        Err(if status == reqwest::StatusCode::UNAUTHORIZED {
+            PdsError::Unauthorized {
+                context: CTX,
+                error: body.error,
+                message: body.message,
+            }
+        } else {
+            PdsError::UnexpectedStatus {
+                context: CTX,
+                status: status.as_u16(),
+                error: body.error,
+                message: body.message,
+            }
+        })
+    }
+
     /// Mint a fresh service auth JWT for calling `aud` with the
     /// given lexicon method. Returns the opaque token string; the
     /// CLI presents it as `Authorization: Bearer <token>` to Cairn.
