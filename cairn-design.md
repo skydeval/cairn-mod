@@ -880,7 +880,7 @@ moderator CLI / XRPC
 
 ## 11. Out of Scope for v1
 
-Deferred to v1.1 or later (see §18):
+Deferred to a future release (see §18):
 
 1. Webhook signal intake.
 2. Review queue.
@@ -897,11 +897,10 @@ Deferred to v1.1 or later (see §18):
 13. Label mirroring / translation.
 14. Appeals flow.
 15. Webhook-out.
-16. Audit log hash-chaining (and transparency records).
-17. PLC log subscription for real-time key-rotation observation.
-18. Cross-language interop tests (beyond Rust consumer).
-19. Multi-label-per-frame batching in `subscribeLabels`.
-20. **Observability and operator-facing health introspection** (Prometheus-style `/metrics` endpoint, structured health-check endpoint, per-operator dashboards). v1 provides `tracing`-based structured logs only. Operators who need metrics can scrape logs; a dedicated metrics surface is v1.1. This is called out explicitly because a reviewer would otherwise wonder if it was an oversight.
+16. PLC log subscription for real-time key-rotation observation.
+17. Cross-language interop tests (beyond Rust consumer).
+18. Multi-label-per-frame batching in `subscribeLabels`.
+19. **Operator-facing metrics surface** (Prometheus-style `/metrics` endpoint, per-operator dashboards). v1 provides `tracing`-based structured logs only; the `/health` and `/ready` probe endpoints (§F14, shipped v1.1) cover orchestrator-driven liveness checks. Operators who need metrics today can scrape logs; a dedicated metrics surface is a future release. This is called out explicitly because a reviewer would otherwise wonder if it was an oversight.
 
 ## 12. Security Considerations
 
@@ -944,14 +943,12 @@ Complements §4 and §5. This is the attacker's-eye view for code review.
 cairn-mod v1 ships as a focused release: protocol-correct, self-contained, and notably smaller than Ozone in feature surface. This is intentional. Users who need Ozone's full moderation workflow (review queue, takedowns, team management, web UI) should use Ozone today and consider migrating to cairn-mod when v1.1+ delivers those features. Users who want a Rust-native labeler without Ozone's dependency footprint are cairn-mod v1's target audience.
 
 - `cargo publish` as `cairn-mod` (the bare name `cairn` is placeholder-squatted on crates.io; a claim attempt on `cairn` via help@crates.io is a low-priority post-v1 follow-up — see §17). The produced binary is named `cairn` via the `[[bin]]` target, so end-users run `cairn` after `cargo install cairn-mod`.
-- Pre-built binaries (Linux x86_64, macOS arm64+x86_64, Windows x86_64) via GitHub Actions.
+- **Install path:** `cargo install cairn-mod` from crates.io is the canonical install. Source builds via `cargo build --release` work for anyone with a Rust toolchain. Pre-built binaries are not published — cairn-mod is server software designed for Linux deployment behind a reverse proxy (Caddy/nginx + systemd, see [contrib/](contrib/)), and operators in that target audience already have a build environment.
 - `cairn.tools` hosting: **GitHub Pages with custom domain (CNAME)**. Zero ongoing cost, handles static JSON at `.well-known/lexicons/` paths with correct `Content-Type` (configured via `.nojekyll` + proper file extensions, or via a minimal build step that emits files with correct MIME types).
-- README contents: install, quickstart, **Production Checklist**, security caveats, out-of-scope list, comparison to Ozone/Skyware, contribution guide, **§4.2 trust-chain disclosures prominently placed**, observed network rate limits (§6.6), unsigned-binaries friction note (see below).
-- **Binary signing (decision):** macOS and Windows binaries are **unsigned**. README documents the Gatekeeper ("cannot verify developer" — `xattr -d com.apple.quarantine cairn` or right-click-open) and SmartScreen ("unrecognized publisher") friction. SHA-256 checksums are published alongside binaries in each GitHub Release for verification. Signing with Apple Developer ($99/yr) and Windows EV cert (several hundred/yr) is a v1.1+ consideration if adoption justifies the cost.
+- README contents: install, quickstart, **Production Checklist**, security caveats, out-of-scope list, comparison to Ozone/Skyware, contribution guide, **§4.2 trust-chain disclosures prominently placed**, observed network rate limits (§6.6).
 - **Semver commitment:** library crate (`cairn` as a Rust dependency, if anyone consumes it that way) follows strict semver. CLI output format and admin XRPC surface follow strict semver — breaking changes require a major-version bump. DB schema migrations run automatically on upgrade via embedded `sqlx migrate`; the operator does not run a separate command. Internal implementation details (module structure, private types) are not covered by semver.
 - **CI strict mode:** `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings` (default lint groups only, not pedantic/nursery), `cargo fmt --check`, `cargo sqlx prepare --check` to keep compile-time query artifacts fresh.
 - MSRV: Rust 1.88+ (inherited from `proto-blue` edition 2024).
-- **Cross-platform build:** Linux x86_64 (GNU and musl static), Linux aarch64, macOS arm64 + x86_64, Windows x86_64. Built via GitHub Actions with `cross` or `cargo-zigbuild` where cross-compilation is needed. Build procedure verified end-to-end on clean runners before release (not just "works on my machine").
 - Detailed release procedure and rollback policy: see §19 (Release Runbook).
 
 ## 15. proto-blue Dependency & Contingency
@@ -977,11 +974,9 @@ cairn-mod v1 cannot ship until all of these are true:
 - F1–F13 verification criteria all pass.
 - §12 security considerations all have corresponding tests.
 - `cargo clippy --all-targets -- -D warnings` passes clean (default lint groups).
-- `cargo test --all-targets` passes on CI for every published target (Linux x86_64 GNU + musl, Linux aarch64, macOS arm64 + x86_64, Windows x86_64).
+- `cargo test --all-targets` passes on CI on the published Linux x86_64 toolchain at MSRV and current stable.
 - `cargo sqlx prepare --check` passes on CI.
 - cairn-mod published to crates.io; `proto-blue` dependency satisfied via crates.io (Path A) or vendored subset (Path B per §15).
-- Release binaries with SHA-256 checksums downloadable from GitHub Releases.
-- `cairn.tools` is live with docs and lexicon bundle.
 - atrium-api interop test passes (cairn-mod-emitted labels consumed by `atrium-api` subscriber code).
 - Ozone interop spot-test: at least one cairn-mod-emitted label has been parsed and signature-verified by `@atproto/api` (manually verified; documented in release notes).
 - Signature parity corpus (§F2) passes byte-identical tests for every optional-field combination.
@@ -1006,7 +1001,7 @@ The signals exist because they're real release-quality indicators. They are soft
 5. When to split into workspace crates (not in v1).
 6. **First external installer identity.** Named before the README-quickstart issue in §21 is started; preferably a Guild member or ATProto-Rust community member with the context to give useful feedback.
 
-## 18. v1.1 Roadmap
+## 18. Future Roadmap
 
 - Webhook signal intake.
 - Review queue with distinct workflows for signal items vs. reports.
@@ -1014,14 +1009,11 @@ The signals exist because they're real release-quality indicators. They are soft
 - Report encryption at rest (AES-256-GCM-SIV, per-report DEKs, rotatable master key).
 - Label expiry enforcement job.
 - Signing key rotation procedure (with DID doc update, audit, and consumer-observation grace period).
-- Moderator/role management XRPC.
-- Audit log hash-chaining + transparency records.
+- Moderator/role management XRPC (CLI shipped in v1.1 per §F16; XRPC versions deferred).
 - PLC operations-log subscription.
 - Cross-language interop tests (TypeScript consumer).
 - Multi-label-per-frame batching in `subscribeLabels`.
-- Observability surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause), health-check endpoint suitable for load-balancer probes, structured-log conventions.
-
-**Scope discipline:** v1 ships before v1.1 work begins.
+- Operator-facing metrics surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause) and structured-log conventions. (`/health` and `/ready` probe endpoints shipped in v1.1 — see §F14.)
 
 ## 19. Release Runbook
 

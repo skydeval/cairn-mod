@@ -32,7 +32,7 @@ than Skyware; it does not try to be either.
 
 **v1.2.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.2.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.2.0). v1.2's "trust-chain transparency" theme adds `tools.cairn.admin.getTrustChain` (with `cairn trust-chain show`) for instance trust posture, `tools.cairn.admin.getAuditLog` (with `cairn audit show <id>`) for per-id audit detail, and `cairn unpublish-service-record` to close the service-record lifecycle. Items deferred to v1.3 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
-**v1.3 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-v11-roadmap) include audit-log hash-chaining, signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions). The §18 section is still titled "v1.1 Roadmap" because the original v1.1 release shipped a focused subset; the remaining items there are the v1.3+ pool.
+**v1.3 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-future-roadmap) include signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions).
 
 Production deployments should pin to the stable release, not the `main` branch.
 
