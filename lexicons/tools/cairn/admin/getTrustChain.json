@@ -1,0 +1,54 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getTrustChain",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Admin-role-only. Returns the trust-chain transparency surface for this cairn-mod instance: declared signing keys, current maintainer roster, the published service record's content hash + declared label values, and instance metadata. Read-only; no audit_log entry. Callers with the `mod` role receive Forbidden (§F12 role-based authorization).",
+      "parameters": {
+        "type": "params",
+        "properties": {}
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "serviceDid",
+            "signingKeys",
+            "maintainers",
+            "instance"
+          ],
+          "properties": {
+            "serviceDid": {
+              "type": "string",
+              "format": "did"
+            },
+            "signingKeys": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "tools.cairn.admin.defs#signingKeyEntry"
+              }
+            },
+            "maintainers": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "tools.cairn.admin.defs#maintainerEntry"
+              }
+            },
+            "serviceRecord": {
+              "type": "ref",
+              "ref": "tools.cairn.admin.defs#serviceRecordSummary"
+            },
+            "instance": {
+              "type": "ref",
+              "ref": "tools.cairn.admin.defs#instanceInfo"
+            }
+          }
+        }
+      }
+    }
+  }
+}

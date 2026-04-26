@@ -83,8 +83,13 @@ fn procedures_have_input_queries_have_parameters() {
         "flagReporter",
         "retentionSweep",
     ]);
-    let queries: HashSet<&str> =
-        HashSet::from(["listLabels", "listReports", "getReport", "listAuditLog"]);
+    let queries: HashSet<&str> = HashSet::from([
+        "listLabels",
+        "listReports",
+        "getReport",
+        "listAuditLog",
+        "getTrustChain",
+    ]);
 
     for path in all_files() {
         let stem = path.file_stem().unwrap().to_str().unwrap();
@@ -263,6 +268,7 @@ fn expected_endpoint_files_all_present() {
         "flagReporter",
         "listAuditLog",
         "retentionSweep",
+        "getTrustChain",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

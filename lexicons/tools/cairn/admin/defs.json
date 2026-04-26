@@ -119,6 +119,110 @@
           "description": "Structured JSON or free text; action-specific schema documented in src/writer.rs AUDIT_REASON_SCHEMA."
         }
       }
+    },
+    "signingKeyEntry": {
+      "type": "object",
+      "required": [
+        "publicKeyMultibase",
+        "validFrom",
+        "createdAt",
+        "isActive"
+      ],
+      "properties": {
+        "publicKeyMultibase": {
+          "type": "string",
+          "description": "Multibase-encoded ES256K public key — matches the `verificationMethod[*].publicKeyMultibase` form published in /.well-known/did.json."
+        },
+        "validFrom": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "validTo": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Set when the key was rotated out; absent when the key is still valid (§F8 rotation-shaped schema)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "isActive": {
+          "type": "boolean",
+          "description": "True when validTo is absent or in the future."
+        }
+      }
+    },
+    "maintainerEntry": {
+      "type": "object",
+      "required": [
+        "did",
+        "role",
+        "addedAt",
+        "provenanceAttested"
+      ],
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did"
+        },
+        "role": {
+          "type": "string",
+          "knownValues": [
+            "mod",
+            "admin"
+          ]
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "addedBy": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the moderator who added this entry via the HTTP-attested admin endpoint. Absent when the row was inserted via CLI or direct DB write."
+        },
+        "provenanceAttested": {
+          "type": "boolean",
+          "description": "False when addedBy is absent (CLI-initiated inserts pre-dating HTTP-attested moderator-add flows). True when addedBy carries a verified caller DID."
+        }
+      }
+    },
+    "serviceRecordSummary": {
+      "type": "object",
+      "required": [
+        "contentHash",
+        "labelValues"
+      ],
+      "properties": {
+        "contentHash": {
+          "type": "string",
+          "description": "SHA-256 hex of the published service record's canonical encoding, excluding createdAt (§F1 idempotency surface). Matches labeler_config.service_record_content_hash."
+        },
+        "labelValues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Declared label-value short names from the loaded [labeler] config. The honest 'taxonomy version' surface for v1.2 — when proper taxonomy versioning lands later, this shape can grow."
+        }
+      }
+    },
+    "instanceInfo": {
+      "type": "object",
+      "required": [
+        "version",
+        "serviceEndpoint"
+      ],
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Semver of the running cairn-mod binary (CARGO_PKG_VERSION at build time)."
+        },
+        "serviceEndpoint": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
     }
   }
 }
