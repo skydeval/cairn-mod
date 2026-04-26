@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT row_hash FROM audit_log WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ba69ff1a8e6f95bd33f19b45a853e28e9079cd5b8f33723f32a395d5d7acfe40"
+}

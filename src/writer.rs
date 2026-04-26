@@ -1222,7 +1222,17 @@ impl Writer {
 
 // ---------- Lease + key bootstrap ----------
 
-async fn acquire_lease(pool: &Pool<Sqlite>) -> Result<String> {
+/// Acquire the §F5 single-instance lease.
+///
+/// Returns the new instance id on success. Returns
+/// [`Error::LeaseHeld`] when an existing row's `last_heartbeat` is
+/// still within [`LEASE_STALE_MS`] — i.e., another writer is live.
+///
+/// Exposed as `pub(crate)` so one-shot CLI tools that mutate
+/// `audit_log` (`cairn audit-rebuild`, #40) can assert the same
+/// "no live writer" invariant the long-running serve process holds.
+/// The CLI tool releases via [`release_lease_by_id`] when done.
+pub(crate) async fn acquire_lease(pool: &Pool<Sqlite>) -> Result<String> {
     let now_ms = epoch_ms_now();
 
     let existing =
@@ -1258,6 +1268,20 @@ async fn acquire_lease(pool: &Pool<Sqlite>) -> Result<String> {
     .await?;
 
     Ok(new_id)
+}
+
+/// Release a lease acquired via [`acquire_lease`] by its instance id.
+/// Free-function counterpart to [`Writer::release_lease`] for callers
+/// that don't own a `Writer` (one-shot CLI tools that just hold the
+/// lease for the duration of a data migration).
+pub(crate) async fn release_lease_by_id(pool: &Pool<Sqlite>, instance_id: &str) -> Result<()> {
+    sqlx::query!(
+        "DELETE FROM server_instance_lease WHERE id = 1 AND instance_id = ?1",
+        instance_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn ensure_signing_key_row(pool: &Pool<Sqlite>, key: &SigningKey) -> Result<i64> {

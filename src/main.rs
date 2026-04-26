@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_mod::cli::{
-    audit,
+    audit, audit_rebuild,
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
@@ -116,6 +116,26 @@ enum Command {
         #[command(subcommand)]
         sub: TrustChainSub,
     },
+
+    /// Backfill prev_hash + row_hash for pre-v1.3 audit_log rows
+    /// (#40). One-shot operator command — direct DB, no HTTP, no
+    /// moderator session. Acquires the writer lease for the
+    /// duration of the rebuild; refuses to run while `cairn serve`
+    /// is up. Idempotent — re-running on an already-rebuilt log
+    /// is a no-op success.
+    #[command(name = "audit-rebuild")]
+    AuditRebuild(AuditRebuildArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuditRebuildArgs {
+    /// Path to the TOML config file (same semantics as `cairn serve
+    /// --config`). The DB path comes from this config.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Emit a JSON outcome line instead of the human one-liner.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -566,7 +586,19 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::TrustChain {
             sub: TrustChainSub::Show(args),
         } => run_trust_chain_show(args).await,
+        Command::AuditRebuild(args) => run_audit_rebuild(args).await,
     }
+}
+
+async fn run_audit_rebuild(args: AuditRebuildArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    let outcome = audit_rebuild::rebuild(&pool).await?;
+    if args.json {
+        println!("{}", audit_rebuild::format_json(&outcome));
+    } else {
+        println!("{}", audit_rebuild::format_human(&outcome));
+    }
+    Ok(())
 }
 
 async fn run_retention_sweep(args: RetentionSweepArgs) -> Result<(), CliError> {

@@ -12,6 +12,7 @@
 //! - `output` — human vs `--json` formatting.
 
 pub mod audit;
+pub mod audit_rebuild;
 pub mod auth;
 pub mod error;
 pub mod login;

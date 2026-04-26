@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, prev_hash AS \"prev_hash!\", row_hash AS \"row_hash!\"\n               FROM audit_log ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "prev_hash!",
+        "ordinal": 1,
+        "type_info": "Blob"
+      },
+      {
+        "name": "row_hash!",
+        "ordinal": 2,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "7b13251326b03da77ee5d020b63586bc6396e5bf0b7f47e2e7f63501a405f7f5"
+}

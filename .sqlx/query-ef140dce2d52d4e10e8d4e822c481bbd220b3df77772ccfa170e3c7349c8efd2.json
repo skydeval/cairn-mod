@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE audit_log SET prev_hash = ?1, row_hash = ?2 WHERE id = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ef140dce2d52d4e10e8d4e822c481bbd220b3df77772ccfa170e3c7349c8efd2"
+}
