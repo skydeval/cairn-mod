@@ -20,6 +20,7 @@ mod apply_label;
 mod audit_view;
 mod common;
 mod flag_reporter;
+mod get_audit_log;
 mod get_report;
 mod get_trust_chain;
 mod list_audit_log;
@@ -121,6 +122,10 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.listAuditLog",
             get(list_audit_log::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getAuditLog",
+            get(get_audit_log::handler),
         )
         .route(
             "/xrpc/tools.cairn.admin.retentionSweep",

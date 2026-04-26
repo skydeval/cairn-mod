@@ -24,7 +24,10 @@ JSON file must match this path exactly — the test suite asserts this.
 | `tools.cairn.admin.resolveReport`          | procedure | mod/admin | Resolve a report, optionally apply label.  |
 | `tools.cairn.admin.flagReporter`           | procedure | mod/admin | Flag/unflag a reporter DID.                |
 | `tools.cairn.admin.listAuditLog`           | query     | admin     | Audit log inspection.                      |
-| `tools.cairn.admin.defs`                   | —         | —         | Shared types (`#reportView`, `#auditEntry`). |
+| `tools.cairn.admin.getAuditLog`            | query     | admin     | Single audit log entry by id.              |
+| `tools.cairn.admin.getTrustChain`          | query     | admin     | Trust-chain transparency surface.          |
+| `tools.cairn.admin.retentionSweep`         | procedure | admin     | One-shot retention sweep of expired labels.|
+| `tools.cairn.admin.defs`                   | —         | —         | Shared types (`#reportView`, `#auditEntry`, `#signingKeyEntry`, `#maintainerEntry`, `#serviceRecordSummary`, `#instanceInfo`). |
 
 Role enforcement is in the handler (#14–17), not in the lexicon.
 
@@ -51,6 +54,7 @@ Currently declared custom error names:
   (`negateLabel`).
 - `ReportNotFound` — report id does not exist (`getReport`,
   `resolveReport`).
+- `AuditEntryNotFound` — audit log id does not exist (`getAuditLog`).
 - `InvalidLabelValue` — label value is not in the operator's declared
   set (`applyLabel`, `resolveReport`).
 

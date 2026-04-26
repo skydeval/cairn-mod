@@ -65,6 +65,7 @@ const ALL_LEXICONS: &[&str] = &[
     "applyLabel",
     "defs",
     "flagReporter",
+    "getAuditLog",
     "getReport",
     "listAuditLog",
     "listLabels",

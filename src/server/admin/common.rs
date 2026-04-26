@@ -59,6 +59,8 @@ pub(super) enum AdminError {
     LabelNotFound,
     /// Declared in lexicons/tools/cairn/admin/{getReport,resolveReport}.json.
     ReportNotFound,
+    /// Declared in lexicons/tools/cairn/admin/getAuditLog.json.
+    AuditEntryNotFound,
     /// Declared in lexicons/tools/cairn/admin/{applyLabel,resolveReport}.json.
     /// Message MUST NOT enumerate the allowed label values — same
     /// anti-leak principle as #14's reason-length guard.
@@ -108,6 +110,13 @@ impl IntoResponse for AdminError {
                 ErrorBody {
                     error: "ReportNotFound",
                     message: "report not found",
+                },
+            ),
+            AdminError::AuditEntryNotFound => (
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "AuditEntryNotFound",
+                    message: "audit entry not found",
                 },
             ),
             AdminError::InvalidLabelValue => (

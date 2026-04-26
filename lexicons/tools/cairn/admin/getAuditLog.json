@@ -1,0 +1,34 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getAuditLog",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Admin-role-only. Fetch a single audit log entry by id. Callers with the `mod` role receive Forbidden (§F12 role-based authorization). Read-only; no audit_log entry written for this call.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#auditEntry"
+        }
+      },
+      "errors": [
+        {
+          "name": "AuditEntryNotFound",
+          "description": "No audit log entry exists with the given id."
+        }
+      ]
+    }
+  }
+}

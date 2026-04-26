@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id          AS \"id!: i64\",\n             created_at  AS \"created_at!: i64\",\n             action      AS \"action!: String\",\n             actor_did   AS \"actor_did!: String\",\n             target,\n             target_cid,\n             outcome     AS \"outcome!: String\",\n             reason\n           FROM audit_log WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "action!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "target",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_cid",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome!: String",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "7ee49d10a241514b5c14c18db057fd92076bcdc8a983ffb0c859bc10de79e7b4"
+}

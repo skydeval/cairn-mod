@@ -1,11 +1,17 @@
-//! Integration tests for `tools.cairn.admin.listAuditLog` (#17).
+//! Integration tests for `tools.cairn.admin.listAuditLog` (#17) and
+//! `tools.cairn.admin.getAuditLog` (#26).
 //!
-//! Admin-role-only endpoint. Tests cover role gating, all filters
-//! (actor, action, outcome, since, until), bound-swap 400, unknown
-//! action/outcome 400, DESC pagination across 60 rows, no-auth 401,
-//! CORS reject-any-origin 403, reason-passthrough of writer-produced
-//! rows, and the `labels.created_at == audit_log.created_at` join
-//! invariant for actor filtering used by list_labels.
+//! Both are admin-role-only. listAuditLog tests cover role gating, all
+//! filters (actor, action, outcome, since, until), bound-swap 400,
+//! unknown action/outcome 400, DESC pagination across 60 rows, no-auth
+//! 401, CORS reject-any-origin 403, reason-passthrough of writer-
+//! produced rows, and the `labels.created_at == audit_log.created_at`
+//! join invariant for actor filtering used by list_labels.
+//!
+//! getAuditLog tests cover the same auth + role + CORS gates plus the
+//! single-row surface: 200 with required-fields shape on a valid id,
+//! `AuditEntryNotFound` 404 on an unknown id, and `InvalidRequest` 400
+//! when the `id` query param is missing (mirrors getReport's posture).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -728,5 +734,135 @@ async fn label_applied_audit_shares_created_at_with_labels_row() {
         "audit_log.actor_did must be the moderator DID supplied to apply_label"
     );
 
+    h.writer.shutdown().await.unwrap();
+}
+
+// ========== getAuditLog (#26) ==========
+//
+// Single-row counterpart to listAuditLog. Same admin-only posture.
+// AuditEntryNotFound is the typed 404; missing-id-param is 400 to
+// match the getReport pattern.
+
+#[tokio::test]
+async fn get_no_auth_returns_401() {
+    let h = spawn().await;
+    let (status, body) = get_query(h.addr, "/xrpc/tools.cairn.admin.getAuditLog?id=1", None).await;
+    assert_eq!(status, 401);
+    assert_eq!(body["error"], "AuthenticationRequired");
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_mod_role_rejected_403() {
+    let h = spawn().await;
+    grant_role(&h.pool, MOD_DID, "mod").await;
+    let id = seed_audit(
+        &h.pool,
+        1_777_104_000_000,
+        "label_applied",
+        MOD_DID,
+        None,
+        "success",
+        None,
+    )
+    .await;
+    let jwt = build_jwt(MOD_DID, "tools.cairn.admin.getAuditLog");
+    let (status, body) = get_query(
+        h.addr,
+        &format!("/xrpc/tools.cairn.admin.getAuditLog?id={id}"),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["error"], "Forbidden");
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_admin_role_valid_id_returns_entry_with_required_fields() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    // 2026-04-23T00:00:00.000Z — matches the fixture in
+    // audit_view::tests, so the wire shape stays in lockstep.
+    let id = seed_audit(
+        &h.pool,
+        1_776_902_400_000,
+        "label_applied",
+        MOD_DID,
+        Some("at://did:plc:t/col/r"),
+        "success",
+        Some(r#"{"val":"spam","neg":false,"moderator_reason":null}"#),
+    )
+    .await;
+
+    let jwt = build_jwt(ADMIN_DID, "tools.cairn.admin.getAuditLog");
+    let (status, body) = get_query(
+        h.addr,
+        &format!("/xrpc/tools.cairn.admin.getAuditLog?id={id}"),
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body["id"].as_i64().unwrap(), id);
+    assert_eq!(body["action"], "label_applied");
+    assert_eq!(body["actorDid"], MOD_DID);
+    assert_eq!(body["outcome"], "success");
+    assert_eq!(body["target"], "at://did:plc:t/col/r");
+    assert_eq!(
+        body["createdAt"].as_str().unwrap(),
+        "2026-04-23T00:00:00.000Z"
+    );
+    // Reason passes through opaque (per audit_view::project + §F10).
+    assert_eq!(
+        body["reason"].as_str().unwrap(),
+        r#"{"val":"spam","neg":false,"moderator_reason":null}"#
+    );
+    // Required fields per the auditEntry def.
+    for k in ["id", "createdAt", "action", "actorDid", "outcome"] {
+        assert!(body.get(k).is_some(), "required field {k} missing: {body}");
+    }
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_admin_role_unknown_id_returns_audit_entry_not_found() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let jwt = build_jwt(ADMIN_DID, "tools.cairn.admin.getAuditLog");
+    let (status, body) = get_query(
+        h.addr,
+        "/xrpc/tools.cairn.admin.getAuditLog?id=99999",
+        Some(&jwt),
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"], "AuditEntryNotFound");
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_admin_role_missing_id_param_returns_400() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let jwt = build_jwt(ADMIN_DID, "tools.cairn.admin.getAuditLog");
+    let (status, body) = get_query(h.addr, "/xrpc/tools.cairn.admin.getAuditLog", Some(&jwt)).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"], "InvalidRequest");
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn get_cors_any_origin_rejected_403() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let jwt = build_jwt(ADMIN_DID, "tools.cairn.admin.getAuditLog");
+    let status = get_with_origin(
+        h.addr,
+        "/xrpc/tools.cairn.admin.getAuditLog?id=1",
+        Some(&jwt),
+        "https://evil.example",
+    )
+    .await;
+    assert_eq!(status, 403);
     h.writer.shutdown().await.unwrap();
 }
