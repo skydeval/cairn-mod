@@ -32,3 +32,12 @@
 # Chainlink runtime artifacts (rules/ tracked, runtime state excluded)
 .chainlink/daemon.log
 .chainlink/daemon.pid
+
+# === Internal-notes docs untracked post-v1.1 ===
+# Both files were committed up through the v1.1.0 tag (which keeps the
+# historical snapshots for anyone checking out v1.1.0 or earlier).
+# Going forward they live as private working notes; future edits stay
+# off the wire. To re-track, remove the entries below and `git add` the
+# file.
+cairn-design.md
+RETROSPECTIVE.md

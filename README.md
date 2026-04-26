@@ -1,36 +1,36 @@
-# Cairn
+# cairn-mod
 
 A lightweight, Rust-native [ATProto](https://atproto.com) labeler —
 single binary, SQLite-backed, designed for small and mid-scale
 community moderation.
 
+[![CI](https://github.com/skydeval/cairn-mod/actions/workflows/ci.yml/badge.svg)](https://github.com/skydeval/cairn-mod/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/cairn-mod.svg)](https://crates.io/crates/cairn-mod)
+[![docs.rs](https://img.shields.io/docsrs/cairn-mod)](https://docs.rs/cairn-mod)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-informational.svg)](Cargo.toml)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
-
-<!-- TODO (#27 CI hardening): GitHub Actions badge once workflows exist. -->
-<!-- TODO (#28 release workflow): crates.io + docs.rs badges once published. -->
 
 > **Latest stable release:** [v1.1.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0) · install with `cargo install cairn-mod`
 >
 > The `main` branch contains active development toward the next release. For production deployments, pin to a released version.
 
-## What is Cairn?
+## What is cairn-mod?
 
-Cairn is a standalone ATProto labeler server. It publishes a
+cairn-mod is a standalone ATProto labeler server. It publishes a
 [`app.bsky.labeler.service`](https://atproto.com/lexicons/app-bsky-labeler)
 record, signs labels per the ATProto spec, accepts user reports, and
 exposes an admin XRPC surface for moderators to act on them. It
 exists because the ecosystem has Ozone (heavy, TypeScript,
 Postgres-backed, opinionated web UI) and Skyware's labeler library
 (minimal, no report intake, no audit trail), with a gap between them
-for operators who want something compact but production-grade. Cairn
+for operators who want something compact but production-grade. cairn-mod
 is deliberately smaller than Ozone and deliberately more complete
 than Skyware; it does not try to be either.
 
 ## Status
 
-**v1.1.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.1.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
+**v1.1.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.1.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0). The v1.1 technical surface ships seven primary features (health probes, supply-chain security scanning, admin CLIs for moderator / report / audit / retention, startup-time service-record verification) plus housekeeping. Items deferred to v1.2 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
 **v1.2 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-v11-roadmap) include audit-log hash-chaining, signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions). The §18 section is still titled "v1.1 Roadmap" because the v1.1 release shipped a focused subset; the remaining items there are the v1.2+ pool.
 
@@ -66,7 +66,7 @@ that ends up at `~/.cargo/bin/cairn`; operators typically copy it to
 
 ### 2. Generate a signing key
 
-Cairn expects a 64-hex-char file containing a secp256k1 private key.
+cairn-mod expects a 64-hex-char file containing a secp256k1 private key.
 Either of these produces one:
 
 ```
@@ -90,7 +90,7 @@ sudo mv signing-key.hex /var/lib/cairn/signing-key.hex
 ```
 
 Publish the matching public key in the labeler's DID document at
-verification method `#atproto_label`. Consumers verifying Cairn's
+verification method `#atproto_label`. Consumers verifying cairn-mod's
 labels resolve the DID and extract this key.
 
 ### 3. Configure
@@ -107,7 +107,7 @@ service_endpoint = "https://labeler.example"
 # SQLite file. Created on first run; parent dir must exist.
 db_path          = "/var/lib/cairn/cairn.db"
 # Hex-encoded 32-byte secp256k1 key. Must be mode 0600 owned by
-# the running user — Cairn refuses to start otherwise.
+# the running user — cairn-mod refuses to start otherwise.
 signing_key_path = "/var/lib/cairn/signing-key.hex"
 # bind_addr defaults to "127.0.0.1:3000"; override if running
 # without a reverse proxy on the same host.
@@ -128,7 +128,7 @@ locales         = [
 ]
 
 # Where the operator (= the labeler DID) authenticates to publish the
-# service record. Separate from moderators authenticating to Cairn
+# service record. Separate from moderators authenticating to cairn-mod
 # (§5.3) — different identity, different file.
 [operator]
 pds_url      = "https://bsky.social"
@@ -176,7 +176,7 @@ Each item links the relevant design-doc section for deeper context.
 
 ### Transport ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment))
 
-- [ ] **TLS terminates at the reverse proxy**, not Cairn. `cairn
+- [ ] **TLS terminates at the reverse proxy**, not cairn-mod. `cairn
   serve` binds HTTP only (default `127.0.0.1:3000`) and assumes a
   TLS-terminating proxy fronts it. See
   [`contrib/`](contrib/) for Caddy and nginx templates.
@@ -186,19 +186,28 @@ Each item links the relevant design-doc section for deeper context.
 
 ### Rate limits ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment) numbers, enforced at reverse proxy)
 
-- [ ] **`createReport`** per-IP: burst 3, rate 10 per hour. Enforced
-  by `contrib/nginx/cairn.conf` out of the box; Caddy requires the
-  `caddy-ratelimit` third-party module — see
-  [`contrib/caddy/Caddyfile`](contrib/caddy/Caddyfile) for the
-  commented stanza and install pointer.
+- [ ] **`createReport`** per-IP: example rate-limit
+  configurations ship as commented operator-add stanzas in
+  [`contrib/nginx/cairn.conf`](contrib/nginx/cairn.conf) and
+  [`contrib/caddy/Caddyfile`](contrib/caddy/Caddyfile). Operators
+  uncomment and tune rate values based on expected traffic and
+  abuse posture. The §F13 reference values (burst 3, rate
+  10/hour) are the design-doc baseline; the contrib examples
+  mirror those numbers but ship commented by default to avoid
+  version-specific syntax in shipped templates (the `r/h` rate
+  unit landed in nginx 1.27, post-Ubuntu-LTS).
 - [ ] **`subscribeLabels`** per-IP: 8 concurrent connections.
-  Enforced alongside the createReport limit in the same contrib
-  configs.
+  Enforced active-by-default in `contrib/nginx/cairn.conf` —
+  connection caps (`limit_conn_*`) are version-stable across
+  nginx 1.18+, so the conn-cap stanza ships uncommented unlike
+  its rate-limit sibling. The Caddy template ships without
+  (Caddy core lacks connection-cap primitives;
+  `caddy-ratelimit` provides them but is a third-party module).
 
 ### Secrets ([§5.1](cairn-design.md#51-labeler-service-identity), [§5.3](cairn-design.md#53-cli-ergonomics))
 
 - [ ] **Signing key file** at mode `0600`, owned by the running
-  user. Cairn's `credential_file::check_mode_and_owner` refuses
+  user. cairn-mod's `credential_file::check_mode_and_owner` refuses
   wider permissions or foreign ownership at startup.
 - [ ] **Signing key file NEVER committed to version control.** A
   signing key in git history is a compromise even after deletion.
@@ -218,7 +227,7 @@ Each item links the relevant design-doc section for deeper context.
   scope. Plan the host, permissions, and backup accordingly — a
   v1 key lives as long as the labeler identity.
 - [ ] **Do NOT remove the labeler signing key from the DID
-  document.** Every historical label Cairn has signed stops
+  document.** Every historical label cairn-mod has signed stops
   verifying at consumers. Catastrophic and not undoable.
 
 ### Backup
@@ -308,7 +317,7 @@ in production deployments). Caches a session file at
 `~/.config/cairn/session.json` (mode `0600`, owned by the running
 user — same §5.3 invariants as the operator session). The
 resolved DID must have a corresponding row in the `moderators`
-table on the target Cairn instance — see Moderator management
+table on the target cairn-mod instance — see Moderator management
 above for adding rows.
 
 To revoke: `cairn logout`.
@@ -319,7 +328,7 @@ Admin-side report workflow via `cairn report {list, view, resolve,
 flag, unflag}`. All five subcommands wrap the
 `tools.cairn.admin.*` HTTP endpoints, so they require a logged-in
 session (`cairn login`) and a moderator-or-admin role row in the
-`moderators` table on the target Cairn instance.
+`moderators` table on the target cairn-mod instance.
 
 ```
 # List pending reports.
@@ -350,7 +359,7 @@ cairn report unflag did:plc:noisyreporter
 
 **Audit attribution.** Every mutating action (`resolve`, `flag`,
 `unflag`) is recorded in `audit_log` with the moderator's DID as
-the actor — taken from the JWT `iss` Cairn's session-auth
+the actor — taken from the JWT `iss` cairn-mod's session-auth
 produces. The CLI is HTTP-wrapped (not a direct DB tool)
 specifically so this attribution is correct; bypassing the HTTP
 path would write `actor_did = NULL` rows, corrupting the audit
@@ -390,7 +399,7 @@ read access to the full set is reserved for admins to avoid the
 that abort UPDATE and DELETE; the CLI matches by exposing only
 read operations. There is no `cairn audit show <id>` subcommand
 in v1.1 — the corresponding `getAuditLog` HTTP endpoint hasn't
-been written yet (tracked separately).
+been written yet (tracked as chainlink #26).
 
 ### Service record verify on startup ([§F19](cairn-design.md#f19-service-record-verify-on-startup-v11))
 
@@ -403,7 +412,7 @@ unreachable each fail-start with a distinct exit code so
 orchestrators (and operators) can branch.
 
 - [ ] **Configs without a `[labeler]` block skip verify.** If
-  you're running a Cairn deployment that does NOT publish a
+  you're running a cairn-mod deployment that does NOT publish a
   service record (test harnesses, embedders, custom workflows),
   this gate doesn't apply and `cairn serve` starts normally.
   Operator-facing deployments always have `[labeler]`.
@@ -450,7 +459,7 @@ adding one as its own tracker entry.
 ### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
 
 - [ ] **Only one `cairn serve` against a given DID at a time.**
-  Cairn enforces this with a SQLite-backed lease; the loser of a
+  cairn-mod enforces this with a SQLite-backed lease; the loser of a
   startup race exits with `LEASE_CONFLICT` (exit code 11). The
   contrib systemd unit sets `RestartPreventExitStatus=11` so
   systemd doesn't restart-loop.
@@ -461,7 +470,7 @@ adding one as its own tracker entry.
 
 - [ ] **systemd status + journalctl** — errors and panics land
   here. The contrib unit sets `StandardOutput=journal`.
-- [ ] **Disk usage on the `db_path` partition** — Cairn has an
+- [ ] **Disk usage on the `db_path` partition** — cairn-mod has an
   app-level disk guard for the report path, but OS-level
   monitoring catches everything.
 - [ ] **TLS certificate expiry at the reverse proxy** — Caddy
@@ -469,7 +478,7 @@ adding one as its own tracker entry.
 
 ### Health probes ([§F14](cairn-design.md#f14-health-and-readiness-probe-endpoints-v11))
 
-Cairn exposes two unauthenticated endpoints for orchestrators:
+cairn-mod exposes two unauthenticated endpoints for orchestrators:
 
 - [ ] **`GET /health`** — liveness probe. Always returns 200 with
   `{"status": "ok", "version": "..."}` while the process can
@@ -503,7 +512,7 @@ Cairn exposes two unauthenticated endpoints for orchestrators:
 
 ## Trust-chain disclosures
 
-Operators AND subscribers should understand what Cairn's protocol
+Operators AND subscribers should understand what cairn-mod's protocol
 guarantees and what it doesn't. These are v1 properties, documented
 in [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience)
 of the design doc and summarized here per §14's "prominently
@@ -540,7 +549,7 @@ placed" directive.
   ES256K with RFC 6979 deterministic nonces, low-S enforced at
   emission. Parity with `@atproto/api` is pinned by a fixture
   corpus in `tests/`.
-- **Single-instance lease** (§F5) prevents two Cairn processes from
+- **Single-instance lease** (§F5) prevents two cairn-mod processes from
   signing labels against the same DID. Second `cairn serve` exits
   with a dedicated `LEASE_CONFLICT` code so systemd doesn't
   restart-loop.

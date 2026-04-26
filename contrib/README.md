@@ -1,6 +1,6 @@
 # contrib/
 
-Operator-ready deployment templates for running Cairn behind a
+Operator-ready deployment templates for running cairn-mod behind a
 TLS-terminating reverse proxy on a standard Linux host.
 
 These files are not hand-verified on a live instance before every
@@ -12,7 +12,7 @@ specific paths, hostnames, and user names will differ.
 - **`systemd/cairn.service`** — systemd service unit for running
   `cairn serve`. Hardened defaults (sandboxing + capability drop +
   syscall filter). The `RestartPreventExitStatus=11` line is the
-  operational payoff for Cairn's distinct `LEASE_CONFLICT` exit
+  operational payoff for cairn-mod's distinct `LEASE_CONFLICT` exit
   code (see `src/cli/error.rs`): if another instance already holds
   the §F5 single-instance lease, systemd stops instead of
   crash-looping.
@@ -28,7 +28,7 @@ specific paths, hostnames, and user names will differ.
 ## Caddy vs nginx
 
 Both work. Pick the one you already operate — the two files are
-functionally equivalent for Cairn's surface, just syntactically
+functionally equivalent for cairn-mod's surface, just syntactically
 different.
 
 One substantive asymmetry between them: **rate limits** (§F13
@@ -77,14 +77,14 @@ curl -sSL https://labeler.example.com/.well-known/did.json
 
 ## File permissions
 
-Cairn is strict about credential-file permissions per §5.1 /
+cairn-mod is strict about credential-file permissions per §5.1 /
 §5.3 (see `src/credential_file.rs` for the enforcement). The
 relevant split is not obvious at first glance:
 
 | File | Owner | Mode | Notes |
 |---|---|---|---|
-| `/etc/cairn/cairn.toml` | `root:cairn` | `0640` | Ops hygiene. Not enforced by Cairn; readable by service user via group. |
-| `/var/lib/cairn/signing-key.hex` | `cairn:cairn` | `0600` | **Enforced**. Cairn's `credential_file::check_mode_and_owner` rejects anything else. |
+| `/etc/cairn/cairn.toml` | `root:cairn` | `0640` | Ops hygiene. Not enforced by cairn-mod; readable by service user via group. |
+| `/var/lib/cairn/signing-key.hex` | `cairn:cairn` | `0600` | **Enforced**. cairn-mod's `credential_file::check_mode_and_owner` rejects anything else. |
 | `/var/lib/cairn/cairn.db` | `cairn:cairn` | `0600` | Created automatically by `storage::open` under systemd's `StateDirectory`. |
 
 **Subtle caveat on the signing key's location:** the key file lives
@@ -92,7 +92,7 @@ under `/var/lib/cairn/` (systemd's `StateDirectory`), **not under
 `/etc/cairn/`**. If you put it in `/etc/cairn/signing-key.hex`,
 systemd's `ConfigurationDirectory` defaults give you a parent dir
 owned by `root:cairn` with the file typically ending up owned by
-root. Cairn's owner check — `file UID == running effective UID` —
+root. cairn-mod's owner check — `file UID == running effective UID` —
 then fails with `CredentialFileError::ForeignOwner`, and `cairn
 serve` exits before binding the port.
 

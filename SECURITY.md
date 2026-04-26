@@ -40,7 +40,7 @@ practice the categories we especially want to hear about:
   submission reaches an unauthorized caller, a log line, or a
   response a non-admin can observe.
 - **Default configurations that make misconfiguration easy** — if
-  Cairn ships a default that sets an operator up to fail in a way
+  cairn-mod ships a default that sets an operator up to fail in a way
   that compromises one of the above categories, that's in scope
   even if the operator technically "could have" overridden it.
   Safe defaults are a security property.
@@ -50,9 +50,9 @@ practice the categories we especially want to hear about:
 - **Bugs in our dependencies.** Report upstream; we'll pick up the
   fix when a patched version is published. If the upstream
   maintainer is unresponsive and the issue materially affects
-  Cairn, include that in your report and we'll coordinate.
+  cairn-mod, include that in your report and we'll coordinate.
 - **Issues reachable only via operator negligence** — host
-  compromise, a leaked config file, an operator running Cairn as a
+  compromise, a leaked config file, an operator running cairn-mod as a
   privileged user on a public host with no firewall. The threat
   model in §4 makes the operator-trust boundary explicit.
 - **Known v1 limitations** documented in the design doc. The

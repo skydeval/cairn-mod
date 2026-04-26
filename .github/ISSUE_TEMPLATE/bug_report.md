@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something in Cairn isn't behaving the way the docs or design suggest it should.
+about: Something in cairn-mod isn't behaving the way the docs or design suggest it should.
 title: ""
 labels: bug
 assignees: ""
@@ -23,7 +23,7 @@ tokens).
 
 ## Environment
 
-- Cairn version (from `cairn --version` or commit hash if built from
+- cairn-mod version (from `cairn --version` or commit hash if built from
   source):
 - Rust toolchain (`rustc --version`):
 - OS and version:

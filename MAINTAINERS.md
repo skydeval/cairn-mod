@@ -31,7 +31,7 @@ Do not DM maintainers about security issues on public social media.
 
 ## Handoff
 
-Cairn is maintained solely by @skydeval. If the maintainer becomes
+cairn-mod is maintained solely by @skydeval. If the maintainer becomes
 unresponsive for ~6 months, the repo will be archived. Users should
 fork if long-term continuity matters. This policy may change in
 future versions.

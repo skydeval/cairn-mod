@@ -1,4 +1,4 @@
-# Contributing to Cairn
+# Contributing to cairn-mod
 
 Thanks for considering a contribution. This file covers the practical
 mechanics; for architectural questions, read
@@ -33,7 +33,7 @@ cargo fmt --all -- --check
 
 ### Updating the SQLx offline cache
 
-Cairn uses SQLx's compile-time query checking. Whenever a test or
+cairn-mod uses SQLx's compile-time query checking. Whenever a test or
 source file adds or changes a `sqlx::query!` / `query_as!` /
 `query_scalar!` invocation, the offline cache under `.sqlx/` must be
 regenerated:

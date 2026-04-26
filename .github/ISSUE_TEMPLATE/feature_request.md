@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Propose an addition or change to Cairn's surface.
+about: Propose an addition or change to cairn-mod's surface.
 title: ""
 labels: feature
 assignees: ""
@@ -13,7 +13,7 @@ it in a concrete scenario rather than an abstract want.
 
 ## Proposed solution
 
-Your best guess at how Cairn could address it. Rough is fine —
+Your best guess at how cairn-mod could address it. Rough is fine —
 design details get worked out during acceptance-criteria review
 (see [CONTRIBUTING.md](../../CONTRIBUTING.md), "Substantial changes
 go through an issue first").
