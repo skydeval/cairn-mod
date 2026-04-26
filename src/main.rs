@@ -81,10 +81,10 @@ enum Command {
         sub: ModeratorSub,
     },
 
-    /// Audit log queries (`tools.cairn.admin.listAuditLog`).
-    /// **Admin role required** — the server's auth check uses
-    /// `verify_and_authorize_admin_only`, so moderator-role
-    /// sessions receive 403.
+    /// Audit log queries (`tools.cairn.admin.listAuditLog` /
+    /// `getAuditLog`). **Admin role required** — the server's auth
+    /// check uses `verify_and_authorize_admin_only`, so moderator-
+    /// role sessions receive 403.
     Audit {
         #[command(subcommand)]
         sub: AuditSub,
@@ -152,6 +152,22 @@ enum AuditSub {
     /// outcome/time-window. Newest first; pagination via
     /// `--cursor`.
     List(AuditListArgs),
+    /// Fetch a single audit entry by id. Returns
+    /// `AuditEntryNotFound` 404 (surfaced as a non-zero exit) when
+    /// the id does not exist.
+    Show(AuditShowArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuditShowArgs {
+    /// Audit row primary key.
+    id: i64,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human-readable multi-line output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -530,6 +546,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
+        Command::Audit {
+            sub: AuditSub::Show(args),
+        } => run_audit_show(args).await,
         Command::Retention {
             sub: RetentionSub::Sweep(args),
         } => run_retention_sweep(args).await,
@@ -567,6 +586,23 @@ async fn run_trust_chain_show(args: TrustChainShowArgs) -> Result<(), CliError> 
         println!("{}", trust_chain::format_show_json(&resp));
     } else {
         println!("{}", trust_chain::format_show_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_audit_show(args: AuditShowArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let input = audit::AuditShowInput {
+        id: args.id,
+        cairn_server_override: args.cairn_server,
+    };
+    let entry = audit::show(&mut session, &path, input).await?;
+    if args.json {
+        println!("{}", audit::format_show_json(&entry));
+    } else {
+        println!("{}", audit::format_show_human(&entry));
     }
     Ok(())
 }

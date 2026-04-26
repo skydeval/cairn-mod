@@ -373,7 +373,8 @@ line.
 
 ### Audit log queries ([§F18](cairn-design.md#f18-audit-log-cli-v11))
 
-Read-only audit log inspection via `cairn audit list`.
+Read-only audit log inspection via `cairn audit list` and
+`cairn audit show <id>`.
 
 ```
 # Newest 50 entries.
@@ -388,6 +389,10 @@ cairn audit list --since 2026-04-01T00:00:00Z --until 2026-05-01T00:00:00Z
 
 # Page through; emit JSON for downstream tooling.
 cairn audit list --limit 250 --cursor <c-from-prior-response> --json
+
+# Fetch one entry by id.
+cairn audit show 42
+cairn audit show 42 --json | jq .reason
 ```
 
 **Admin role required.** Moderators querying the audit log
@@ -397,9 +402,7 @@ read access to the full set is reserved for admins to avoid the
 
 **Read-only contract.** The `audit_log` table has SQL triggers
 that abort UPDATE and DELETE; the CLI matches by exposing only
-read operations. There is no `cairn audit show <id>` subcommand
-in v1.1 — the corresponding `getAuditLog` HTTP endpoint hasn't
-been written yet (tracked as chainlink #26).
+read operations.
 
 ### Service record verify on startup ([§F19](cairn-design.md#f19-service-record-verify-on-startup-v11))
 

@@ -1,4 +1,5 @@
-//! Integration tests for `cairn audit list` (#6).
+//! Integration tests for `cairn audit list` (#6) and `cairn audit
+//! show <id>` (#26).
 //!
 //! Same fixture pattern as tests/cli_report_admin.rs (which see
 //! for the design notes on the mock_pds + admin_router + MapResolver
@@ -6,11 +7,14 @@
 //! reporting; the test binary boundary matches the file boundary.
 //!
 //! Test surface covers:
-//! - happy path: seed rows, list returns them newest-first
+//! - happy path: seed rows, list returns them newest-first; show
+//!   returns the seeded entry by id
 //! - filter combinations (actor / action / outcome / since)
-//! - admin-only auth contract: a moderator-role session receives
-//!   403 (the load-bearing reason this section of the README
-//!   spells out the role requirement)
+//! - admin-only auth contract for both subcommands: a moderator-
+//!   role session receives 403 (the load-bearing reason this
+//!   section of the README spells out the role requirement)
+//! - show on an unknown id surfaces 404 with the typed
+//!   AuditEntryNotFound error name in the body
 //! - format_* unit tests (pure)
 
 mod support;
@@ -22,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use cairn_mod::auth::did::{DidDocument, DidResolver, ResolveError};
 use cairn_mod::auth::{AuthConfig, AuthContext};
-use cairn_mod::cli::audit::{self, AuditEntry, AuditListInput, AuditListResponse};
+use cairn_mod::cli::audit::{self, AuditEntry, AuditListInput, AuditListResponse, AuditShowInput};
 use cairn_mod::cli::error::CliError;
 use cairn_mod::cli::session::SessionFile;
 use cairn_mod::{AdminConfig, admin_router, spawn_writer, storage};
@@ -345,4 +349,93 @@ fn format_list_json_round_trips() {
     assert_eq!(arr[0]["action"], "label_applied");
     assert_eq!(arr[1]["reason"], r#"{"report_id":42}"#);
     assert_eq!(v["cursor"], "c-next");
+}
+
+// ============ show ============
+
+#[tokio::test]
+async fn show_returns_seeded_entry_admin_role() {
+    let cairn = spawn_cairn().await;
+    let pds = mock_pds::spawn(MODERATOR_DID).await;
+    seed_moderator(&cairn.pool, MODERATOR_DID, "admin").await;
+    let id = seed_audit(&cairn.pool, 1, "label_applied", "did:plc:m1", "success").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("session.json");
+    let mut session = seeded_session(cairn.addr, &pds.base_url(), &path).await;
+
+    let entry = audit::show(
+        &mut session,
+        &path,
+        AuditShowInput {
+            id,
+            cairn_server_override: None,
+        },
+    )
+    .await
+    .expect("show");
+    assert_eq!(entry.id, id);
+    assert_eq!(entry.action, "label_applied");
+    assert_eq!(entry.actor_did, "did:plc:m1");
+    assert_eq!(entry.outcome, "success");
+}
+
+#[tokio::test]
+async fn show_admin_only_moderator_role_receives_403() {
+    let cairn = spawn_cairn().await;
+    let pds = mock_pds::spawn(MODERATOR_DID).await;
+    // Seed as moderator (NOT admin) to confirm the admin-only guard.
+    seed_moderator(&cairn.pool, MODERATOR_DID, "mod").await;
+    let id = seed_audit(&cairn.pool, 1, "label_applied", "did:plc:m1", "success").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("session.json");
+    let mut session = seeded_session(cairn.addr, &pds.base_url(), &path).await;
+
+    let err = audit::show(
+        &mut session,
+        &path,
+        AuditShowInput {
+            id,
+            cairn_server_override: None,
+        },
+    )
+    .await
+    .expect_err("mod role must be 403'd");
+    assert!(
+        matches!(err, CliError::CairnStatus { status: 403, .. }),
+        "expected 403, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn show_unknown_id_surfaces_404_audit_entry_not_found() {
+    let cairn = spawn_cairn().await;
+    let pds = mock_pds::spawn(MODERATOR_DID).await;
+    seed_moderator(&cairn.pool, MODERATOR_DID, "admin").await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("session.json");
+    let mut session = seeded_session(cairn.addr, &pds.base_url(), &path).await;
+
+    let err = audit::show(
+        &mut session,
+        &path,
+        AuditShowInput {
+            id: 99_999,
+            cairn_server_override: None,
+        },
+    )
+    .await
+    .expect_err("unknown id must surface 404");
+    match err {
+        CliError::CairnStatus { status, body, .. } => {
+            assert_eq!(status, 404, "expected 404, got {status}");
+            assert!(
+                body.contains("AuditEntryNotFound"),
+                "body must carry the typed error name for clear NotFound surfacing, got: {body}"
+            );
+        }
+        other => panic!("expected CairnStatus 404, got: {other:?}"),
+    }
 }
