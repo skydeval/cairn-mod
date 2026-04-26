@@ -23,8 +23,10 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use super::auth::acquire_service_auth;
 use super::error::CliError;
-use super::pds::{PdsClient, PdsError};
+use super::output::truncate;
+use super::pds::PdsClient;
 use super::session::SessionFile;
 
 const LIST_AUDIT_LOG_LXM: &str = "tools.cairn.admin.listAuditLog";
@@ -245,49 +247,4 @@ pub fn format_list_human(resp: &AuditListResponse) -> String {
 /// JSON envelope for `cairn audit list`.
 pub fn format_list_json(resp: &AuditListResponse) -> String {
     serde_json::to_string_pretty(resp).expect("AuditListResponse serializes")
-}
-
-// ============================================================
-// Shared helpers (mirror src/cli/report.rs)
-// ============================================================
-
-/// Char-aware right-truncation with trailing `…`. Local copy of
-/// the helper in `cli/report.rs` — left as duplication for v1.1;
-/// factor when 6+ identical copies exist (per session N3).
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{head}…")
-}
-
-/// §5.3 auto-refresh helper. Same shape as the one in
-/// `cli/report.rs`; not factored to a shared module yet (per
-/// session N3 — duplication threshold not yet hit).
-async fn acquire_service_auth(
-    pds: &PdsClient,
-    session: &mut SessionFile,
-    session_path: &Path,
-    lxm: &str,
-) -> Result<String, CliError> {
-    match pds
-        .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-        .await
-    {
-        Ok(t) => Ok(t),
-        Err(PdsError::Unauthorized {
-            context: "getServiceAuth",
-            ..
-        }) => {
-            let refreshed = pds.refresh_session(&session.refresh_jwt).await?;
-            session.access_jwt = refreshed.access_jwt;
-            session.refresh_jwt = refreshed.refresh_jwt;
-            session.save(session_path)?;
-            Ok(pds
-                .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-                .await?)
-        }
-        Err(other) => Err(other.into()),
-    }
 }

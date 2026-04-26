@@ -23,8 +23,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::auth::acquire_service_auth;
 use super::error::CliError;
-use super::pds::{PdsClient, PdsError};
+use super::output::truncate;
+use super::pds::PdsClient;
 use super::session::SessionFile;
 
 const CREATE_REPORT_LXM: &str = "com.atproto.moderation.createReport";
@@ -842,49 +844,6 @@ fn subject_summary(s: &ReportSubject) -> String {
     match s {
         ReportSubject::Repo { did } => did.clone(),
         ReportSubject::Strong { uri, cid } => format!("{uri}@{cid}"),
-    }
-}
-
-/// Right-truncate `s` to `max` chars with a trailing `…` when
-/// shortened. Used by the list-table renderer.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{head}…")
-}
-
-/// Factored-out `acquire_service_auth` — takes the LXM as a
-/// parameter so every subcommand in this module can reuse the
-/// §5.3 auto-refresh flow. The existing per-subcommand
-/// `acquire_service_auth` inside the `create` path is NOT
-/// refactored away in this commit to avoid a second mechanical
-/// rename; follow-up once #7's additional subcommands land.
-async fn acquire_service_auth(
-    pds: &PdsClient,
-    session: &mut SessionFile,
-    session_path: &Path,
-    lxm: &str,
-) -> Result<String, CliError> {
-    match pds
-        .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-        .await
-    {
-        Ok(t) => Ok(t),
-        Err(PdsError::Unauthorized {
-            context: "getServiceAuth",
-            ..
-        }) => {
-            let refreshed = pds.refresh_session(&session.refresh_jwt).await?;
-            session.access_jwt = refreshed.access_jwt;
-            session.refresh_jwt = refreshed.refresh_jwt;
-            session.save(session_path)?;
-            Ok(pds
-                .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-                .await?)
-        }
-        Err(other) => Err(other.into()),
     }
 }
 

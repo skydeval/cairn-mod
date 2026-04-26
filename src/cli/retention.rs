@@ -16,8 +16,9 @@ use std::time::Duration;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+use super::auth::acquire_service_auth;
 use super::error::CliError;
-use super::pds::{PdsClient, PdsError};
+use super::pds::PdsClient;
 use super::session::SessionFile;
 
 const RETENTION_SWEEP_LXM: &str = "tools.cairn.admin.retentionSweep";
@@ -133,40 +134,6 @@ pub fn format_sweep_human(resp: &SweepResponse) -> String {
 /// JSON envelope for `cairn retention sweep`.
 pub fn format_sweep_json(resp: &SweepResponse) -> String {
     serde_json::to_string_pretty(resp).expect("SweepResponse serializes")
-}
-
-// ============================================================
-// Shared helpers (mirror src/cli/audit.rs and src/cli/report.rs)
-// ============================================================
-
-/// §5.3 auto-refresh helper. Same shape as the one in
-/// `cli/audit.rs` — kept duplicated rather than factored to a
-/// shared module per session N3 (duplication threshold not yet hit).
-async fn acquire_service_auth(
-    pds: &PdsClient,
-    session: &mut SessionFile,
-    session_path: &Path,
-    lxm: &str,
-) -> Result<String, CliError> {
-    match pds
-        .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-        .await
-    {
-        Ok(t) => Ok(t),
-        Err(PdsError::Unauthorized {
-            context: "getServiceAuth",
-            ..
-        }) => {
-            let refreshed = pds.refresh_session(&session.refresh_jwt).await?;
-            session.access_jwt = refreshed.access_jwt;
-            session.refresh_jwt = refreshed.refresh_jwt;
-            session.save(session_path)?;
-            Ok(pds
-                .get_service_auth(&session.access_jwt, &session.cairn_service_did, lxm)
-                .await?)
-        }
-        Err(other) => Err(other.into()),
-    }
 }
 
 #[cfg(test)]
