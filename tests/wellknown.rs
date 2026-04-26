@@ -67,11 +67,13 @@ const ALL_LEXICONS: &[&str] = &[
     "flagReporter",
     "getAuditLog",
     "getReport",
+    "getTrustChain",
     "listAuditLog",
     "listLabels",
     "listReports",
     "negateLabel",
     "resolveReport",
+    "retentionSweep",
 ];
 
 #[tokio::test]
