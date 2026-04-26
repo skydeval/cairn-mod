@@ -52,26 +52,32 @@ pub(super) async fn handler(
     // Audit row — operator-initiated path only. Scheduled fires
     // skip the audit per Q6/D2; tracing logs cover their
     // observability.
-    let now_ms = crate::writer::epoch_ms_now();
-    let action = "retention_sweep";
-    let outcome = "success";
-    let reason = build_retention_sweep_audit_reason(&result);
-
+    //
+    // Routes through the writer task via WriterHandle::append_audit
+    // (#39): the sweep itself ran through the writer above, so its
+    // post-sweep audit row goes through the same task to keep all
+    // in-process audit appenders consistently routed. Cross-process
+    // CLI callers (publish/unpublish-service-record) use
+    // append_via_pool instead.
+    //
     // `target` is NULL — the sweep doesn't act on a single subject.
     // listAuditLog renders it as such. The reason JSON carries the
     // actionable detail.
-    if sqlx::query!(
-        "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-         VALUES (?1, ?2, ?3, NULL, NULL, ?4, ?5)",
-        now_ms,
-        action,
-        admin.caller_did,
-        outcome,
-        reason,
-    )
-    .execute(&state.pool)
-    .await
-    .is_err()
+    let now_ms = crate::writer::epoch_ms_now();
+    let reason = build_retention_sweep_audit_reason(&result);
+    if state
+        .writer
+        .append_audit(crate::audit::append::AuditRowForAppend {
+            created_at: now_ms,
+            action: "retention_sweep".into(),
+            actor_did: admin.caller_did.clone(),
+            target: None,
+            target_cid: None,
+            outcome: "success".into(),
+            reason: Some(reason),
+        })
+        .await
+        .is_err()
     {
         return AdminError::Internal.into_response();
     }

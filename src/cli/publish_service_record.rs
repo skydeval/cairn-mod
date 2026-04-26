@@ -235,17 +235,18 @@ async fn commit_publish(
         .await
         .map_err(|e| CliError::Startup(format!("upsert labeler_config {key}: {e}")))?;
     }
-    sqlx::query!(
-        "INSERT INTO audit_log
-             (created_at, action, actor_did, target, target_cid, outcome, reason)
-         VALUES (?1, ?2, ?3, NULL, ?4, 'success', ?5)",
-        now_ms,
-        AUDIT_ACTION_SERVICE_RECORD_PUBLISHED,
-        actor_did,
-        cid,
-        reason,
+    crate::audit::append::append_in_tx(
+        &mut tx,
+        &crate::audit::append::AuditRowForAppend {
+            created_at: now_ms,
+            action: AUDIT_ACTION_SERVICE_RECORD_PUBLISHED.into(),
+            actor_did: actor_did.into(),
+            target: None,
+            target_cid: Some(cid.into()),
+            outcome: "success".into(),
+            reason: Some(reason),
+        },
     )
-    .execute(&mut *tx)
     .await
     .map_err(|e| CliError::Startup(format!("audit insert: {e}")))?;
     tx.commit()
@@ -267,17 +268,18 @@ async fn record_skip_audit(
 ) -> Result<(), CliError> {
     let now_ms = crate::writer::epoch_ms_now();
     let reason = audit_reason_json(&prior.cid, &prior.content_hash_hex, false);
-    sqlx::query!(
-        "INSERT INTO audit_log
-             (created_at, action, actor_did, target, target_cid, outcome, reason)
-         VALUES (?1, ?2, ?3, NULL, ?4, 'success', ?5)",
-        now_ms,
-        AUDIT_ACTION_SERVICE_RECORD_PUBLISHED,
-        actor_did,
-        prior.cid,
-        reason,
+    crate::audit::append::append_via_pool(
+        pool,
+        &crate::audit::append::AuditRowForAppend {
+            created_at: now_ms,
+            action: AUDIT_ACTION_SERVICE_RECORD_PUBLISHED.into(),
+            actor_did: actor_did.into(),
+            target: None,
+            target_cid: Some(prior.cid.clone()),
+            outcome: "success".into(),
+            reason: Some(reason),
+        },
     )
-    .execute(pool)
     .await
     .map_err(|e| CliError::Startup(format!("audit insert: {e}")))?;
     Ok(())

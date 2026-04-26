@@ -243,6 +243,16 @@ enum WriteCommand {
         oneshot::Sender<Result<ResolvedReport>>,
     ),
     Sweep(SweepRequest, oneshot::Sender<Result<SweepBatchResult>>),
+    /// Append a hash-chained audit row (#39). Used by in-process
+    /// callers that don't have an existing transaction (e.g.,
+    /// `retentionSweep` after the sweep itself completes). Callers
+    /// that already hold a transaction (writer-internal handlers,
+    /// `flag_reporter`) call [`crate::audit::append::append_in_tx`]
+    /// directly within that transaction instead.
+    AppendAudit(
+        crate::audit::append::AuditRowForAppend,
+        oneshot::Sender<Result<i64>>,
+    ),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -480,6 +490,27 @@ impl WriterHandle {
         }
     }
 
+    /// Append a hash-chained audit row through the writer task (#39).
+    /// Used by in-process callers that don't already hold a transaction
+    /// — e.g., `retentionSweep`'s post-sweep audit row. Callers that
+    /// have an open transaction (writer-internal handlers,
+    /// `flag_reporter`) use [`crate::audit::append::append_in_tx`]
+    /// directly so the audit row commits atomically with the rest of
+    /// their work. Cross-process CLIs (publish/unpublish-service-
+    /// record) use [`crate::audit::append::append_via_pool`].
+    ///
+    /// Returns the inserted `audit_log.id`.
+    pub async fn append_audit(&self, row: crate::audit::append::AuditRowForAppend) -> Result<i64> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::AppendAudit(row, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
     /// Subscribe to committed events. The returned receiver lags past
     /// the internal broadcast buffer; the consumer (subscribeLabels, #7)
     /// turns `RecvError::Lagged` into a connection close.
@@ -679,6 +710,10 @@ impl Writer {
                             let res = self.handle_sweep(req).await;
                             let _ = reply.send(res);
                         }
+                        Some(WriteCommand::AppendAudit(row, reply)) => {
+                            let res = self.handle_append_audit(row).await;
+                            let _ = reply.send(res);
+                        }
                         Some(WriteCommand::Shutdown(reply)) => {
                             // Flip the shutdown watch *before* releasing the
                             // lease so subscriber tasks see the signal while
@@ -815,6 +850,22 @@ impl Writer {
         })
     }
 
+    /// Handler for [`WriteCommand::AppendAudit`]. Opens its own
+    /// transaction (BEGIN DEFERRED — fine because the writer task is
+    /// the only in-process audit appender during a `cairn serve`
+    /// session, and cross-process appenders use BEGIN IMMEDIATE on
+    /// their side), inserts the audit row with a freshly-computed
+    /// hash, commits.
+    async fn handle_append_audit(
+        &self,
+        row: crate::audit::append::AuditRowForAppend,
+    ) -> Result<i64> {
+        let mut tx = self.pool.begin().await?;
+        let id = crate::audit::append::append_in_tx(&mut tx, &row).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     async fn handle_apply(&self, req: ApplyLabelRequest) -> Result<LabelEvent> {
         let mut tx = self.pool.begin().await?;
         let created_at = epoch_ms_now();
@@ -891,20 +942,18 @@ impl Writer {
         .await?;
 
         let audit_reason = build_audit_reason(&req.val, false, req.moderator_reason.as_deref());
-        let action = "label_applied";
-        let outcome = "success";
-        sqlx::query!(
-            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            created_at_ms,
-            action,
-            req.actor_did,
-            req.uri,
-            req.cid,
-            outcome,
-            audit_reason,
+        crate::audit::append::append_in_tx(
+            tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: created_at_ms,
+                action: "label_applied".into(),
+                actor_did: req.actor_did.clone(),
+                target: Some(req.uri.clone()),
+                target_cid: req.cid.clone(),
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
         )
-        .execute(&mut **tx)
         .await?;
 
         Ok(LabelEvent { seq, label })
@@ -992,20 +1041,18 @@ impl Writer {
         .await?;
 
         let audit_reason = build_audit_reason(&req.val, true, req.moderator_reason.as_deref());
-        let action = "label_negated";
-        let outcome = "success";
-        sqlx::query!(
-            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            created_at,
-            action,
-            req.actor_did,
-            req.uri,
-            cid,
-            outcome,
-            audit_reason,
+        crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at,
+                action: "label_negated".into(),
+                actor_did: req.actor_did.clone(),
+                target: Some(req.uri.clone()),
+                target_cid: cid.clone(),
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
         )
-        .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;
@@ -1113,20 +1160,18 @@ impl Writer {
             req.action.as_apply().map(|a| a.val.as_str()),
             req.resolution_reason.as_deref(),
         );
-        let report_id_str = req.report_id.to_string();
-        let action = "report_resolved";
-        let outcome = "success";
-        sqlx::query!(
-            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            created_at,
-            action,
-            req.actor_did,
-            report_id_str,
-            outcome,
-            audit_reason,
+        crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at,
+                action: "report_resolved".into(),
+                actor_did: req.actor_did.clone(),
+                target: Some(req.report_id.to_string()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
         )
-        .execute(&mut *tx)
         .await?;
 
         tx.commit().await?;

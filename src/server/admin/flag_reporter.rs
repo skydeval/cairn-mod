@@ -88,19 +88,18 @@ pub(super) async fn handler(
             return AdminError::Internal.into_response();
         }
 
-        let action = "reporter_flagged";
-        let outcome = "success";
-        let res = sqlx::query!(
-            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            now_ms,
-            action,
-            admin.caller_did,
-            input.did,
-            outcome,
-            audit_reason,
+        let res = crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: now_ms,
+                action: "reporter_flagged".into(),
+                actor_did: admin.caller_did.clone(),
+                target: Some(input.did.clone()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
         )
-        .execute(&mut *tx)
         .await;
         if res.is_err() {
             return AdminError::Internal.into_response();
@@ -116,19 +115,18 @@ pub(super) async fn handler(
             return AdminError::Internal.into_response();
         }
 
-        let action = "reporter_unflagged";
-        let outcome = "success";
-        let res = sqlx::query!(
-            "INSERT INTO audit_log (created_at, action, actor_did, target, target_cid, outcome, reason)
-             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6)",
-            now_ms,
-            action,
-            admin.caller_did,
-            input.did,
-            outcome,
-            audit_reason,
+        let res = crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: now_ms,
+                action: "reporter_unflagged".into(),
+                actor_did: admin.caller_did.clone(),
+                target: Some(input.did.clone()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
         )
-        .execute(&mut *tx)
         .await;
         if res.is_err() {
             return AdminError::Internal.into_response();

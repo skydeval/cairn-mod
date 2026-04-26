@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT prev_hash AS \"prev_hash!\" FROM audit_log WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "prev_hash!",
+        "ordinal": 0,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "bbff73b7a692e3866457adc39e4be1dfb0f6d9a1bad95d4182abad3ada3a8d1f"
+}

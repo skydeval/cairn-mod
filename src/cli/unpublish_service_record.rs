@@ -200,17 +200,18 @@ async fn commit_unpublish(
             .await
             .map_err(|e| CliError::Startup(format!("delete labeler_config {key}: {e}")))?;
     }
-    sqlx::query!(
-        "INSERT INTO audit_log
-             (created_at, action, actor_did, target, target_cid, outcome, reason)
-         VALUES (?1, ?2, ?3, NULL, ?4, 'success', ?5)",
-        now_ms,
-        AUDIT_ACTION_SERVICE_RECORD_UNPUBLISHED,
-        actor_did,
-        prior.cid,
-        reason,
+    crate::audit::append::append_in_tx(
+        &mut tx,
+        &crate::audit::append::AuditRowForAppend {
+            created_at: now_ms,
+            action: AUDIT_ACTION_SERVICE_RECORD_UNPUBLISHED.into(),
+            actor_did: actor_did.into(),
+            target: None,
+            target_cid: Some(prior.cid.clone()),
+            outcome: "success".into(),
+            reason: Some(reason),
+        },
     )
-    .execute(&mut *tx)
     .await
     .map_err(|e| CliError::Startup(format!("audit insert: {e}")))?;
     tx.commit()
@@ -225,16 +226,18 @@ async fn commit_unpublish(
 async fn record_noop_audit(pool: &Pool<Sqlite>, actor_did: &str) -> Result<(), CliError> {
     let now_ms = crate::writer::epoch_ms_now();
     let reason = audit_reason_json(None, None, false);
-    sqlx::query!(
-        "INSERT INTO audit_log
-             (created_at, action, actor_did, target, target_cid, outcome, reason)
-         VALUES (?1, ?2, ?3, NULL, NULL, 'success', ?4)",
-        now_ms,
-        AUDIT_ACTION_SERVICE_RECORD_UNPUBLISHED,
-        actor_did,
-        reason,
+    crate::audit::append::append_via_pool(
+        pool,
+        &crate::audit::append::AuditRowForAppend {
+            created_at: now_ms,
+            action: AUDIT_ACTION_SERVICE_RECORD_UNPUBLISHED.into(),
+            actor_did: actor_did.into(),
+            target: None,
+            target_cid: None,
+            outcome: "success".into(),
+            reason: Some(reason),
+        },
     )
-    .execute(pool)
     .await
     .map_err(|e| CliError::Startup(format!("audit insert: {e}")))?;
     Ok(())

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO audit_log\n             (created_at, action, actor_did, target, target_cid, outcome, reason,\n              prev_hash, row_hash)\n         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)\n         RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5ae9df0c50399f223f4a1e1a826bcbdea5472536574b9eef9667eee0ffd99cbf"
+}
