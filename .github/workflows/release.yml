@@ -1,3 +1,19 @@
+# DEPRECATED — DO NOT INVOKE.
+#
+# This workflow is no longer the canonical release path for cairn-mod.
+# See cairn-design.md §19.2 for the actual release procedure: a manual
+# flow (cargo publish + git tag + gh release create) run from the
+# maintainer's host.
+#
+# History: three workflow_dispatch attempts on 2026-04-24 (v1.0 release
+# day) all failed; v1.1, v1.2, and v1.3 all shipped via the manual path.
+# The file is preserved as historical record of the v1.0 release-
+# automation design intent — the operational-prereqs and failure-mode-
+# recovery comments below remain useful context even though the
+# workflow they describe is no longer in use.
+#
+# Will be removed in a future release.
+
 name: Release
 
 # Manual release workflow. One job bumps the crate version, migrates
