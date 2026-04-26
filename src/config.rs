@@ -99,6 +99,22 @@ pub struct Config {
     ///   set; defaults are NOT merged in.
     #[serde(default)]
     pub moderation_reasons: Option<BTreeMap<String, ReasonDefToml>>,
+    /// Strike policy for the v1.4 graduated-action moderation
+    /// model (§F20, #48). TOML projection of the operator's
+    /// `[strike_policy]` block; resolve to a runtime
+    /// [`crate::moderation::policy::StrikePolicy`] via
+    /// `StrikePolicy::from_config`.
+    ///
+    /// Two states:
+    /// - `None` — operator declared no block; the resolver returns
+    ///   shipped defaults (threshold 3, curve [1, 2], linear decay
+    ///   over 90 days, suspensions freeze decay).
+    /// - `Some(_)` — partial or full operator declaration. Per-field
+    ///   serde defaults fill any unspecified sub-fields; the
+    ///   resolved values are validated together (curve length
+    ///   convention, strict-ascending curve, positive decay window).
+    #[serde(default)]
+    pub strike_policy: Option<StrikePolicyToml>,
 }
 
 /// TOML projection of one entry in
@@ -118,6 +134,68 @@ pub struct ReasonDefToml {
     /// Operator-facing label describing what the reason means.
     /// Required and non-empty; validated at config-load time.
     pub description: String,
+}
+
+/// TOML projection of [`crate::moderation::policy::StrikePolicy`].
+/// Each sub-field carries a `#[serde(default = "...")]` so a partial
+/// `[strike_policy]` declaration fills the rest from the shipped
+/// defaults. The fully-defaulted struct matches
+/// [`crate::moderation::policy::StrikePolicy::defaults`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrikePolicyToml {
+    /// Strike count at or below which a subject is in good standing.
+    /// Default 3. Validated together with `dampening_curve` —
+    /// curve length must equal `max(0, threshold - 1)`. See
+    /// [`crate::moderation::policy`] module docs for the worked
+    /// example.
+    #[serde(default = "default_good_standing_threshold")]
+    pub good_standing_threshold: u32,
+    /// Per-position dampening weights for in-good-standing offenses.
+    /// Default `[1, 2]`. Validated as strictly ascending with each
+    /// entry `>= 1`; length tied to `good_standing_threshold`.
+    #[serde(default = "default_dampening_curve")]
+    pub dampening_curve: Vec<u32>,
+    /// Decay shape applied to each action's strike contribution as
+    /// time passes. Default [`crate::moderation::policy::DecayFunction::Linear`].
+    /// Unknown variants fail at deserialize time.
+    #[serde(default = "default_decay_function")]
+    pub decay_function: crate::moderation::policy::DecayFunction,
+    /// Window over which `decay_function` operates, in days. Default
+    /// 90. Validated as `>= 1`; no upper bound.
+    #[serde(default = "default_decay_window_days")]
+    pub decay_window_days: u32,
+    /// When `true`, decay halts while the subject has an active
+    /// `indef_suspension` action. Default `true`.
+    #[serde(default = "default_suspension_freezes_decay")]
+    pub suspension_freezes_decay: bool,
+}
+
+impl Default for StrikePolicyToml {
+    fn default() -> Self {
+        Self {
+            good_standing_threshold: default_good_standing_threshold(),
+            dampening_curve: default_dampening_curve(),
+            decay_function: default_decay_function(),
+            decay_window_days: default_decay_window_days(),
+            suspension_freezes_decay: default_suspension_freezes_decay(),
+        }
+    }
+}
+
+fn default_good_standing_threshold() -> u32 {
+    3
+}
+fn default_dampening_curve() -> Vec<u32> {
+    vec![1, 2]
+}
+fn default_decay_function() -> crate::moderation::policy::DecayFunction {
+    crate::moderation::policy::DecayFunction::Linear
+}
+fn default_decay_window_days() -> u32 {
+    90
+}
+fn default_suspension_freezes_decay() -> bool {
+    true
 }
 
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
@@ -331,6 +409,13 @@ impl Config {
         // returns an Error::Signing here that surfaces as a
         // config-load failure at startup.
         let _ = crate::moderation::reasons::ReasonVocabulary::from_config(self)?;
+        // Strike policy (§F20, #48): same single-source-of-truth
+        // pattern. The resolver applies the curve-length convention
+        // (`max(0, threshold - 1)`), strict-ascending check, and
+        // decay-window-days >= 1 check. See
+        // [`crate::moderation::policy`] for the full validation
+        // rules.
+        let _ = crate::moderation::policy::StrikePolicy::from_config(self)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the
