@@ -32,7 +32,7 @@ than Skyware; it does not try to be either.
 
 **v1.1.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.1.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.1.0). The technical surface of v1.0 is code-complete; remaining items are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
-**v1.1 is in active development on `main`.** Scope includes `/health` and `/ready` endpoints, a moderator management CLI, CI security scanning, the subscribeLabels retention sweep (`tools.cairn.admin.retentionSweep` + `cairn retention sweep`), and operator/admin CLI surfaces wrapping the admin XRPC endpoints.
+**v1.2 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-v11-roadmap) include audit-log hash-chaining, signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions). The §18 section is still titled "v1.1 Roadmap" because the v1.1 release shipped a focused subset; the remaining items there are the v1.2+ pool.
 
 Production deployments should pin to the stable release, not the `main` branch.
 
@@ -288,6 +288,30 @@ VALUES ('did:plc:example', 'admin', strftime('%s','now') * 1000);
 
 Direct SQL skips the last-admin guard and the role-change
 prompts; reach for it only when the CLI path isn't an option.
+
+### Moderator authentication
+
+Admin and moderator CLI subcommands (`cairn report ...`,
+`cairn audit list`, `cairn retention sweep`) require a logged-in
+moderator session. Authenticate once per machine:
+
+```
+cairn login \
+    --cairn-server https://labeler.example \
+    --pds https://bsky.social \
+    --handle moderator.example.bsky.social
+```
+
+Prompts for the moderator's PDS app password — separate from the
+operator's app password (different identity, different credentials
+in production deployments). Caches a session file at
+`~/.config/cairn/session.json` (mode `0600`, owned by the running
+user — same §5.3 invariants as the operator session). The
+resolved DID must have a corresponding row in the `moderators`
+table on the target Cairn instance — see Moderator management
+above for adding rows.
+
+To revoke: `cairn logout`.
 
 ### Report management ([§F17](cairn-design.md#f17-report-management-cli-v11))
 
