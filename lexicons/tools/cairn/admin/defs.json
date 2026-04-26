@@ -117,6 +117,14 @@
         "reason": {
           "type": "string",
           "description": "Structured JSON or free text; action-specific schema documented in src/writer.rs AUDIT_REASON_SCHEMA."
+        },
+        "prevHash": {
+          "type": "string",
+          "description": "Hex-encoded SHA-256 of the prior row's row_hash; the audit chain link (#39, v1.3). Absent for pre-v1.3 rows that haven't been backfilled by `cairn audit-rebuild` (the trust-horizon convention). 64 lowercase hex chars when present. The genesis row's prevHash is the all-zeros sentinel (`0000...0000`)."
+        },
+        "rowHash": {
+          "type": "string",
+          "description": "Hex-encoded SHA-256 of `prevHash || dag_cbor_canonical(row_content)` (#39, v1.3). Absent for pre-v1.3 rows that haven't been backfilled by `cairn audit-rebuild`. 64 lowercase hex chars when present."
         }
       }
     },

@@ -70,7 +70,8 @@ pub(super) async fn handler(
     };
 
     let mut qb = QueryBuilder::<Sqlite>::new(
-        "SELECT id, created_at, action, actor_did, target, target_cid, outcome, reason
+        "SELECT id, created_at, action, actor_did, target, target_cid, outcome, reason,
+                prev_hash, row_hash
          FROM audit_log
          WHERE id < ",
     );

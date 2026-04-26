@@ -305,6 +305,8 @@ fn fixture() -> AuditListResponse {
                 target_cid: None,
                 outcome: "success".into(),
                 reason: None,
+                prev_hash: None,
+                row_hash: None,
             },
             AuditEntry {
                 id: 4,
@@ -315,6 +317,8 @@ fn fixture() -> AuditListResponse {
                 target_cid: None,
                 outcome: "success".into(),
                 reason: Some(r#"{"report_id":42}"#.into()),
+                prev_hash: None,
+                row_hash: None,
             },
         ],
         cursor: Some("c-next".into()),

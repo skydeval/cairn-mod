@@ -69,6 +69,17 @@ pub struct AuditEntry {
     /// per-action (see `crate::writer::AUDIT_REASON_*`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reason: Option<String>,
+    /// Hex-encoded SHA-256 (64 lowercase chars) of the prior row's
+    /// row_hash. Absent for pre-v1.3 / pre-rebuild rows — the
+    /// trust-horizon convention from #39/#40. Present rows always
+    /// carry both this and `row_hash`.
+    #[serde(rename = "prevHash", skip_serializing_if = "Option::is_none", default)]
+    pub prev_hash: Option<String>,
+    /// Hex-encoded SHA-256 (64 lowercase chars) of
+    /// `prevHash || dag_cbor_canonical(row_content)`. Absent for
+    /// pre-v1.3 / pre-rebuild rows.
+    #[serde(rename = "rowHash", skip_serializing_if = "Option::is_none", default)]
+    pub row_hash: Option<String>,
 }
 
 /// `listAuditLog` response envelope.
@@ -325,9 +336,16 @@ pub async fn show(
 }
 
 /// Multi-line field/value output for `cairn audit show`. Includes
-/// every field present on the entry; omits absent optionals (target,
-/// targetCid, reason). `reason` is rendered as-is — when it's
-/// structured JSON, use `--json` to pipe through `jq`.
+/// every field present on the entry; omits absent payload optionals
+/// (target, targetCid, reason). `reason` is rendered as-is — when
+/// it's structured JSON, use `--json` to pipe through `jq`.
+///
+/// `prev_hash` and `row_hash` (#42, v1.3) are always rendered: if
+/// the row is pre-attestation (NULL hashes), the value is shown as
+/// `(pre-attestation)` so the operator sees the trust horizon
+/// explicitly rather than inferring it from a missing line. Hex
+/// values are full 64-char lowercase strings; the genesis row's
+/// `prev_hash` is the all-zeros sentinel (see #39).
 pub fn format_show_human(entry: &AuditEntry) -> String {
     use std::fmt::Write;
     let mut s = String::new();
@@ -345,11 +363,28 @@ pub fn format_show_human(entry: &AuditEntry) -> String {
     if let Some(r) = &entry.reason {
         let _ = writeln!(s, "  reason:      {r}");
     }
-    if s.ends_with('\n') {
-        s.pop();
-    }
+    let _ = writeln!(
+        s,
+        "  prev_hash:   {}",
+        entry
+            .prev_hash
+            .as_deref()
+            .unwrap_or(PRE_ATTESTATION_DISPLAY)
+    );
+    let _ = write!(
+        s,
+        "  row_hash:    {}",
+        entry.row_hash.as_deref().unwrap_or(PRE_ATTESTATION_DISPLAY)
+    );
     s
 }
+
+/// Sentinel rendered in `format_show_human` for pre-attestation
+/// rows (those with NULL `prev_hash` / `row_hash`). Chosen over
+/// `null` / `<empty>` because absence is operationally meaningful —
+/// the trust horizon — and a sentinel that reads as a deliberate
+/// label rather than a missing field surfaces that meaning.
+const PRE_ATTESTATION_DISPLAY: &str = "(pre-attestation)";
 
 /// JSON output for `cairn audit show`. Pretty-printed for shell
 /// readability; `jq` consumers see the canonical wire shape.
@@ -371,6 +406,9 @@ mod tests {
             target_cid: Some("bafytest".into()),
             outcome: "success".into(),
             reason: reason.map(str::to_string),
+            // Mid-chain row: both hashes present as 64-char hex.
+            prev_hash: Some("a".repeat(64)),
+            row_hash: Some("b".repeat(64)),
         }
     }
 
@@ -385,6 +423,8 @@ mod tests {
         assert!(s.contains("target:      at://did:plc:target/col/rec"));
         assert!(s.contains("target_cid:  bafytest"));
         assert!(s.contains(r#"reason:      {"val":"spam"}"#));
+        assert!(s.contains(&format!("prev_hash:   {}", "a".repeat(64))));
+        assert!(s.contains(&format!("row_hash:    {}", "b".repeat(64))));
     }
 
     #[test]
@@ -399,7 +439,47 @@ mod tests {
     }
 
     #[test]
-    fn format_show_json_round_trips() {
+    fn format_show_human_pre_attestation_row_renders_sentinel() {
+        // Pre-v1.3 / pre-rebuild row: NULL hashes. Display must show
+        // the sentinel so operators see the trust horizon explicitly
+        // — never silently omit (which would read as "field missing"
+        // rather than "row pre-dates attestation").
+        let mut e = sample(None);
+        e.prev_hash = None;
+        e.row_hash = None;
+        let s = format_show_human(&e);
+        assert!(
+            s.contains("prev_hash:   (pre-attestation)"),
+            "missing pre-attestation sentinel for prev_hash: {s}"
+        );
+        assert!(
+            s.contains("row_hash:    (pre-attestation)"),
+            "missing pre-attestation sentinel for row_hash: {s}"
+        );
+    }
+
+    #[test]
+    fn format_show_human_genesis_row_renders_zero_sentinel_verbatim() {
+        // Row id=1 (genesis) carries the all-zeros prev_hash sentinel
+        // (see #39). Display it as-is — keen-eyed operators recognize
+        // the sentinel; special-casing creates yet another display
+        // path to maintain.
+        let mut e = sample(None);
+        e.id = 1;
+        e.prev_hash = Some("0".repeat(64));
+        e.row_hash = Some("c".repeat(64));
+        let s = format_show_human(&e);
+        assert!(s.contains("Audit entry 1"));
+        assert!(s.contains(&format!("prev_hash:   {}", "0".repeat(64))));
+        assert!(s.contains(&format!("row_hash:    {}", "c".repeat(64))));
+        assert!(
+            !s.contains("genesis"),
+            "genesis row must not be special-cased in display: {s}"
+        );
+    }
+
+    #[test]
+    fn format_show_json_round_trips_with_hashes() {
         let e = sample(Some(r#"{"val":"spam","neg":false}"#));
         let json = format_show_json(&e);
         let parsed: AuditEntry = serde_json::from_str(&json).expect("round trip");
@@ -412,6 +492,33 @@ mod tests {
         assert_eq!(
             parsed.reason.as_deref(),
             Some(r#"{"val":"spam","neg":false}"#)
+        );
+        assert_eq!(parsed.prev_hash.as_deref(), Some("a".repeat(64).as_str()));
+        assert_eq!(parsed.row_hash.as_deref(), Some("b".repeat(64).as_str()));
+        // The on-wire JSON must use camelCase per the lexicon.
+        assert!(
+            json.contains("\"prevHash\""),
+            "wire JSON must use camelCase prevHash: {json}"
+        );
+        assert!(
+            json.contains("\"rowHash\""),
+            "wire JSON must use camelCase rowHash: {json}"
+        );
+    }
+
+    #[test]
+    fn format_show_json_pre_attestation_row_omits_hash_fields() {
+        let mut e = sample(None);
+        e.prev_hash = None;
+        e.row_hash = None;
+        let json = format_show_json(&e);
+        assert!(
+            !json.contains("prevHash"),
+            "pre-attestation: prevHash must be field-absent: {json}"
+        );
+        assert!(
+            !json.contains("rowHash"),
+            "pre-attestation: rowHash must be field-absent: {json}"
         );
     }
 }

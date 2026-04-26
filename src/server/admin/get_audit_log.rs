@@ -50,7 +50,9 @@ pub(super) async fn handler(
              target,
              target_cid,
              outcome     AS "outcome!: String",
-             reason
+             reason,
+             prev_hash,
+             row_hash
            FROM audit_log WHERE id = ?1"#,
         id,
     )

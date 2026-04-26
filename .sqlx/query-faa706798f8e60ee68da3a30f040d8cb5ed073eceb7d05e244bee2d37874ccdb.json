@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n             id          AS \"id!: i64\",\n             created_at  AS \"created_at!: i64\",\n             action      AS \"action!: String\",\n             actor_did   AS \"actor_did!: String\",\n             target,\n             target_cid,\n             outcome     AS \"outcome!: String\",\n             reason\n           FROM audit_log WHERE id = ?1",
+  "query": "SELECT\n             id          AS \"id!: i64\",\n             created_at  AS \"created_at!: i64\",\n             action      AS \"action!: String\",\n             actor_did   AS \"actor_did!: String\",\n             target,\n             target_cid,\n             outcome     AS \"outcome!: String\",\n             reason,\n             prev_hash,\n             row_hash\n           FROM audit_log WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,16 @@
         "name": "reason",
         "ordinal": 7,
         "type_info": "Text"
+      },
+      {
+        "name": "prev_hash",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "row_hash",
+        "ordinal": 9,
+        "type_info": "Blob"
       }
     ],
     "parameters": {
@@ -55,8 +65,10 @@
       true,
       true,
       false,
+      true,
+      true,
       true
     ]
   },
-  "hash": "7ee49d10a241514b5c14c18db057fd92076bcdc8a983ffb0c859bc10de79e7b4"
+  "hash": "faa706798f8e60ee68da3a30f040d8cb5ed073eceb7d05e244bee2d37874ccdb"
 }
