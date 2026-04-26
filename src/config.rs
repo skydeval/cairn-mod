@@ -336,8 +336,14 @@ impl Config {
 
 impl From<AdminConfigToml> for crate::AdminConfig {
     fn from(t: AdminConfigToml) -> Self {
+        // service_did / service_endpoint / declared_label_values are
+        // populated separately at admin_router-construction time
+        // (see `serve::run`) — they live elsewhere in `Config` and
+        // would needlessly couple [admin] to those fields if pulled
+        // through here.
         crate::AdminConfig {
             label_values: t.label_values,
+            ..Default::default()
         }
     }
 }

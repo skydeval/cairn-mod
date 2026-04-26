@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO labeler_config (key, value, updated_at) VALUES (?1, ?2, ?3)\n         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "229f2f24c88fc22c73396a173c35141ff21ec64c18193cb3da157f0e38f3511b"
+}

@@ -102,6 +102,7 @@ async fn spawn_cairn() -> CairnHarness {
     // Includes "spam" so the with-label test can apply it.
     let admin_cfg = AdminConfig {
         label_values: Some(vec!["spam".into()]),
+        ..Default::default()
     };
     let router = admin_router(pool.clone(), writer, auth, admin_cfg);
 

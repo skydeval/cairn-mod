@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT public_key_multibase, valid_from, valid_to, created_at AS \"created_at!: i64\"\n           FROM signing_keys\n           ORDER BY valid_from ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "public_key_multibase",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "valid_from",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "valid_to",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "6114a48dbfda6ac37adf1fd9b7ca5472475929e1604fd2fc32f47c7ddf3fb7c5"
+}

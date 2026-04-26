@@ -94,6 +94,7 @@ async fn spawn_cairn() -> CairnHarness {
         auth,
         AdminConfig {
             label_values: Some(vec!["spam".into()]),
+            ..Default::default()
         },
     );
 

@@ -317,6 +317,7 @@ async fn apply_label_invalid_jwt_returns_401() {
 async fn apply_label_invalid_label_value_when_allowlist_configured() {
     let cfg = AdminConfig {
         label_values: Some(vec!["spam".into(), "nudity".into()]),
+        ..Default::default()
     };
     let h = spawn(cfg).await;
     grant_role(&h.pool, MODERATOR_DID, "mod").await;

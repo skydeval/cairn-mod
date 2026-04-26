@@ -95,6 +95,7 @@ async fn spawn_cairn_with_retention(retention_days: Option<u32>) -> CairnHarness
         auth,
         AdminConfig {
             label_values: Some(vec!["spam".into()]),
+            ..Default::default()
         },
     );
 

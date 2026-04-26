@@ -118,28 +118,36 @@ where
     // Step 5: compose the full router. Each per-feature constructor
     // owns its own Extension state; `.merge` layers them side-by-side.
     // Order is cosmetic — axum matches by route, not by merge order.
-    let router = admin_router(
-        pool.clone(),
-        writer.clone(),
-        auth.clone(),
-        config.admin.clone().into(),
-    )
-    .merge(create_report_router(
-        pool.clone(),
-        auth.clone(),
-        crate::CreateReportConfig {
-            db_path: config.db_path.clone(),
-            ..crate::CreateReportConfig::default()
-        },
-    ))
-    .merge(subscribe_router(
-        pool.clone(),
-        writer.clone(),
-        crate::SubscribeConfig::default(),
-    ))
-    .merge(wellknown_router())
-    .merge(did_document_router(pool.clone(), config.clone()))
-    .merge(health_router(pool.clone(), writer.clone()));
+    // Compose AdminConfig from multiple Config sources. The
+    // [admin].label_values allowlist comes from AdminConfigToml's
+    // From impl; the trust-chain identity surface
+    // (service_did / service_endpoint / declared_label_values)
+    // lives elsewhere in Config and is set explicitly here so the
+    // From impl stays narrow.
+    let admin_cfg = {
+        let mut c: crate::AdminConfig = config.admin.clone().into();
+        c.service_did = config.service_did.clone();
+        c.service_endpoint = config.service_endpoint.clone();
+        c.declared_label_values = config.labeler.as_ref().map(|l| l.label_values.clone());
+        c
+    };
+    let router = admin_router(pool.clone(), writer.clone(), auth.clone(), admin_cfg)
+        .merge(create_report_router(
+            pool.clone(),
+            auth.clone(),
+            crate::CreateReportConfig {
+                db_path: config.db_path.clone(),
+                ..crate::CreateReportConfig::default()
+            },
+        ))
+        .merge(subscribe_router(
+            pool.clone(),
+            writer.clone(),
+            crate::SubscribeConfig::default(),
+        ))
+        .merge(wellknown_router())
+        .merge(did_document_router(pool.clone(), config.clone()))
+        .merge(health_router(pool.clone(), writer.clone()));
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see
     // the module-level note on the L3 ordering invariant.

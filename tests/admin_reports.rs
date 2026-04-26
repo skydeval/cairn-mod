@@ -643,6 +643,7 @@ async fn resolve_report_invalid_label_value_pre_check_leaves_state_untouched() {
     // — audit is for successful actions per §F10, not attempt logs.
     let h = spawn(AdminConfig {
         label_values: Some(vec!["spam".into(), "nudity".into()]),
+        ..Default::default()
     })
     .await;
     grant_role(&h.pool, MODERATOR_DID, "mod").await;

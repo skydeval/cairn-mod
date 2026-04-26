@@ -21,6 +21,7 @@ mod audit_view;
 mod common;
 mod flag_reporter;
 mod get_report;
+mod get_trust_chain;
 mod list_audit_log;
 mod list_labels;
 mod list_reports;
@@ -34,16 +35,43 @@ mod retention_sweep;
 /// without touching read-side knobs.
 #[derive(Debug, Clone, Default)]
 pub struct AdminConfig {
-    /// Operator-declared label values (§F12 `InvalidLabelValue`).
+    /// Operational allowlist for `applyLabel` (§F12 `InvalidLabelValue`).
     /// When `Some`, `applyLabel` rejects values not in this set.
     /// When `None`, any val ≤128 bytes is accepted — the §F11
     /// anti-leak principle applies: the error message on reject
     /// does NOT enumerate the allowed values.
     ///
+    /// Distinct from [`Self::declared_label_values`] (the trust-chain
+    /// surface for the labeler's *declared* taxonomy). They typically
+    /// match in production but conceptually differ — the allowlist
+    /// gates incoming writes; the declared list documents what the
+    /// labeler publishes.
+    ///
     /// Future: a #9 service-record update may derive this from the
     /// published `app.bsky.labeler.service` record so the lexicon set
     /// and the runtime policy stay in lockstep.
     pub label_values: Option<Vec<String>>,
+
+    /// Service DID surfaced in `tools.cairn.admin.getTrustChain` (#36).
+    /// Mirrors `Config::service_did`; populated at admin_router
+    /// construction in `serve::run`. Default empty for tests that
+    /// don't exercise the trust-chain endpoint.
+    pub service_did: String,
+
+    /// Service endpoint URL surfaced in
+    /// `tools.cairn.admin.getTrustChain` (#36). Mirrors
+    /// `Config::service_endpoint`. Default empty for tests that
+    /// don't exercise the trust-chain endpoint.
+    pub service_endpoint: String,
+
+    /// Labeler-declared label values from the `[labeler]` config
+    /// block — surfaced by `tools.cairn.admin.getTrustChain` as the
+    /// trust-chain "taxonomy" snapshot. `None` when the deployment
+    /// runs without `[labeler]` (§F19 labeler-absent path); the
+    /// trust-chain endpoint then reports `serviceRecord: null`.
+    /// Distinct from [`Self::label_values`] above — see that field's
+    /// doc comment.
+    pub declared_label_values: Option<Vec<String>>,
 }
 
 /// Build a Router exposing the tools.cairn.admin.* endpoints
@@ -97,6 +125,10 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.retentionSweep",
             post(retention_sweep::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getTrustChain",
+            get(get_trust_chain::handler),
         )
         .layer(Extension(state))
 }
