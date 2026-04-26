@@ -17,6 +17,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.2.0] - 2026-04-26
+
+> v1.2 "Trust-chain transparency" makes the labeler's trust posture
+> auditable. Operators and external auditors can now read the full
+> signing-key history, maintainer roster (with HTTP-attested vs CLI-
+> inserted provenance), service record content hash, and instance
+> metadata via a single admin endpoint. The audit log gains a per-id
+> detail view to complement the existing list query, and the service-
+> record lifecycle gains its inverse — `cairn unpublish-service-record`
+> — closing a documented friction point in the operator workflow.
+
+### Added
+- `tools.cairn.admin.getTrustChain` admin XRPC endpoint and `cairn trust-chain show` CLI subcommand. Read-only, admin-role-only summary of instance trust posture: signing-key history (active + rotated, with `validFrom`/`validTo`), maintainer roster with `provenanceAttested` flag distinguishing HTTP-attested adds from CLI/SQL inserts, published service-record content hash + declared label values, and instance metadata (build version, service endpoint). The envelope reuses the `tools.cairn.admin.defs` shared types so the CLI and any other consumer agree on wire shape (#35, #36, #37)
+- `tools.cairn.admin.getAuditLog` admin XRPC endpoint and `cairn audit show <id>` CLI subcommand. Per-id detail view complementing `cairn audit list` (the v1.1 list query). Admin-role-only; returns the bare `auditEntry` shape with the full `reason` payload. `AuditEntryNotFound` 404 on unknown id mirrors `getReport`'s posture (#26)
+- `cairn unpublish-service-record` CLI subcommand. Removes the `app.bsky.labeler.service` record from the operator's PDS via `com.atproto.repo.deleteRecord` (with `swapRecord` for race detection), clears `service_record_*` `labeler_config` state, and writes a `service_record_unpublished` audit row in one transaction. Idempotent — running on an unpublished labeler is a no-op success that still audits. Subsequent `cairn serve` startup verify (§F19) fail-starts with the existing exit 13 `SERVICE_RECORD_ABSENT` until republish; no new exit code needed (#34)
+
+### Changed
+- `ReportStatus` and `ResolutionAction` extracted from string fields to typed Rust enums. Wire shape unchanged; the change is internal type safety + central enumeration of allowed values (#27)
+- `acquire_service_auth` and `truncate` factored from per-CLI-module copies into shared [`src/cli/auth.rs`](src/cli/auth.rs) and [`src/cli/output.rs`](src/cli/output.rs). No behavior change; the factor-out triggered when `cli/trust_chain.rs` brought the duplicated `acquire_service_auth` to eight identical copies across four modules (#28)
+- F10 audit-log actions list in [cairn-design.md](cairn-design.md#f10-audit-log) updated to include `service_record_unpublished` (#34)
+
+### Fixed
+- `tests/wellknown.rs::ALL_LEXICONS` now exercises every lexicon served at `.well-known/lexicons/*` — `getTrustChain`, `retentionSweep`, and `getAuditLog` were previously missing from the per-NSID serving test (coverage gap, not a correctness gap; the underlying handlers and routes were always tested) (#38)
+
+### Removed
+
+### Security
+
 ## [1.1.0] - 2026-04-25
 
 > v1.1 "Pleasant to operate" focuses on operational comfort for
