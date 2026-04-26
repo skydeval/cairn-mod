@@ -9,10 +9,14 @@
 //! - [`policy`] — strike policy (dampening curve, decay function,
 //!   suspension-freezes-decay flag, `[strike_policy]` config block).
 //!   Used by the strike calculator and decay calculator. (#48)
+//! - [`strike`] — pure strike calculator. Takes
+//!   `(current_count, reason, policy, position_in_window)` and
+//!   returns the resolved [`StrikeApplication`](strike::StrikeApplication)
+//!   to record on the new `subject_actions` row. (#49)
 //!
 //! Future submodules:
-//! - `strike` — pure strike calculator. (#49)
 //! - `decay` — pure decay calculator. (#50)
 
 pub mod policy;
 pub mod reasons;
+pub mod strike;
