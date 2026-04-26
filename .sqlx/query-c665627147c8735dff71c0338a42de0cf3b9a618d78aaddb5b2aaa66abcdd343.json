@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE audit_log SET action = 'label_negated' WHERE id = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "c665627147c8735dff71c0338a42de0cf3b9a618d78aaddb5b2aaa66abcdd343"
+}

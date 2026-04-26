@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, created_at, action, actor_did, target, target_cid, outcome, reason,\n                prev_hash, row_hash\n         FROM audit_log\n         ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "action",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "target",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "target_cid",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "prev_hash",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "row_hash",
+        "ordinal": 9,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e09ce6733272d7d125d1edbb4fc86385f82753b6f037a16939e8cab3f4bb5621"
+}

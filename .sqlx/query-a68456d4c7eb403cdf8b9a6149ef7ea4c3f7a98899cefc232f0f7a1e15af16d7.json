@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE audit_log SET actor_did = 'did:plc:attacker' WHERE id = 2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "a68456d4c7eb403cdf8b9a6149ef7ea4c3f7a98899cefc232f0f7a1e15af16d7"
+}

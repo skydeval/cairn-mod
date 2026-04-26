@@ -54,6 +54,12 @@ pub mod code {
     /// the verify fetch. Transient infra issue; orchestrators
     /// should retry rather than treating as a config drift.
     pub const SERVICE_RECORD_UNREACHABLE: i32 = 14;
+    /// `cairn audit verify` (#41) detected a hash-chain divergence:
+    /// the chain walked successfully up to row N-1, then row N's
+    /// recomputed hash did not match its stored row_hash. Distinct
+    /// exit code so monitoring/CI can branch on integrity-failure
+    /// (chain broken — operational alert) vs. generic CLI error.
+    pub const AUDIT_DIVERGENCE: i32 = 15;
 }
 
 /// Error sources the CLI dispatcher knows about. The human-readable
@@ -187,6 +193,37 @@ pub enum CliError {
         /// Underlying error message (transport, status, etc.).
         cause: String,
     },
+    /// `cairn audit verify` (#41) detected a hash-chain divergence.
+    /// The walk recomputed `row_id`'s row_hash from its content +
+    /// the running prev_hash and got `expected_hash`; the row's
+    /// stored `actual_hash` did not match. Distinct exit code
+    /// ([`code::AUDIT_DIVERGENCE`]) so monitoring/CI can branch on
+    /// integrity-failure vs. generic CLI error.
+    ///
+    /// The dispatcher prints the verify outcome (human or JSON) to
+    /// stdout *before* returning this error, so operators see the
+    /// structured report on stdout and the same message on stderr
+    /// alongside the non-zero exit. Stdout-only consumers
+    /// (`cairn audit verify --json`) get the JSON line; the stderr
+    /// echo is redundant for them but harmless.
+    #[error(
+        "audit chain divergence at row {row_id}: expected {expected_hash}, found {actual_hash} ({attested_rows_before_divergence} row(s) verified before divergence)"
+    )]
+    AuditDivergence {
+        /// `audit_log.id` of the row whose recomputed hash did not
+        /// match the stored row_hash.
+        row_id: i64,
+        /// Hex-encoded SHA-256 the chain says this row's row_hash
+        /// should be (recomputed from the running prev_hash + the
+        /// row's stored content).
+        expected_hash: String,
+        /// Hex-encoded SHA-256 actually stored in the row's
+        /// row_hash column.
+        actual_hash: String,
+        /// Number of rows whose hashes verified before this one —
+        /// the truncation point operators reconcile from.
+        attested_rows_before_divergence: i64,
+    },
 }
 
 impl CliError {
@@ -227,6 +264,7 @@ impl CliError {
             CliError::ServiceRecordDrift { .. } => code::SERVICE_RECORD_DRIFT,
             CliError::ServiceRecordAbsent { .. } => code::SERVICE_RECORD_ABSENT,
             CliError::ServiceRecordUnreachable { .. } => code::SERVICE_RECORD_UNREACHABLE,
+            CliError::AuditDivergence { .. } => code::AUDIT_DIVERGENCE,
         }
     }
 }

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cairn_mod::cli::{
-    audit, audit_rebuild,
+    audit, audit_rebuild, audit_verify,
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
@@ -186,6 +186,13 @@ enum AuditSub {
     /// `AuditEntryNotFound` 404 (surfaced as a non-zero exit) when
     /// the id does not exist.
     Show(AuditShowArgs),
+    /// Verify the audit-log hash chain (#41). Read-only — safe to
+    /// run while `cairn serve` is live. Direct-DB (no HTTP, no
+    /// moderator session); `--config` points at the labeler's
+    /// SQLite. Reports the first divergence and stops; returns a
+    /// dedicated exit code (15 `AUDIT_DIVERGENCE`) so monitoring
+    /// can branch on chain failure.
+    Verify(AuditVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -196,6 +203,22 @@ struct AuditShowArgs {
     #[arg(long = "cairn-server")]
     cairn_server: Option<String>,
     /// Emit JSON instead of the human-readable multi-line output.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AuditVerifyArgs {
+    /// Path to the TOML config file (same semantics as `cairn serve
+    /// --config`). The DB path comes from this config. Note: unlike
+    /// sibling `audit list` / `audit show` (which use the moderator
+    /// session and HTTP), `audit verify` is direct-DB and operator-
+    /// tier — same model as `cairn audit-rebuild`.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Emit a JSON outcome line instead of the human multi-line
+    /// summary. Stable `outcome` discriminator (`empty` /
+    /// `verified` / `divergence`) for downstream tooling.
     #[arg(long)]
     json: bool,
 }
@@ -580,6 +603,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Audit {
             sub: AuditSub::Show(args),
         } => run_audit_show(args).await,
+        Command::Audit {
+            sub: AuditSub::Verify(args),
+        } => run_audit_verify(args).await,
         Command::Retention {
             sub: RetentionSub::Sweep(args),
         } => run_retention_sweep(args).await,
@@ -599,6 +625,36 @@ async fn run_audit_rebuild(args: AuditRebuildArgs) -> Result<(), CliError> {
         println!("{}", audit_rebuild::format_human(&outcome));
     }
     Ok(())
+}
+
+async fn run_audit_verify(args: AuditVerifyArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    let outcome = audit_verify::verify(&pool).await?;
+    // Always print structured outcome to stdout — both --human and
+    // --json consumers expect the report on stdout. Divergence
+    // exits non-zero via the CliError mapping below; the stderr
+    // "error: ..." line main.rs prints from CliError's Display
+    // duplicates a portion of the human report (acceptable for
+    // operators) and gives JSON consumers a quick human signal.
+    if args.json {
+        println!("{}", audit_verify::format_json(&outcome));
+    } else {
+        println!("{}", audit_verify::format_human(&outcome));
+    }
+    match outcome {
+        audit_verify::VerifyOutcome::Divergence {
+            row_id,
+            expected_hash,
+            actual_hash,
+            attested_rows_before_divergence,
+        } => Err(CliError::AuditDivergence {
+            row_id,
+            expected_hash,
+            actual_hash,
+            attested_rows_before_divergence,
+        }),
+        _ => Ok(()),
+    }
 }
 
 async fn run_retention_sweep(args: RetentionSweepArgs) -> Result<(), CliError> {

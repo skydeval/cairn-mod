@@ -13,6 +13,7 @@
 
 pub mod audit;
 pub mod audit_rebuild;
+pub mod audit_verify;
 pub mod auth;
 pub mod error;
 pub mod login;

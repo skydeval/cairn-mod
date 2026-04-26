@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE audit_log SET action = 'tampered' WHERE id = 4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "2668020600c9942d79c65db4263afa04ba787b3ebc5c76048b21b59df1fa269f"
+}
