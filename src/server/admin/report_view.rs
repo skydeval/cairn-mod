@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 
-use crate::report::Report;
+use crate::report::{Report, ReportStatus};
 
 /// `reportView` minus `reason` — used by `listReports`.
 ///
@@ -33,7 +33,7 @@ pub(super) struct ReportListEntry {
     pub subject: SubjectView,
     #[serde(rename = "reportedBy")]
     pub reported_by: String,
-    pub status: String,
+    pub status: ReportStatus,
     #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedAt")]
     pub resolved_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedBy")]
@@ -58,7 +58,7 @@ pub(super) struct ReportDetail {
     pub subject: SubjectView,
     #[serde(rename = "reportedBy")]
     pub reported_by: String,
-    pub status: String,
+    pub status: ReportStatus,
     #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedAt")]
     pub resolved_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "resolvedBy")]
@@ -146,7 +146,7 @@ mod tests {
             subject_did: "did:plc:target".into(),
             subject_uri: Some("at://did:plc:target/col/r".into()),
             subject_cid: Some("bafy".into()),
-            status: "pending".into(),
+            status: ReportStatus::Pending,
             resolved_at: None,
             resolved_by: None,
             resolution_label: None,

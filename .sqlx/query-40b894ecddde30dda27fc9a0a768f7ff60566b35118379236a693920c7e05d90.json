@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n             id                 AS \"id!: i64\",\n             created_at         AS \"created_at!: String\",\n             reported_by        AS \"reported_by!: String\",\n             reason_type        AS \"reason_type!: String\",\n             reason,\n             subject_type       AS \"subject_type!: String\",\n             subject_did        AS \"subject_did!: String\",\n             subject_uri,\n             subject_cid,\n             status             AS \"status!: String\",\n             resolved_at,\n             resolved_by,\n             resolution_label,\n             resolution_reason\n           FROM reports WHERE id = ?1",
+  "query": "SELECT\n             id                 AS \"id!: i64\",\n             created_at         AS \"created_at!: String\",\n             reported_by        AS \"reported_by!: String\",\n             reason_type        AS \"reason_type!: String\",\n             reason,\n             subject_type       AS \"subject_type!: String\",\n             subject_did        AS \"subject_did!: String\",\n             subject_uri,\n             subject_cid,\n             status             AS \"status!: ReportStatus\",\n             resolved_at,\n             resolved_by,\n             resolution_label,\n             resolution_reason\n           FROM reports WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -49,7 +49,7 @@
         "type_info": "Text"
       },
       {
-        "name": "status!: String",
+        "name": "status!: ReportStatus",
         "ordinal": 9,
         "type_info": "Text"
       },
@@ -94,5 +94,5 @@
       true
     ]
   },
-  "hash": "36ebf1a8e51ddcdd97dfa29af7dc7d44834f3b6a8bf0d334b80c65382cb2e892"
+  "hash": "40b894ecddde30dda27fc9a0a768f7ff60566b35118379236a693920c7e05d90"
 }

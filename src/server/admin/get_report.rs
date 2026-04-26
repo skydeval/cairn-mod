@@ -12,7 +12,7 @@ use axum::extract::RawQuery;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 
-use crate::report::Report;
+use crate::report::{Report, ReportStatus};
 
 use super::common::{AdminError, AdminState, verify_and_authorize};
 use super::report_view::project_for_fetch;
@@ -45,7 +45,7 @@ pub(super) async fn handler(
              subject_did        AS "subject_did!: String",
              subject_uri,
              subject_cid,
-             status             AS "status!: String",
+             status             AS "status!: ReportStatus",
              resolved_at,
              resolved_by,
              resolution_label,

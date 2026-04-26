@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE reports SET\n                status = ?1,\n                resolved_at = ?2,\n                resolved_by = ?3,\n                resolution_label = ?4,\n                resolution_reason = ?5\n             WHERE id = ?6",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "1a9acf20dcfe08c9688eeb425a99bcc02a8ac41e32a47e20af3fc33d441df7df"
+}

@@ -26,7 +26,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::error::Error;
-use crate::writer::{ApplyLabelInline, ResolveReportRequest};
+use crate::writer::{ApplyLabelInline, ResolutionAction, ResolveReportRequest};
 
 use super::common::{AdminError, AdminState, verify_and_authorize};
 use super::report_view::{ReportDetail, project_for_fetch};
@@ -88,15 +88,21 @@ pub(super) async fn handler(
         }
     }
 
-    let writer_req = ResolveReportRequest {
-        actor_did: admin.caller_did,
-        report_id: input.id,
-        apply_label: input.apply_label.map(|a| ApplyLabelInline {
+    // Wire shape stays `applyLabel: Option<…>`; the typed enum is
+    // internal — `None → Dismiss`, `Some(_) → ApplyLabel(_)` (#27).
+    let action = match input.apply_label {
+        None => ResolutionAction::Dismiss,
+        Some(a) => ResolutionAction::ApplyLabel(ApplyLabelInline {
             uri: a.uri,
             cid: a.cid,
             val: a.val,
             exp: a.exp,
         }),
+    };
+    let writer_req = ResolveReportRequest {
+        actor_did: admin.caller_did,
+        report_id: input.id,
+        action,
         resolution_reason: input.reason,
     };
 

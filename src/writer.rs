@@ -265,11 +265,37 @@ pub struct ApplyLabelInline {
     pub exp: Option<String>,
 }
 
+/// Resolution outcome (#27): the implicit "with-label vs without-label"
+/// semantic, made explicit. The wire shape is `applyLabel: Option<…>`
+/// per the `resolveReport` lexicon; this enum is internal and the
+/// handler maps `None → Dismiss` / `Some(_) → ApplyLabel(_)` at the
+/// HTTP boundary.
+#[derive(Debug, Clone)]
+pub enum ResolutionAction {
+    /// Resolve without emitting a label (the operator-UX "dismiss"
+    /// flow). `resolution_label` on the row stays NULL.
+    Dismiss,
+    /// Resolve and emit a label in the same transaction. The label's
+    /// `val` is also recorded as `resolution_label` on the report row.
+    ApplyLabel(ApplyLabelInline),
+}
+
+impl ResolutionAction {
+    /// Borrow the inner `ApplyLabelInline` if this is an `ApplyLabel`
+    /// variant. Convenience for the writer's UPDATE / audit code that
+    /// needs both the optional label *and* its `val` projection.
+    pub fn as_apply(&self) -> Option<&ApplyLabelInline> {
+        match self {
+            ResolutionAction::Dismiss => None,
+            ResolutionAction::ApplyLabel(a) => Some(a),
+        }
+    }
+}
+
 /// Request to resolve a report (§F12 `resolveReport`). The optional
-/// `apply_label` is applied **in the same transaction** as the report
-/// status update and both audit rows — §F5 single-writer invariant
-/// plus §F12 atomicity requirement documented in the `resolveReport`
-/// lexicon.
+/// label is applied **in the same transaction** as the report status
+/// update and both audit rows — §F5 single-writer invariant plus §F12
+/// atomicity requirement documented in the `resolveReport` lexicon.
 #[derive(Debug, Clone)]
 pub struct ResolveReportRequest {
     /// Moderator DID issuing the resolution. Becomes
@@ -278,10 +304,11 @@ pub struct ResolveReportRequest {
     pub actor_did: String,
     /// Primary key of the report being resolved.
     pub report_id: i64,
-    /// Optional label to emit atomically with the resolution. When
-    /// `None`, the resolution only updates report state + writes
-    /// the audit row.
-    pub apply_label: Option<ApplyLabelInline>,
+    /// Whether the resolution emits a label or just closes the report.
+    /// Replaces the pre-#27 `apply_label: Option<ApplyLabelInline>`
+    /// representation; semantically identical, named for the operator
+    /// UX (dismiss vs apply-label).
+    pub action: ResolutionAction,
     /// Free-text resolution rationale recorded to audit_log.
     pub resolution_reason: Option<String>,
 }
@@ -1001,6 +1028,8 @@ impl Writer {
     /// before sending the command here — saves a writer round-trip
     /// on invalid input and keeps the anti-leak message local).
     async fn handle_resolve_report(&self, req: ResolveReportRequest) -> Result<ResolvedReport> {
+        use crate::report::ReportStatus;
+
         let mut tx = self.pool.begin().await?;
 
         // 1. Load the report; confirm pending status.
@@ -1016,7 +1045,7 @@ impl Writer {
                  subject_did        AS "subject_did!: String",
                  subject_uri,
                  subject_cid,
-                 status             AS "status!: String",
+                 status             AS "status!: ReportStatus",
                  resolved_at,
                  resolved_by,
                  resolution_label,
@@ -1028,7 +1057,7 @@ impl Writer {
         .await?;
 
         let mut report = current.ok_or(Error::ReportNotFound { id: req.report_id })?;
-        if report.status != "pending" {
+        if report.status != ReportStatus::Pending {
             return Err(Error::ReportAlreadyResolved { id: req.report_id });
         }
 
@@ -1037,7 +1066,7 @@ impl Writer {
         // 2. Optional label-apply BEFORE the report UPDATE so audit
         // row insertion order reflects logical sequence
         // (label_applied, then report_resolved — §G per #15 criteria).
-        let label_event = if let Some(apply) = &req.apply_label {
+        let label_event = if let Some(apply) = req.action.as_apply() {
             let apply_req = ApplyLabelRequest {
                 actor_did: req.actor_did.clone(),
                 uri: apply.uri.clone(),
@@ -1059,15 +1088,17 @@ impl Writer {
 
         // 3. UPDATE reports.
         let resolved_at_rfc = rfc3339_from_epoch_ms(created_at)?;
-        let resolution_label = req.apply_label.as_ref().map(|a| a.val.clone());
+        let resolution_label = req.action.as_apply().map(|a| a.val.clone());
+        let resolved_status = ReportStatus::Resolved;
         sqlx::query!(
             "UPDATE reports SET
-                status = 'resolved',
-                resolved_at = ?1,
-                resolved_by = ?2,
-                resolution_label = ?3,
-                resolution_reason = ?4
-             WHERE id = ?5",
+                status = ?1,
+                resolved_at = ?2,
+                resolved_by = ?3,
+                resolution_label = ?4,
+                resolution_reason = ?5
+             WHERE id = ?6",
+            resolved_status,
             resolved_at_rfc,
             req.actor_did,
             resolution_label,
@@ -1079,7 +1110,7 @@ impl Writer {
 
         // 4. Audit: report_resolved.
         let audit_reason = build_resolve_audit_reason(
-            req.apply_label.as_ref().map(|a| a.val.as_str()),
+            req.action.as_apply().map(|a| a.val.as_str()),
             req.resolution_reason.as_deref(),
         );
         let report_id_str = req.report_id.to_string();
@@ -1108,7 +1139,7 @@ impl Writer {
         // 6. Mutate the loaded report struct to reflect the committed
         // state and return it. Avoids a re-fetch round-trip since we
         // know exactly what changed.
-        report.status = "resolved".to_string();
+        report.status = ReportStatus::Resolved;
         report.resolved_at = Some(resolved_at_rfc);
         report.resolved_by = Some(req.actor_did);
         report.resolution_label = resolution_label;

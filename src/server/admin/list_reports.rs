@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use sqlx::{QueryBuilder, Sqlite};
 
-use crate::report::Report;
+use crate::report::{Report, ReportStatus};
 
 use super::common::{AdminError, AdminState, verify_and_authorize};
 use super::report_view::{ReportListEntry, project_for_list};
@@ -30,7 +30,7 @@ const MAX_LIMIT: i64 = 250;
 
 #[derive(Debug, Default)]
 struct Params {
-    status: Option<String>,
+    status: Option<ReportStatus>,
     reported_by: Option<String>,
     limit: i64,
     cursor: Option<String>,
@@ -77,9 +77,9 @@ pub(super) async fn handler(
          WHERE id < ",
     );
     qb.push_bind(cursor_id);
-    if let Some(s) = &params.status {
+    if let Some(s) = params.status {
         qb.push(" AND status = ");
-        qb.push_bind(s.clone());
+        qb.push_bind(s);
     }
     if let Some(rb) = &params.reported_by {
         qb.push(" AND reported_by = ");
@@ -122,12 +122,9 @@ fn parse_params(raw: &str) -> Result<Params, AdminError> {
     for (k, v) in form_urlencoded::parse(raw.as_bytes()) {
         match k.as_ref() {
             "status" if !v.is_empty() => {
-                if v != "pending" && v != "resolved" {
-                    return Err(AdminError::InvalidRequest(
-                        "status must be pending or resolved",
-                    ));
-                }
-                p.status = Some(v.into_owned());
+                p.status = Some(ReportStatus::from_db_str(v.as_ref()).ok_or(
+                    AdminError::InvalidRequest("status must be pending or resolved"),
+                )?);
             }
             "reportedBy" if !v.is_empty() => p.reported_by = Some(v.into_owned()),
             "limit" => {
