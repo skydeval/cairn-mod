@@ -49,6 +49,9 @@ pub use policy::automation::{
     DEFAULT_POLICY_REASON_CODE, PolicyAutomationPolicy, PolicyMode, PolicyRule,
     SYNTHETIC_POLICY_ACTOR_DID,
 };
+pub use policy::evaluator::{
+    ActionForPolicyEval, PendingActionForPolicyEval, PendingResolution, resolve_firing_rule,
+};
 pub use server::{
     AdminConfig, CreateReportConfig, RetentionConfig, SubscribeConfig, admin_router,
     create_report_router, current_retention_floor, did_document_router, health_router,
