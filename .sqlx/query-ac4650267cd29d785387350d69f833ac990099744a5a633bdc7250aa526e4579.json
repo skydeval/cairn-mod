@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             action_type AS \"action_type!: String\",\n             effective_at AS \"effective_at!: i64\",\n             revoked_at,\n             triggered_by_policy_rule\n           FROM subject_actions\n           WHERE subject_did = ?1\n           ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "triggered_by_policy_rule",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "ac4650267cd29d785387350d69f833ac990099744a5a633bdc7250aa526e4579"
+}

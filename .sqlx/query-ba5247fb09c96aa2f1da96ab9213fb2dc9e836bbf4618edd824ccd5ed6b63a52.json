@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             triggered_by_policy_rule AS \"triggered_by_policy_rule!: String\",\n             resolution\n           FROM pending_policy_actions\n           WHERE subject_did = ?1\n           ORDER BY triggered_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "triggered_by_policy_rule!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolution",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "ba5247fb09c96aa2f1da96ab9213fb2dc9e836bbf4618edd824ccd5ed6b63a52"
+}

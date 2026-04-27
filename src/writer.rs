@@ -742,6 +742,7 @@ pub async fn spawn(
     reason_vocabulary: ReasonVocabulary,
     strike_policy: StrikePolicy,
     label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
+    policy_automation_policy: crate::policy::automation::PolicyAutomationPolicy,
 ) -> Result<WriterHandle> {
     let instance_id = acquire_lease(&pool).await?;
     let signing_key_id = ensure_signing_key_row(&pool, &key).await?;
@@ -764,6 +765,7 @@ pub async fn spawn(
         reason_vocabulary,
         strike_policy,
         label_emission_policy,
+        policy_automation_policy,
     };
 
     tokio::spawn(writer.run());
@@ -803,6 +805,12 @@ struct Writer {
     /// RecordAction handler post-INSERT to translate the action into
     /// ATProto labels, emitted in the same tx.
     label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
+    /// Resolved [policy_automation] (#71, v1.6). Consulted by the
+    /// RecordAction handler post-emission to evaluate threshold-
+    /// crossing rules and either auto-record a consequent action
+    /// or queue a `pending_policy_actions` row for moderator
+    /// review (#73).
+    policy_automation_policy: crate::policy::automation::PolicyAutomationPolicy,
 }
 
 /// Internal accumulator for an in-flight scheduled sweep. Lives only
@@ -1229,6 +1237,301 @@ impl Writer {
         .await
     }
 
+    /// Insert the auto-recorded `subject_actions` row produced by a
+    /// `[policy_automation]` rule firing (#73, v1.6,
+    /// `mode=auto`). Runs the same shape as the moderator-recorded
+    /// path: predict id, write audit row, INSERT, verify, emit
+    /// labels (action label + reason labels), append linkage rows.
+    /// All inside the existing transaction.
+    ///
+    /// Differs from the moderator path in three places:
+    /// - `actor_kind = 'policy'` and `actor_did =
+    ///   SYNTHETIC_POLICY_ACTOR_DID`.
+    /// - `triggered_by_policy_rule = rule.name`.
+    /// - The audit reason JSON has NO `policy_consequence` field
+    ///   (the auto-action is the consequence; the precipitating
+    ///   action's audit row carries the cross-reference).
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_policy_auto_action(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        rule: &crate::policy::automation::PolicyRule,
+        subject_did: &str,
+        subject_uri: Option<&str>,
+        history_plus_precip: &[ActionRecord],
+        state_after_precip: &crate::moderation::decay::StrikeState,
+        now_systemtime: SystemTime,
+        created_at: i64,
+        predicted_auto_id: i64,
+        label_events: &mut Vec<LabelEvent>,
+    ) -> Result<i64> {
+        // The rule's reason_codes resolve via the operator's
+        // [moderation_reasons] vocabulary — config validation in
+        // #71 guarantees every code is declared, so the resolver
+        // always succeeds here.
+        let primary = resolve_primary_reason(&rule.reason_codes, &self.reason_vocabulary)?;
+
+        // Strike state for the auto-action: starts from
+        // state_after_precip's count. Position-in-window is
+        // computed from history+precipitating (the auto-action
+        // hasn't been INSERTed yet).
+        let strikes_at_time_of_auto = state_after_precip.current_count;
+        let position =
+            compute_position_in_window(history_plus_precip, &self.strike_policy, now_systemtime);
+        let calc: StrikeApplication = strike_calculate(
+            strikes_at_time_of_auto,
+            &primary,
+            &self.strike_policy,
+            position,
+        );
+        // Note/Warning don't carry strikes regardless of reason.
+        // Defense-in-depth (mirrors the moderator path).
+        let (strike_base, strike_applied, was_dampened) = match rule.action_type {
+            ActionType::Note | ActionType::Warning => (0u32, 0u32, false),
+            _ => (calc.base_weight, calc.applied, calc.was_dampened),
+        };
+
+        // Auto-action expiry: derive from rule.duration when
+        // action_type == TempSuspension. #71 already enforced the
+        // pairing at config-load time.
+        let auto_expires_at: Option<i64> = match (rule.action_type, rule.duration) {
+            (ActionType::TempSuspension, Some(d)) => Some(created_at + (d.as_secs() as i64) * 1000),
+            _ => None,
+        };
+        let auto_duration_iso: Option<String> = match (rule.action_type, rule.duration) {
+            (ActionType::TempSuspension, Some(d)) => {
+                // Round-trip: rule.duration was parsed from the
+                // operator's config. We store the original
+                // `P{n}D` / `PT{n}H` shape verbatim so audit
+                // readers see what the operator declared.
+                // Reconstruction would require remembering the
+                // original string; v1.6 just regenerates a
+                // canonical form (PT<seconds>S) for the row's
+                // `duration` column. Operators reading the row
+                // can compute the wall-clock end via
+                // `expires_at`; the duration column is display-
+                // only.
+                Some(format!("PT{}S", d.as_secs()))
+            }
+            _ => None,
+        };
+
+        // Resolve labels for the auto-action.
+        let action_for_emission = ActionForEmission {
+            action_type: rule.action_type,
+            expires_at: auto_expires_at.map(epoch_ms_to_systemtime),
+            subject_did: subject_did.to_string(),
+            subject_uri: subject_uri.map(str::to_string),
+            reason_codes: rule.reason_codes.clone(),
+            cid: None,
+        };
+        let action_drafts = resolve_action_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let reason_drafts = resolve_reason_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let emitted_labels_for_audit: Vec<serde_json::Value> = action_drafts
+            .iter()
+            .chain(reason_drafts.iter())
+            .map(|d| serde_json::json!({"val": d.val, "uri": d.uri}))
+            .collect();
+
+        // Predict + verify the auto-action's id matches what we
+        // reserved when building the precipitating audit row's
+        // policy_consequence pointer.
+        let next_id = predict_next_subject_action_id(tx).await?;
+        if next_id != predicted_auto_id {
+            return Err(Error::Signing(format!(
+                "policy auto-action: predicted id {predicted_auto_id} but next-id is now {next_id}; \
+                 policy_consequence reservation diverged"
+            )));
+        }
+
+        let audit_reason = build_record_action_audit_reason(
+            next_id,
+            rule.action_type,
+            &primary.identifier,
+            &rule.reason_codes,
+            strike_base,
+            strike_applied,
+            was_dampened,
+            &emitted_labels_for_audit,
+            "policy",
+            Some(&rule.name),
+            None,
+        );
+        let audit_target = subject_uri
+            .map(str::to_string)
+            .unwrap_or_else(|| subject_did.to_string());
+        let auto_audit_log_id = crate::audit::append::append_in_tx(
+            tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at,
+                action: "subject_action_recorded".into(),
+                actor_did: crate::policy::automation::SYNTHETIC_POLICY_ACTOR_DID.to_string(),
+                target: Some(audit_target),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        // INSERT the auto-action row. actor_kind = 'policy'
+        // discriminates from moderator-recorded rows; actor_did =
+        // SYNTHETIC_POLICY_ACTOR_DID gives downstream filtering
+        // a stable identifier; triggered_by_policy_rule preserves
+        // provenance for audit + revocation.
+        let action_type_str = rule.action_type.as_db_str();
+        let was_dampened_int: i64 = if was_dampened { 1 } else { 0 };
+        let strikes_at_time_i64 = strikes_at_time_of_auto as i64;
+        let strike_base_i64 = strike_base as i64;
+        let strike_applied_i64 = strike_applied as i64;
+        let reason_codes_json = serde_json::to_string(&rule.reason_codes)
+            .map_err(|e| Error::Signing(format!("serialize policy reason_codes: {e}")))?;
+        let actor_kind_policy = "policy";
+        let synth_actor = crate::policy::automation::SYNTHETIC_POLICY_ACTOR_DID;
+        let auto_inserted_id = sqlx::query_scalar!(
+            "INSERT INTO subject_actions (
+                subject_did, subject_uri, actor_did, action_type, reason_codes,
+                duration, effective_at, expires_at, notes, report_ids,
+                strike_value_base, strike_value_applied, was_dampened,
+                strikes_at_time_of_action, audit_log_id, created_at,
+                actor_kind, triggered_by_policy_rule
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             RETURNING id",
+            subject_did,
+            subject_uri,
+            synth_actor,
+            action_type_str,
+            reason_codes_json,
+            auto_duration_iso,
+            created_at,
+            auto_expires_at,
+            None::<String>,
+            strike_base_i64,
+            strike_applied_i64,
+            was_dampened_int,
+            strikes_at_time_i64,
+            auto_audit_log_id,
+            created_at,
+            actor_kind_policy,
+            rule.name,
+        )
+        .fetch_one(&mut **tx)
+        .await?;
+
+        if auto_inserted_id != predicted_auto_id {
+            return Err(Error::Signing(format!(
+                "policy auto-action inserted at id {auto_inserted_id} but predicted \
+                 {predicted_auto_id}; audit chain captured the predicted id (corrupted)"
+            )));
+        }
+
+        // Emit labels for the auto-action — same path as the
+        // moderator-recorded action's emission. Idempotency
+        // guards from #64 are no-ops on a fresh INSERT.
+        let mut auto_action_label_val: Option<String> = None;
+        for draft in &action_drafts {
+            let event = self
+                .sign_and_persist_label_from_draft(tx, draft, created_at)
+                .await?;
+            if auto_action_label_val.is_none() {
+                auto_action_label_val = Some(draft.val.clone());
+            }
+            label_events.push(event);
+        }
+        if let Some(ref val) = auto_action_label_val {
+            sqlx::query!(
+                "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
+                val,
+                auto_inserted_id,
+            )
+            .execute(&mut **tx)
+            .await?;
+        }
+        for (draft, reason_code) in reason_drafts.iter().zip(rule.reason_codes.iter()) {
+            let event = self
+                .sign_and_persist_label_from_draft(tx, draft, created_at)
+                .await?;
+            sqlx::query!(
+                "INSERT INTO subject_action_reason_labels
+                   (action_id, reason_code, emitted_label_uri, emitted_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                auto_inserted_id,
+                reason_code,
+                draft.val,
+                created_at,
+            )
+            .execute(&mut **tx)
+            .await?;
+            label_events.push(event);
+        }
+
+        Ok(auto_inserted_id)
+    }
+
+    /// Insert a `pending_policy_actions` row for a `mode=flag`
+    /// rule firing (#73, v1.6). The pending row holds the
+    /// proposed action's shape until a moderator confirms (#74)
+    /// or dismisses (#75); no `subject_actions` row, no label
+    /// emission. The precipitating action's audit row already
+    /// cross-references this pending row's id via the
+    /// `policy_consequence` field.
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_pending_policy_action(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        rule: &crate::policy::automation::PolicyRule,
+        subject_did: &str,
+        subject_uri: Option<&str>,
+        triggering_action_id: i64,
+        created_at: i64,
+        predicted_pending_id: i64,
+    ) -> Result<i64> {
+        let action_type_str = rule.action_type.as_db_str();
+        let duration_ms: Option<i64> = match (rule.action_type, rule.duration) {
+            (ActionType::TempSuspension, Some(d)) => Some((d.as_secs() as i64) * 1000),
+            _ => None,
+        };
+        let reason_codes_json = serde_json::to_string(&rule.reason_codes).map_err(|e| {
+            Error::Signing(format!("serialize policy reason_codes for pending: {e}"))
+        })?;
+
+        let inserted_id_opt = sqlx::query_scalar!(
+            r#"INSERT INTO pending_policy_actions (
+                subject_did, subject_uri, action_type, duration_ms,
+                reason_codes, triggered_by_policy_rule, triggered_at,
+                triggering_action_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             RETURNING id AS "id!: i64""#,
+            subject_did,
+            subject_uri,
+            action_type_str,
+            duration_ms,
+            reason_codes_json,
+            rule.name,
+            created_at,
+            triggering_action_id,
+        )
+        .fetch_one(&mut **tx)
+        .await?;
+        let inserted_id: i64 = inserted_id_opt;
+
+        if inserted_id != predicted_pending_id {
+            return Err(Error::Signing(format!(
+                "pending_policy_actions inserted at id {inserted_id} but predicted \
+                 {predicted_pending_id}; policy_consequence reservation diverged"
+            )));
+        }
+        Ok(inserted_id)
+    }
+
     async fn handle_negate(&self, req: NegateLabelRequest) -> Result<LabelEvent> {
         let mut tx = self.pool.begin().await?;
 
@@ -1613,6 +1916,95 @@ impl Writer {
         // captures the action_id IT will reference, computed
         // post-INSERT via the next-id query.
         let next_action_id = predict_next_subject_action_id(&mut tx).await?;
+
+        // ---------- policy evaluation (#73, v1.6) ----------
+        //
+        // Evaluate operator-declared rules BEFORE writing the
+        // precipitating audit row so the audit reason JSON's
+        // `policy_consequence` field can cross-reference the
+        // predicted auto-action id (mode=auto) or the predicted
+        // pending row id (mode=flag). Hash chain locks the
+        // bundle (action + policy consequence) atomically.
+        //
+        // The evaluator is pure — it consumes already-computed
+        // strike states and projections. We construct
+        // `state_after_precip` synthetically (history + the
+        // about-to-INSERT precipitating row's effect) so we can
+        // call into #72 before the row actually lands. This
+        // matches the v1.5 #60 pattern of computing label
+        // drafts pre-INSERT and verifying via the
+        // predict-then-verify dance.
+        let policy_eval_history =
+            load_subject_actions_for_policy_eval(&mut tx, &subject_did).await?;
+        let pending_eval_actions = load_pending_for_policy_eval(&mut tx, &subject_did).await?;
+        let synthetic_precip = ActionRecord {
+            strike_value_applied: strike_applied,
+            effective_at: now_systemtime,
+            revoked_at: None,
+            action_type: req.action_type,
+            expires_at: expires_at.map(epoch_ms_to_systemtime),
+            was_dampened,
+        };
+        let mut history_plus_precip = history.clone();
+        history_plus_precip.push(synthetic_precip);
+        let state_after_precip =
+            calculate_strike_state(&history_plus_precip, &self.strike_policy, now_systemtime);
+
+        // Project the synthetic precipitating action onto
+        // ActionForPolicyEval shape and append to the eval
+        // history; the evaluator's takedown-detection +
+        // idempotency checks include the row that's about to
+        // INSERT (matters when this very recordAction is itself
+        // a takedown — the evaluator returns None immediately).
+        let mut policy_eval_history_plus_precip = policy_eval_history.clone();
+        policy_eval_history_plus_precip.push(crate::policy::evaluator::ActionForPolicyEval {
+            effective_at: now_systemtime,
+            action_type: req.action_type,
+            revoked_at: None,
+            triggered_by_policy_rule: None,
+        });
+
+        let firing_rule = crate::policy::evaluator::resolve_firing_rule(
+            &pre_state,
+            &state_after_precip,
+            &policy_eval_history_plus_precip,
+            &pending_eval_actions,
+            &self.policy_automation_policy,
+        );
+
+        // Reserve IDs + build policy_consequence pointer for the
+        // precipitating audit row. For mode=auto the auto-action
+        // id is `next_action_id + 1` (the writer task is the only
+        // in-process appender, so consecutive INSERTs assign
+        // consecutive ids; the predict-then-verify check below
+        // catches any drift). For mode=flag we predict the next
+        // pending_policy_actions id.
+        let (policy_consequence, predicted_auto_action_id, predicted_pending_id, firing_rule_owned) =
+            if let Some(rule) = firing_rule {
+                match rule.mode {
+                    crate::policy::automation::PolicyMode::Auto => {
+                        let auto_id = next_action_id + 1;
+                        let pc = serde_json::json!({
+                            "rule_fired": rule.name,
+                            "mode": "auto",
+                            "auto_action_id": auto_id,
+                        });
+                        (Some(pc), Some(auto_id), None, Some(rule.clone()))
+                    }
+                    crate::policy::automation::PolicyMode::Flag => {
+                        let pending_id = predict_next_pending_action_id(&mut tx).await?;
+                        let pc = serde_json::json!({
+                            "rule_fired": rule.name,
+                            "mode": "flag",
+                            "pending_action_id": pending_id,
+                        });
+                        (Some(pc), None, Some(pending_id), Some(rule.clone()))
+                    }
+                }
+            } else {
+                (None, None, None, None)
+            };
+
         let audit_reason = build_record_action_audit_reason(
             next_action_id,
             req.action_type,
@@ -1622,6 +2014,9 @@ impl Writer {
             strike_applied,
             was_dampened,
             &emitted_labels_for_audit,
+            "moderator",
+            None,
+            policy_consequence,
         );
         let audit_target = subject_uri.clone().unwrap_or_else(|| subject_did.clone());
         let audit_log_id = crate::audit::append::append_in_tx(
@@ -1641,18 +2036,23 @@ impl Writer {
         // INSERT subject_actions. action_type goes through
         // ActionType::as_db_str so the SQL CHECK constraint binds
         // the same set as the Rust enum.
+        // actor_kind = 'moderator' here — this is the moderator-
+        // recorded path; the policy-recorded path lower in this
+        // function sets 'policy' explicitly.
         let action_type_str = req.action_type.as_db_str();
         let was_dampened_int: i64 = if was_dampened { 1 } else { 0 };
         let strikes_at_time_i64 = strikes_at_time_of_action as i64;
         let strike_base_i64 = strike_base as i64;
         let strike_applied_i64 = strike_applied as i64;
+        let actor_kind_moderator = "moderator";
         let inserted_id = sqlx::query_scalar!(
             "INSERT INTO subject_actions (
                 subject_did, subject_uri, actor_did, action_type, reason_codes,
                 duration, effective_at, expires_at, notes, report_ids,
                 strike_value_base, strike_value_applied, was_dampened,
-                strikes_at_time_of_action, audit_log_id, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                strikes_at_time_of_action, audit_log_id, created_at,
+                actor_kind, triggered_by_policy_rule
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, NULL)
              RETURNING id",
             subject_did,
             subject_uri,
@@ -1670,6 +2070,7 @@ impl Writer {
             strikes_at_time_i64,
             audit_log_id,
             created_at,
+            actor_kind_moderator,
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -1805,8 +2206,53 @@ impl Writer {
             label_events.push(event);
         }
 
+        // ---------- policy consequence (#73, v1.6) ----------
+        //
+        // If a rule fires, this is where the consequence lands —
+        // either a second `subject_actions` row (mode=auto) with
+        // its own audit row + label emission, or a
+        // `pending_policy_actions` row (mode=flag) awaiting
+        // moderator review. All in the same transaction as the
+        // precipitating action; failure rolls everything back.
+        if let Some(rule) = firing_rule_owned.as_ref() {
+            match rule.mode {
+                crate::policy::automation::PolicyMode::Auto => {
+                    let auto_id =
+                        predicted_auto_action_id.expect("auto rule firing reserved an id above");
+                    self.insert_policy_auto_action(
+                        &mut tx,
+                        rule,
+                        &subject_did,
+                        subject_uri.as_deref(),
+                        &history_plus_precip,
+                        &state_after_precip,
+                        now_systemtime,
+                        created_at,
+                        auto_id,
+                        &mut label_events,
+                    )
+                    .await?;
+                }
+                crate::policy::automation::PolicyMode::Flag => {
+                    let pending_id =
+                        predicted_pending_id.expect("flag rule firing reserved an id above");
+                    self.insert_pending_policy_action(
+                        &mut tx,
+                        rule,
+                        &subject_did,
+                        subject_uri.as_deref(),
+                        inserted_id,
+                        created_at,
+                        pending_id,
+                    )
+                    .await?;
+                }
+            }
+        }
+
         // Recompute strike state for the cache. Reload history with
         // the new row so the cache reflects post-insert reality.
+        // Includes the auto-recorded action when one fired.
         let post_history = load_subject_actions_for_calc(&mut tx, &subject_did).await?;
         let post_state = calculate_strike_state(&post_history, &self.strike_policy, now_systemtime);
 
@@ -2352,8 +2798,11 @@ fn build_record_action_audit_reason(
     strike_value_applied: u32,
     was_dampened: bool,
     emitted_labels: &[serde_json::Value],
+    actor_kind: &str,
+    triggered_by_policy_rule: Option<&str>,
+    policy_consequence: Option<serde_json::Value>,
 ) -> String {
-    serde_json::json!({
+    let mut obj = serde_json::json!({
         "action_id": action_id,
         "action_type": action_type.as_db_str(),
         "primary_reason": primary_reason,
@@ -2369,8 +2818,23 @@ fn build_record_action_audit_reason(
         // even though the actual label INSERTs land later in the
         // same tx.
         "emitted_labels": emitted_labels,
-    })
-    .to_string()
+        // v1.6 (#73): provenance discriminator for the recorder
+        // (moderator vs policy engine). Mirrors
+        // subject_actions.actor_kind.
+        "actor_kind": actor_kind,
+    });
+    if let Some(rule_name) = triggered_by_policy_rule {
+        obj["triggered_by_policy_rule"] = serde_json::Value::String(rule_name.to_string());
+    }
+    // v1.6 (#73): when the recorded action crosses a
+    // [policy_automation] threshold, the audit row's reason JSON
+    // gains a `policy_consequence` field cross-referencing the
+    // resulting auto-recorded action OR pending row. Omitted
+    // when no rule fires.
+    if let Some(pc) = policy_consequence {
+        obj["policy_consequence"] = pc;
+    }
+    obj.to_string()
 }
 
 /// `subject_action_revoked` audit reason JSON — see
@@ -2572,6 +3036,19 @@ async fn predict_next_subject_action_id(tx: &mut sqlx::Transaction<'_, Sqlite>) 
     Ok(row.map(|r| r.seq + 1).unwrap_or(1))
 }
 
+/// Predict the next AUTOINCREMENT id for `pending_policy_actions`
+/// (#73, v1.6). Same posture as
+/// [`predict_next_subject_action_id`]: writer task is sole
+/// appender; the predict-then-verify dance catches any race.
+async fn predict_next_pending_action_id(tx: &mut sqlx::Transaction<'_, Sqlite>) -> Result<i64> {
+    let row = sqlx::query!(
+        r#"SELECT seq AS "seq!: i64" FROM sqlite_sequence WHERE name = 'pending_policy_actions'"#
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|r| r.seq + 1).unwrap_or(1))
+}
+
 /// Load subject_actions rows for a subject, oldest-first, projecting
 /// to [`ActionRecord`] for the v1.4 calculators (decay #50,
 /// window #51). Filters to the columns the calculators consume —
@@ -2612,6 +3089,91 @@ async fn load_subject_actions_for_calc(
             action_type,
             expires_at: r.expires_at.map(epoch_ms_to_systemtime),
             was_dampened: r.was_dampened != 0,
+        });
+    }
+    Ok(out)
+}
+
+/// Load subject_actions rows for a subject, oldest-first,
+/// projecting to [`crate::policy::evaluator::ActionForPolicyEval`]
+/// — the policy evaluator (#72) needs `triggered_by_policy_rule`
+/// for idempotency detection but the v1.4 calculators don't.
+/// Separate loader rather than extending [`ActionRecord`] to keep
+/// the calculator-input projection narrow per the §F20 contract.
+async fn load_subject_actions_for_policy_eval(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    subject_did: &str,
+) -> Result<Vec<crate::policy::evaluator::ActionForPolicyEval>> {
+    let rows = sqlx::query!(
+        r#"SELECT
+             action_type AS "action_type!: String",
+             effective_at AS "effective_at!: i64",
+             revoked_at,
+             triggered_by_policy_rule
+           FROM subject_actions
+           WHERE subject_did = ?1
+           ORDER BY id ASC"#,
+        subject_did,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let action_type = ActionType::from_db_str(&r.action_type).ok_or_else(|| {
+            Error::Signing(format!(
+                "subject_actions row has invalid action_type {:?}",
+                r.action_type
+            ))
+        })?;
+        out.push(crate::policy::evaluator::ActionForPolicyEval {
+            effective_at: epoch_ms_to_systemtime(r.effective_at),
+            action_type,
+            revoked_at: r.revoked_at.map(epoch_ms_to_systemtime),
+            triggered_by_policy_rule: r.triggered_by_policy_rule,
+        });
+    }
+    Ok(out)
+}
+
+/// Load pending_policy_actions rows for a subject (oldest-first
+/// by triggered_at), projecting to
+/// [`crate::policy::evaluator::PendingActionForPolicyEval`].
+/// Includes resolved rows so the evaluator's idempotency check
+/// can distinguish unresolved-vs-confirmed-vs-dismissed per
+/// #72's contract.
+async fn load_pending_for_policy_eval(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    subject_did: &str,
+) -> Result<Vec<crate::policy::evaluator::PendingActionForPolicyEval>> {
+    let rows = sqlx::query!(
+        r#"SELECT
+             triggered_by_policy_rule AS "triggered_by_policy_rule!: String",
+             resolution
+           FROM pending_policy_actions
+           WHERE subject_did = ?1
+           ORDER BY triggered_at ASC"#,
+        subject_did,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let resolution = match r.resolution.as_deref() {
+            None => None,
+            Some("confirmed") => Some(crate::policy::evaluator::PendingResolution::Confirmed),
+            Some("dismissed") => Some(crate::policy::evaluator::PendingResolution::Dismissed),
+            Some(other) => {
+                return Err(Error::Signing(format!(
+                    "pending_policy_actions row has invalid resolution {:?}",
+                    other
+                )));
+            }
+        };
+        out.push(crate::policy::evaluator::PendingActionForPolicyEval {
+            triggered_by_policy_rule: r.triggered_by_policy_rule,
+            resolution,
         });
     }
     Ok(out)
@@ -2802,6 +3364,9 @@ mod tests {
             2,
             true,
             &emitted,
+            "moderator",
+            None,
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["action_id"], 42);
@@ -2813,6 +3378,9 @@ mod tests {
         assert_eq!(v["was_dampened"], true);
         assert_eq!(v["emitted_labels"][0]["val"], "!hide");
         assert_eq!(v["emitted_labels"][1]["val"], "reason-spam");
+        assert_eq!(v["actor_kind"], "moderator");
+        assert!(v.get("triggered_by_policy_rule").is_none());
+        assert!(v.get("policy_consequence").is_none());
     }
 
     #[test]
@@ -2826,9 +3394,58 @@ mod tests {
             0,
             false,
             &[],
+            "moderator",
+            None,
+            None,
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["emitted_labels"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn record_action_audit_reason_with_policy_consequence_auto() {
+        let pc = serde_json::json!({
+            "rule_fired": "warn_at_5",
+            "mode": "auto",
+            "auto_action_id": 43,
+        });
+        let json = build_record_action_audit_reason(
+            42,
+            ActionType::Warning,
+            "spam",
+            &["spam".to_string()],
+            0,
+            0,
+            false,
+            &[],
+            "moderator",
+            None,
+            Some(pc),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["policy_consequence"]["rule_fired"], "warn_at_5");
+        assert_eq!(v["policy_consequence"]["mode"], "auto");
+        assert_eq!(v["policy_consequence"]["auto_action_id"], 43);
+    }
+
+    #[test]
+    fn record_action_audit_reason_for_policy_recorded_action() {
+        let json = build_record_action_audit_reason(
+            43,
+            ActionType::Warning,
+            "policy_threshold",
+            &["policy_threshold".to_string()],
+            0,
+            0,
+            false,
+            &[],
+            "policy",
+            Some("warn_at_5"),
+            None,
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["actor_kind"], "policy");
+        assert_eq!(v["triggered_by_policy_rule"], "warn_at_5");
     }
 
     #[test]

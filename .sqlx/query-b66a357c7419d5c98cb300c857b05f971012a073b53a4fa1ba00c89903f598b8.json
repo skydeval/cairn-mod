@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id AS \"id!: i64\",\n             action_type AS \"action_type!: String\",\n             actor_kind AS \"actor_kind!: String\",\n             actor_did AS \"actor_did!: String\",\n             triggered_by_policy_rule\n           FROM subject_actions ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "action_type!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_kind!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "triggered_by_policy_rule",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b66a357c7419d5c98cb300c857b05f971012a073b53a4fa1ba00c89903f598b8"
+}

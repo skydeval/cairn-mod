@@ -90,6 +90,17 @@ where
         .map_err(|e| CliError::Startup(format!("strike policy: {e}")))?;
     let label_emission_policy = crate::labels::policy::LabelEmissionPolicy::from_config(&config)
         .map_err(|e| CliError::Startup(format!("label emission policy: {e}")))?;
+    let policy_automation_policy =
+        crate::policy::automation::PolicyAutomationPolicy::from_config(&config)
+            .map_err(|e| CliError::Startup(format!("policy automation: {e}")))?;
+    // §F22 #71's cross-block check: every rule's reason_codes
+    // must exist in [moderation_reasons]. Config::validate already
+    // ran this once at config load, but repeat here in case the
+    // process was constructed via a different path (test
+    // embedders, future hot-reload).
+    policy_automation_policy
+        .validate_reason_codes_against(&reason_vocabulary)
+        .map_err(|e| CliError::Startup(format!("policy automation: {e}")))?;
 
     let writer = spawn_writer(
         pool.clone(),
@@ -100,6 +111,7 @@ where
         reason_vocabulary,
         strike_policy.clone(),
         label_emission_policy,
+        policy_automation_policy,
     )
     .await
     .map_err(map_spawn_writer_error)?;

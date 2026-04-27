@@ -23,6 +23,7 @@ use cairn_mod::moderation::cache::{
 use cairn_mod::moderation::policy::StrikePolicy;
 use cairn_mod::moderation::reasons::ReasonVocabulary;
 use cairn_mod::moderation::types::ActionType;
+use cairn_mod::policy::automation::PolicyAutomationPolicy;
 use cairn_mod::{ApplyLabelRequest, RecordActionRequest, SigningKey, spawn_writer, storage};
 use sqlx::{Pool, Sqlite};
 use tempfile::TempDir;
@@ -51,6 +52,7 @@ async fn spawn() -> Harness {
         ReasonVocabulary::defaults(),
         StrikePolicy::defaults(),
         LabelEmissionPolicy::defaults(),
+        PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();

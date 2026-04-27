@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_policy_actions (\n                subject_did, subject_uri, action_type, duration_ms,\n                reason_codes, triggered_by_policy_rule, triggered_at,\n                triggering_action_id\n             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)\n             RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "59ed4f4989739257d48a1aef13ae525ffec516edb8f1d4f3ef46d866934d443e"
+}

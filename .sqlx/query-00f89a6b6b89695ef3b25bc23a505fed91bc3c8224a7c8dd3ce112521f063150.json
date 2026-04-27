@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_type AS \"action_type!: String\",\n                  triggered_by_policy_rule\n           FROM subject_actions\n           WHERE actor_kind = 'policy'",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "triggered_by_policy_rule",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "00f89a6b6b89695ef3b25bc23a505fed91bc3c8224a7c8dd3ce112521f063150"
+}

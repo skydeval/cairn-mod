@@ -120,6 +120,7 @@ async fn spawn(config: AdminConfig) -> Harness {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();

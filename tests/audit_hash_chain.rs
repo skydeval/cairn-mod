@@ -52,6 +52,7 @@ async fn apply_label_writes_genesis_chained_audit_row() {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();
@@ -121,6 +122,7 @@ async fn successive_writer_writes_chain_via_prev_hash() {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();
@@ -179,6 +181,7 @@ async fn tampered_row_recomputation_diverges_from_stored_hash() {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();
@@ -290,6 +293,7 @@ async fn writer_task_and_pool_direct_paths_produce_identical_row_hash() {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();

@@ -97,6 +97,7 @@ async fn spawn_cairn() -> CairnHarness {
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
         cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
     )
     .await
     .unwrap();
