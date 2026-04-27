@@ -1311,3 +1311,259 @@ async fn emission_custom_reason_prefix_propagates_to_label_val_and_linkage() {
     assert_eq!(linkage.reason_code, "spam");
     assert_eq!(linkage.emitted_label_uri, "rsn-spam");
 }
+
+// =================== warning/note emission policy (#61, v1.5) ===================
+//
+// Focused integration tests pinning the v1.5 contract for warnings
+// (emit only when policy.warning_emits_label = true) and notes
+// (NEVER emit, regardless of operator config). Sibling to the
+// emission tests above and to #59's pure-function tests in
+// src/labels/emission.rs — this section pins the *recorder's*
+// observable behavior across all the configurations a future
+// editor might accidentally affect.
+//
+// Existing emission tests above already cover:
+//   - emission_warning_default_suppression_emits_no_labels (#1)
+//   - emission_warning_with_flag_emits_action_and_reason_labels (#3)
+//   - emission_note_emits_no_labels (#7 + #10)
+// Tests below close the remaining gaps from the #61 brief.
+//
+// Out of integration scope: the brief's "warning/note with NO
+// reasons" cases (#2, #4, #8) — handle_record_action rejects
+// `reason_codes.is_empty()` upstream of the emission path, by
+// the v1.4 #51 contract that every action_type requires a
+// non-empty reason vector for audit purposes. The empty-reasons
+// branch of resolve_*_labels is exercised by the pure-function
+// tests in `src/labels/emission.rs`, which is the only layer
+// where it's reachable.
+
+/// Assert the action's row + linkage + global label-table state
+/// reflect an "emitted nothing" outcome. Intended for tests that
+/// spawn a fresh harness so the global `SELECT COUNT(*) FROM labels`
+/// is meaningful.
+async fn assert_no_labels_for(h: &Harness, action_id: i64) {
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(
+        row.emitted_label_uri.is_none(),
+        "emitted_label_uri should be NULL when nothing emitted"
+    );
+
+    let linkage_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_action_reason_labels WHERE action_id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(linkage_count, 0, "no subject_action_reason_labels rows");
+
+    let label_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(label_count, 0, "labels table is empty");
+}
+
+/// Fetch and parse the most recent `subject_action_recorded` audit
+/// row's reason JSON.
+async fn latest_record_action_audit_reason(h: &Harness) -> Value {
+    let audit = sqlx::query!(
+        "SELECT reason FROM audit_log
+         WHERE action = 'subject_action_recorded'
+         ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    serde_json::from_str(audit.reason.as_deref().unwrap()).unwrap()
+}
+
+async fn record_warning(h: &Harness, reasons: &[&str]) -> i64 {
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "warning",
+            "reasons": reasons,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap()
+}
+
+async fn record_note(h: &Harness, reasons: &[&str]) -> i64 {
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "note",
+            "reasons": reasons,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn warning_action_label_override_emits_custom_val_and_severity() {
+    // Brief #5: with warning_emits_label = true, an operator-
+    // declared override on the warning action_type is honored —
+    // val + severity from the override flow through to the wire
+    // record. Reason labels still use the default reason path.
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    policy.action_label_overrides.insert(
+        cairn_mod::moderation::types::ActionType::Warning,
+        cairn_mod::LabelSpec {
+            val: "!cairn-house-warn".to_string(),
+            severity: cairn_mod::config::SeverityToml::Alert,
+            blurs: None,
+            locales: vec![],
+        },
+    );
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_warning(&h, &["spam"]).await;
+
+    let labels = sqlx::query!("SELECT val FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(labels[0].val, "!cairn-house-warn");
+    assert_eq!(labels[1].val, "reason-spam");
+
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.emitted_label_uri.as_deref(), Some("!cairn-house-warn"));
+}
+
+#[tokio::test]
+async fn warning_with_flag_but_emit_reasons_false_emits_action_only() {
+    // Brief #6: the two gates compose. warning_emits_label opens
+    // the action gate; emit_reason_labels independently controls
+    // reason emission. With (true, false) we get the action label
+    // and nothing else.
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    policy.emit_reason_labels = false;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_warning(&h, &["spam", "harassment"]).await;
+
+    let labels = sqlx::query!("SELECT val FROM labels")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].val, "!warn");
+
+    let linkage_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_action_reason_labels WHERE action_id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(linkage_count, 0);
+}
+
+#[tokio::test]
+async fn note_with_aggressive_policy_still_emits_nothing() {
+    // Brief #9: defense-in-depth. Even with a policy that *tries*
+    // to enable note emission via every available knob — including
+    // a (future-bug-shaped) action_label_override entry for the
+    // Note action_type — the recorder still emits zero labels.
+    // The Note hard gate in #59's resolve_action_labels +
+    // resolve_reason_labels is the load-bearing rule, and the
+    // recorder must reach it on every code path.
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    policy.emit_reason_labels = true;
+    policy.action_label_overrides.insert(
+        cairn_mod::moderation::types::ActionType::Note,
+        cairn_mod::LabelSpec {
+            val: "!do-not-emit".to_string(),
+            severity: cairn_mod::config::SeverityToml::Alert,
+            blurs: None,
+            locales: vec![],
+        },
+    );
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_note(&h, &["spam", "harassment"]).await;
+    assert_no_labels_for(&h, action_id).await;
+}
+
+#[tokio::test]
+async fn warning_suppressed_audit_log_emitted_labels_is_empty() {
+    // Brief #11: when the warning gate suppresses emission, the
+    // audit row's reason JSON still carries `emitted_labels` as an
+    // empty array. The hash chain locks `[]` — operators reading
+    // the audit log can distinguish "emission was attempted and
+    // suppressed" from older audit rows that predate v1.5.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_warning(&h, &["spam"]).await;
+
+    let reason = latest_record_action_audit_reason(&h).await;
+    assert_eq!(reason["emitted_labels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn note_audit_log_emitted_labels_is_empty_regardless_of_policy() {
+    // Brief #11 (note half): notes never emit, so even under an
+    // aggressive policy the audit_log emitted_labels is empty.
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    policy.emit_reason_labels = true;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_note(&h, &["spam"]).await;
+
+    let reason = latest_record_action_audit_reason(&h).await;
+    assert_eq!(reason["emitted_labels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn warning_emitting_audit_log_carries_action_and_reason_labels() {
+    // Brief #12: when the warning gate opens, the audit row's
+    // emitted_labels list contains both the action label and one
+    // entry per reason_code, in (action-first, reasons-in-order)
+    // sequence — same shape as the takedown happy-path test
+    // higher in this file.
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_warning(&h, &["spam", "harassment"]).await;
+
+    let reason = latest_record_action_audit_reason(&h).await;
+    let emitted = reason["emitted_labels"].as_array().unwrap();
+    assert_eq!(emitted.len(), 3);
+    assert_eq!(emitted[0]["val"], "!warn");
+    assert_eq!(emitted[0]["uri"], SUBJECT_DID);
+    assert_eq!(emitted[1]["val"], "reason-spam");
+    assert_eq!(emitted[2]["val"], "reason-harassment");
+}
