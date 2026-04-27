@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ver AS \"ver!: i64\", src AS \"src!: String\", uri AS \"uri!: String\",\n                  cid, val AS \"val!: String\", neg AS \"neg!: i64\",\n                  cts AS \"cts!: String\", exp, sig AS \"sig!: Vec<u8>\"\n           FROM labels WHERE val = '!takedown'",
+  "describe": {
+    "columns": [
+      {
+        "name": "ver!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "src!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "uri!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "cid",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "val!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "neg!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cts!: String",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "exp",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "sig!: Vec<u8>",
+        "ordinal": 8,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "a1f1c761b0d58a114b86570629f5b4329758355d7850facbedd59cab49b7a75e"
+}

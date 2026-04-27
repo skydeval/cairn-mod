@@ -88,6 +88,8 @@ where
         .map_err(|e| CliError::Startup(format!("moderation reasons: {e}")))?;
     let strike_policy = crate::moderation::policy::StrikePolicy::from_config(&config)
         .map_err(|e| CliError::Startup(format!("strike policy: {e}")))?;
+    let label_emission_policy = crate::labels::policy::LabelEmissionPolicy::from_config(&config)
+        .map_err(|e| CliError::Startup(format!("label emission policy: {e}")))?;
 
     let writer = spawn_writer(
         pool.clone(),
@@ -97,6 +99,7 @@ where
         config.retention.clone().into(),
         reason_vocabulary,
         strike_policy.clone(),
+        label_emission_policy,
     )
     .await
     .map_err(map_spawn_writer_error)?;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason_code, emitted_label_uri FROM subject_action_reason_labels\n         WHERE action_id = ?1 ORDER BY reason_code ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason_code",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "emitted_label_uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7919c942acbf48e2beeeaed7cf6d328403f804d95bac5735e274e5c99cdb4794"
+}

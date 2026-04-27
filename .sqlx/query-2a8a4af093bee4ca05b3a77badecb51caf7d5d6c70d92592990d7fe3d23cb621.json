@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "2a8a4af093bee4ca05b3a77badecb51caf7d5d6c70d92592990d7fe3d23cb621"
+}

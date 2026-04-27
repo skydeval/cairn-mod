@@ -128,6 +128,10 @@ struct Harness {
 }
 
 async fn spawn() -> Harness {
+    spawn_with_policy(cairn_mod::LabelEmissionPolicy::defaults()).await
+}
+
+async fn spawn_with_policy(policy: cairn_mod::LabelEmissionPolicy) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cairn.db");
     let pool = storage::open(&path).await.unwrap();
@@ -139,6 +143,7 @@ async fn spawn() -> Harness {
         cairn_mod::RetentionConfig::default(),
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
+        policy,
     )
     .await
     .unwrap();
@@ -936,4 +941,373 @@ async fn record_n_takedowns(h: &Harness, n: usize, reasons: &[&str]) -> Vec<i64>
         ids.push(id);
     }
     ids
+}
+
+// =================== label emission (#60, v1.5) ===================
+//
+// These tests verify that a successful recordAction call also emits
+// the configured ATProto labels into the `labels` table, populates
+// the per-row linkage state on `subject_actions` /
+// `subject_action_reason_labels`, and captures the same in the
+// audit_log reason JSON. End-to-end: HTTP → admin XRPC → writer
+// task → DB. Same fixture pattern as the v1.4 recordAction tests
+// above; the only added surface is the `spawn_with_policy` variant
+// for non-default `[label_emission]` configurations.
+
+async fn record_takedown(h: &Harness, reasons: &[&str]) -> i64 {
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "takedown",
+            "reasons": reasons,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn emission_takedown_default_policy_writes_action_label_and_reason_labels() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["hate-speech", "harassment"]).await;
+
+    // labels table: one !takedown action label + two reason-* labels.
+    let label_rows = sqlx::query!("SELECT val, uri, neg, src FROM labels ORDER BY seq ASC",)
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(label_rows.len(), 3, "expected 3 emitted labels");
+    assert_eq!(label_rows[0].val, "!takedown");
+    assert_eq!(label_rows[0].uri, SUBJECT_DID);
+    assert_eq!(label_rows[0].neg, 0);
+    assert_eq!(label_rows[0].src, SERVICE_DID);
+    assert_eq!(label_rows[1].val, "reason-hate-speech");
+    assert_eq!(label_rows[2].val, "reason-harassment");
+    for row in &label_rows {
+        assert_eq!(row.uri, SUBJECT_DID, "all labels target the account DID");
+    }
+
+    // subject_actions.emitted_label_uri stores the action label's val.
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.emitted_label_uri.as_deref(), Some("!takedown"));
+
+    // subject_action_reason_labels: one row per reason_code, in order.
+    let linkage = sqlx::query!(
+        "SELECT reason_code, emitted_label_uri FROM subject_action_reason_labels
+         WHERE action_id = ?1 ORDER BY reason_code ASC",
+        action_id,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(linkage.len(), 2);
+    assert_eq!(linkage[0].reason_code, "harassment");
+    assert_eq!(linkage[0].emitted_label_uri, "reason-harassment");
+    assert_eq!(linkage[1].reason_code, "hate-speech");
+    assert_eq!(linkage[1].emitted_label_uri, "reason-hate-speech");
+
+    // audit_log reason JSON captures the emitted_labels list.
+    let audit =
+        sqlx::query!("SELECT reason FROM audit_log WHERE action = 'subject_action_recorded'",)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    let reason: Value = serde_json::from_str(audit.reason.as_deref().unwrap()).unwrap();
+    let emitted = reason["emitted_labels"].as_array().unwrap();
+    assert_eq!(emitted.len(), 3);
+    assert_eq!(emitted[0]["val"], "!takedown");
+    assert_eq!(emitted[1]["val"], "reason-hate-speech");
+    assert_eq!(emitted[2]["val"], "reason-harassment");
+}
+
+#[tokio::test]
+async fn emission_note_emits_no_labels() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "note",
+            "reasons": ["spam"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "note never emits labels");
+
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(row.emitted_label_uri.is_none());
+
+    let linkage_count: i64 =
+        sqlx::query_scalar!("SELECT COUNT(*) FROM subject_action_reason_labels")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(linkage_count, 0);
+}
+
+#[tokio::test]
+async fn emission_warning_default_suppression_emits_no_labels() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "warning",
+            "reasons": ["spam"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "warning suppressed by default emits nothing");
+}
+
+#[tokio::test]
+async fn emission_warning_with_flag_emits_action_and_reason_labels() {
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "warning",
+            "reasons": ["spam"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let label_rows = sqlx::query!("SELECT val FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(label_rows.len(), 2);
+    assert_eq!(label_rows[0].val, "!warn");
+    assert_eq!(label_rows[1].val, "reason-spam");
+}
+
+#[tokio::test]
+async fn emission_temp_suspension_carries_exp_on_all_labels() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let rows = sqlx::query!("SELECT val, exp FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].val, "!hide");
+    assert!(
+        rows[0].exp.is_some(),
+        "temp_suspension action label must carry exp"
+    );
+    assert!(
+        rows[1].exp.is_some(),
+        "temp_suspension reason label must carry the same exp"
+    );
+    assert_eq!(rows[0].exp, rows[1].exp, "shared expiry across the bundle");
+}
+
+#[tokio::test]
+async fn emission_disabled_policy_emits_no_labels() {
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.enabled = false;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_takedown(&h, &["hate-speech"]).await;
+
+    let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "disabled policy must produce zero label rows even on takedown"
+    );
+
+    let action_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM subject_actions")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(action_count, 1, "the action itself still records");
+}
+
+#[tokio::test]
+async fn emission_emit_reason_labels_false_emits_only_action_label() {
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.emit_reason_labels = false;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["hate-speech", "harassment"]).await;
+
+    let rows = sqlx::query!("SELECT val FROM labels")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].val, "!takedown");
+
+    let linkage_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_action_reason_labels WHERE action_id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        linkage_count, 0,
+        "no reason_label linkage when reasons gated"
+    );
+}
+
+#[tokio::test]
+async fn emission_record_subject_label_targets_at_uri_not_did() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let record_uri = format!("at://{SUBJECT_DID}/app.bsky.feed.post/aaa");
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": record_uri,
+            "type": "takedown",
+            "reasons": ["spam"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+
+    let rows = sqlx::query!("SELECT val, uri FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            row.uri, record_uri,
+            "record-subject labels target the AT-URI, not the parent DID"
+        );
+    }
+}
+
+#[tokio::test]
+async fn emission_signed_label_verifies_against_service_did_key() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_takedown(&h, &["spam"]).await;
+
+    // Read the row, reconstruct the wire-level Label, verify the
+    // signature against the service's signing key. End-to-end
+    // pin: the recorder is using the same canonicalization +
+    // signature path as handle_apply.
+    let row = sqlx::query!(
+        r#"SELECT ver AS "ver!: i64", src AS "src!: String", uri AS "uri!: String",
+                  cid, val AS "val!: String", neg AS "neg!: i64",
+                  cts AS "cts!: String", exp, sig AS "sig!: Vec<u8>"
+           FROM labels WHERE val = '!takedown'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let mut label = cairn_mod::Label {
+        ver: row.ver,
+        src: row.src,
+        uri: row.uri,
+        cid: row.cid,
+        val: row.val,
+        neg: row.neg != 0,
+        cts: row.cts,
+        exp: row.exp,
+        sig: None,
+    };
+    let sig: [u8; 64] = row.sig.as_slice().try_into().unwrap();
+    label.sig = Some(sig);
+    let multibase = format_multikey("ES256K", &test_keypair().public_key_compressed());
+    cairn_mod::verify_label(&multibase, &label).expect("signature verifies");
+}
+
+#[tokio::test]
+async fn emission_custom_reason_prefix_propagates_to_label_val_and_linkage() {
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.reason_label_prefix = "rsn-".to_string();
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["spam"]).await;
+
+    let rows = sqlx::query!("SELECT val FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].val, "!takedown");
+    assert_eq!(rows[1].val, "rsn-spam");
+
+    // Linkage stores the prefixed val in emitted_label_uri but
+    // the bare reason_code in reason_code (so revocation can
+    // re-prefix when emitting negation labels).
+    let linkage = sqlx::query!(
+        "SELECT reason_code, emitted_label_uri FROM subject_action_reason_labels
+         WHERE action_id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(linkage.reason_code, "spam");
+    assert_eq!(linkage.emitted_label_uri, "rsn-spam");
 }

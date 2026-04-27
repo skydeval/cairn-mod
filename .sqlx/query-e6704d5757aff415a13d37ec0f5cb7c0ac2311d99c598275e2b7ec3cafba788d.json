@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subject_action_reason_labels\n                   (action_id, reason_code, emitted_label_uri, emitted_at)\n                 VALUES (?1, ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "e6704d5757aff415a13d37ec0f5cb7c0ac2311d99c598275e2b7ec3cafba788d"
+}

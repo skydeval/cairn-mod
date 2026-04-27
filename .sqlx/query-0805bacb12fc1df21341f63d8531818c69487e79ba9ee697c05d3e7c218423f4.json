@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT val, uri FROM labels ORDER BY seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "val",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0805bacb12fc1df21341f63d8531818c69487e79ba9ee697c05d3e7c218423f4"
+}

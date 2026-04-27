@@ -16,6 +16,7 @@
 use std::time::{Duration, SystemTime};
 
 use cairn_mod::error::Error;
+use cairn_mod::labels::policy::LabelEmissionPolicy;
 use cairn_mod::moderation::cache::{
     cache_is_fresh, get_or_recompute_strike_count, load_cache, update_cache,
 };
@@ -49,6 +50,7 @@ async fn spawn() -> Harness {
         cairn_mod::RetentionConfig::default(),
         ReasonVocabulary::defaults(),
         StrikePolicy::defaults(),
+        LabelEmissionPolicy::defaults(),
     )
     .await
     .unwrap();

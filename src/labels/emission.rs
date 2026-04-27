@@ -115,6 +115,15 @@ pub struct ActionForEmission {
     /// `[moderation_reasons]` vocabulary (#47). Drives the reason
     /// labels emitted alongside the action label.
     pub reason_codes: Vec<String>,
+    /// CID for record-level subjects. Caller-supplied — the
+    /// emission core does not resolve CIDs from the network. For
+    /// account-level subjects, this is `None`. For record-level
+    /// subjects (`subject_uri = Some(at://...)`), the recorder
+    /// (#60) populates this from whatever source-of-truth it has
+    /// at record time (typically the moderator's input). v1.5 also
+    /// allows `None` here for record-level subjects — the protocol
+    /// permits record-level labels without CID, just less specific.
+    pub cid: Option<String>,
 }
 
 /// Unsigned label record produced by the emission core. The
@@ -285,6 +294,7 @@ mod tests {
             subject_did: SUBJECT_DID.to_string(),
             subject_uri: None,
             reason_codes: reasons.iter().map(|s| s.to_string()).collect(),
+            cid: None,
         }
     }
 
@@ -295,6 +305,7 @@ mod tests {
             subject_did: SUBJECT_DID.to_string(),
             subject_uri: Some(SUBJECT_URI.to_string()),
             reason_codes: reasons.iter().map(|s| s.to_string()).collect(),
+            cid: None,
         }
     }
 
@@ -305,6 +316,7 @@ mod tests {
             subject_did: SUBJECT_DID.to_string(),
             subject_uri: None,
             reason_codes: reasons.iter().map(|s| s.to_string()).collect(),
+            cid: None,
         }
     }
 
@@ -424,6 +436,7 @@ mod tests {
             subject_did: SUBJECT_DID.to_string(),
             subject_uri: None,
             reason_codes: vec![],
+            cid: None,
         };
         let out = resolve_action_labels(&action, &p, t0());
         assert_eq!(out.len(), 1);

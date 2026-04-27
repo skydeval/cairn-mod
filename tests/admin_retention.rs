@@ -128,6 +128,7 @@ async fn spawn_with_retention(retention_days: Option<u32>) -> Harness {
         },
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
+        cairn_mod::LabelEmissionPolicy::defaults(),
     )
     .await
     .unwrap();

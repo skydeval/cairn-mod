@@ -51,6 +51,9 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::label::Label;
+use crate::labels::emission::{
+    ActionForEmission, LabelDraft, resolve_action_labels, resolve_reason_labels,
+};
 use crate::moderation::decay::calculate_strike_state;
 use crate::moderation::policy::StrikePolicy;
 use crate::moderation::reasons::ReasonVocabulary;
@@ -722,6 +725,13 @@ impl WriterHandle {
 /// the recorder doesn't have to thread them through every call.
 /// Operators restart `cairn serve` to change either — same posture
 /// as `[labeler]` config.
+///
+/// `label_emission_policy` is the resolved `[label_emission]`
+/// surface (#58, v1.5). The recorder (#60) consults it post-INSERT
+/// to translate the freshly-recorded action into ATProto labels
+/// emitted in the same transaction. Held by the writer task for
+/// the same reason as the v1.4 surfaces above.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn(
     pool: Pool<Sqlite>,
     key: SigningKey,
@@ -730,6 +740,7 @@ pub async fn spawn(
     retention: RetentionConfig,
     reason_vocabulary: ReasonVocabulary,
     strike_policy: StrikePolicy,
+    label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
 ) -> Result<WriterHandle> {
     let instance_id = acquire_lease(&pool).await?;
     let signing_key_id = ensure_signing_key_row(&pool, &key).await?;
@@ -751,6 +762,7 @@ pub async fn spawn(
         retention,
         reason_vocabulary,
         strike_policy,
+        label_emission_policy,
     };
 
     tokio::spawn(writer.run());
@@ -786,6 +798,10 @@ struct Writer {
     /// handler for the dampening curve, threshold, and decay
     /// parameters.
     strike_policy: StrikePolicy,
+    /// Resolved [label_emission] (#58, v1.5). Consulted by the
+    /// RecordAction handler post-INSERT to translate the action into
+    /// ATProto labels, emitted in the same tx.
+    label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
 }
 
 /// Internal accumulator for an in-flight scheduled sweep. Lives only
@@ -1067,6 +1083,60 @@ impl Writer {
         req: &ApplyLabelRequest,
         created_at_ms: i64,
     ) -> Result<LabelEvent> {
+        let event = self
+            .sign_and_persist_label(
+                tx,
+                &req.val,
+                &req.uri,
+                req.cid.as_deref(),
+                false,
+                req.exp.as_deref(),
+                created_at_ms,
+            )
+            .await?;
+
+        let audit_reason = build_audit_reason(&req.val, false, req.moderator_reason.as_deref());
+        crate::audit::append::append_in_tx(
+            tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: created_at_ms,
+                action: "label_applied".into(),
+                actor_did: req.actor_did.clone(),
+                target: Some(req.uri.clone()),
+                target_cid: req.cid.clone(),
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        Ok(event)
+    }
+
+    /// Tx-scoped sign-and-persist core for one label row: reserve
+    /// seq → fetch prev cts → clamp → build wire-level [`Label`] →
+    /// sign → INSERT into `labels`. Returns the seq + signed label.
+    /// Does NOT write audit rows and does NOT broadcast — callers
+    /// own both (the post-tx broadcast and any audit row layered
+    /// over the bare label INSERT).
+    ///
+    /// Reused by [`Self::apply_label_inner`] (which adds a
+    /// `label_applied` audit row) and by
+    /// [`Self::handle_record_action`] (which writes one consolidated
+    /// `subject_action_recorded` audit row capturing the action plus
+    /// every emitted label, rather than per-label rows). Both reach
+    /// it only from the single writer task, preserving §F5.
+    #[allow(clippy::too_many_arguments)]
+    async fn sign_and_persist_label(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        val: &str,
+        uri: &str,
+        cid: Option<&str>,
+        neg: bool,
+        exp: Option<&str>,
+        created_at_ms: i64,
+    ) -> Result<LabelEvent> {
         let seq = reserve_seq(tx).await?;
         let prev_cts: Option<String> = sqlx::query_scalar!(
             // sqlx type override — MAX() strips column origin metadata so
@@ -1075,29 +1145,34 @@ impl Writer {
             r#"SELECT MAX(cts) AS "max_cts?: String" FROM labels
                WHERE src = ?1 AND uri = ?2 AND val = ?3"#,
             self.service_did,
-            req.uri,
-            req.val,
+            uri,
+            val,
         )
         .fetch_one(&mut **tx)
         .await?;
 
         let cts = clamp_cts(created_at_ms, prev_cts.as_deref())?;
 
+        let cid_owned = cid.map(str::to_string);
+        let exp_owned = exp.map(str::to_string);
+        let val_owned = val.to_string();
+        let uri_owned = uri.to_string();
+
         let mut label = Label {
             ver: 1,
             src: self.service_did.clone(),
-            uri: req.uri.clone(),
-            cid: req.cid.clone(),
-            val: req.val.clone(),
-            neg: false,
-            cts: cts.clone(),
-            exp: req.exp.clone(),
+            uri: uri_owned,
+            cid: cid_owned,
+            val: val_owned,
+            neg,
+            cts,
+            exp: exp_owned,
             sig: None,
         };
         label.sig = Some(sign_label(&self.key, &label)?);
         let sig_bytes = label.sig.expect("just set").to_vec();
 
-        let neg_int: i64 = 0;
+        let neg_int: i64 = if neg { 1 } else { 0 };
         sqlx::query!(
             "INSERT INTO labels (seq, ver, src, uri, cid, val, neg, cts, exp, sig, signing_key_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -1117,22 +1192,40 @@ impl Writer {
         .execute(&mut **tx)
         .await?;
 
-        let audit_reason = build_audit_reason(&req.val, false, req.moderator_reason.as_deref());
-        crate::audit::append::append_in_tx(
-            tx,
-            &crate::audit::append::AuditRowForAppend {
-                created_at: created_at_ms,
-                action: "label_applied".into(),
-                actor_did: req.actor_did.clone(),
-                target: Some(req.uri.clone()),
-                target_cid: req.cid.clone(),
-                outcome: "success".into(),
-                reason: Some(audit_reason),
-            },
-        )
-        .await?;
-
         Ok(LabelEvent { seq, label })
+    }
+
+    /// Tx-scoped wrapper around [`Self::sign_and_persist_label`] that
+    /// converts a [`LabelDraft`] (the emission core's purpose-shaped
+    /// output, with `cts/exp` as `SystemTime`) into the wire-level
+    /// arguments. Used by [`Self::handle_record_action`] to sign +
+    /// persist every draft produced by `resolve_action_labels` /
+    /// `resolve_reason_labels`. The draft's `cts` is informational
+    /// here — the actual cts on the labels row comes from
+    /// `clamp_cts(created_at_ms, prev_cts)` inside
+    /// [`Self::sign_and_persist_label`]. In v1.5 the recorder calls
+    /// the resolvers with `now = effective_at`, so the two are
+    /// equal pre-clamp.
+    async fn sign_and_persist_label_from_draft(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+        draft: &LabelDraft,
+        created_at_ms: i64,
+    ) -> Result<LabelEvent> {
+        let exp_str = match draft.exp {
+            Some(st) => Some(rfc3339_from_epoch_ms(systemtime_to_epoch_ms(st)?)?),
+            None => None,
+        };
+        self.sign_and_persist_label(
+            tx,
+            &draft.val,
+            &draft.uri,
+            draft.cid.as_deref(),
+            draft.neg,
+            exp_str.as_deref(),
+            created_at_ms,
+        )
+        .await
     }
 
     async fn handle_negate(&self, req: NegateLabelRequest) -> Result<LabelEvent> {
@@ -1454,6 +1547,41 @@ impl Writer {
             _ => (calc.base_weight, calc.applied, calc.was_dampened),
         };
 
+        // Compute label-emission drafts before the audit row so the
+        // audit reason JSON captures every (val, uri) tuple this
+        // action will produce. The drafts are pure data — no I/O,
+        // no signing — so committing them to the audit row before
+        // signing is safe; the actual label INSERTs land below in
+        // the same tx, and any failure rolls everything back.
+        //
+        // LabelDraft.cid is None for v1.5: subject CIDs aren't yet
+        // plumbed through RecordActionRequest. The
+        // ActionForEmission.cid field is reserved for the wiring a
+        // future ticket adds via admin XRPC + CLI.
+        let action_for_emission = ActionForEmission {
+            action_type: req.action_type,
+            expires_at: expires_at.map(epoch_ms_to_systemtime),
+            subject_did: subject_did.clone(),
+            subject_uri: subject_uri.clone(),
+            reason_codes: req.reason_codes.clone(),
+            cid: None,
+        };
+        let action_drafts = resolve_action_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let reason_drafts = resolve_reason_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let emitted_labels_for_audit: Vec<serde_json::Value> = action_drafts
+            .iter()
+            .chain(reason_drafts.iter())
+            .map(|d| serde_json::json!({"val": d.val, "uri": d.uri}))
+            .collect();
+
         // Build audit_log reason JSON before the INSERT so the
         // audit row can carry the resolved values for forensic
         // reconstruction.
@@ -1492,6 +1620,7 @@ impl Writer {
             strike_base,
             strike_applied,
             was_dampened,
+            &emitted_labels_for_audit,
         );
         let audit_target = subject_uri.clone().unwrap_or_else(|| subject_did.clone());
         let audit_log_id = crate::audit::append::append_in_tx(
@@ -1555,6 +1684,71 @@ impl Writer {
             )));
         }
 
+        // ---------- emission (#60, v1.5) ----------
+        //
+        // Sign + persist each draft (action label first so its
+        // seq < reason labels'), then UPDATE
+        // subject_actions.emitted_label_uri, then write per-reason
+        // linkage rows. All in the same tx as the action INSERT
+        // and the audit row. Failure here rolls back everything
+        // up to and including the audit row, so the audit chain
+        // never claims emission that didn't happen.
+        //
+        // Empty action_drafts (note / suppressed warning / policy
+        // disabled) cleanly short-circuits both loops, leaves
+        // emitted_label_uri NULL, and writes no reason-label
+        // linkage rows — the action still records, just without
+        // an ATProto label tail.
+        let mut label_events: Vec<LabelEvent> =
+            Vec::with_capacity(action_drafts.len() + reason_drafts.len());
+        let mut action_label_val: Option<String> = None;
+        for draft in &action_drafts {
+            let event = self
+                .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
+                .await?;
+            if action_label_val.is_none() {
+                action_label_val = Some(draft.val.clone());
+            }
+            label_events.push(event);
+        }
+
+        if let Some(ref val) = action_label_val {
+            // emitted_label_uri stores the action label's `val`,
+            // not a URI: ATProto labels have no canonical URI; the
+            // discriminator within (src=service_did, uri=subject,
+            // val) is just the val. Column name predates the
+            // realization (#57); locked once shipped.
+            sqlx::query!(
+                "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
+                val,
+                inserted_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Per-(action, reason) linkage rows. resolve_reason_labels
+        // emits drafts in `reason_codes` order, so a parallel
+        // iteration recovers the source reason_code without
+        // re-parsing the label val.
+        for (draft, reason_code) in reason_drafts.iter().zip(req.reason_codes.iter()) {
+            let event = self
+                .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
+                .await?;
+            sqlx::query!(
+                "INSERT INTO subject_action_reason_labels
+                   (action_id, reason_code, emitted_label_uri, emitted_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                inserted_id,
+                reason_code,
+                draft.val,
+                effective_at,
+            )
+            .execute(&mut *tx)
+            .await?;
+            label_events.push(event);
+        }
+
         // Recompute strike state for the cache. Reload history with
         // the new row so the cache reflects post-insert reality.
         let post_history = load_subject_actions_for_calc(&mut tx, &subject_did).await?;
@@ -1576,6 +1770,14 @@ impl Writer {
         .await?;
 
         tx.commit().await?;
+
+        // Broadcast each emitted label to subscribeLabels consumers.
+        // Order matches the persistence order (action label first,
+        // then reasons). No-receivers is not a write failure
+        // (§plan point G).
+        for event in label_events {
+            let _ = self.broadcast_tx.send(event);
+        }
 
         Ok(RecordedAction {
             action_id: inserted_id,
@@ -1946,6 +2148,7 @@ pub(crate) fn build_flag_reporter_audit_reason(
 
 /// `subject_action_recorded` audit reason JSON — see
 /// [`AUDIT_REASON_RECORD_ACTION`] for the schema.
+#[allow(clippy::too_many_arguments)]
 fn build_record_action_audit_reason(
     action_id: i64,
     action_type: ActionType,
@@ -1954,6 +2157,7 @@ fn build_record_action_audit_reason(
     strike_value_base: u32,
     strike_value_applied: u32,
     was_dampened: bool,
+    emitted_labels: &[serde_json::Value],
 ) -> String {
     serde_json::json!({
         "action_id": action_id,
@@ -1963,6 +2167,14 @@ fn build_record_action_audit_reason(
         "strike_value_base": strike_value_base,
         "strike_value_applied": strike_value_applied,
         "was_dampened": was_dampened,
+        // v1.5 (#60): every emitted label as `{val, uri}`. Empty
+        // when [label_emission].enabled = false, when the action
+        // type is `note`, or when `warning` with the default
+        // suppression gate. Captured pre-INSERT so the audit
+        // hash chain locks the entire (action, labels) bundle
+        // even though the actual label INSERTs land later in the
+        // same tx.
+        "emitted_labels": emitted_labels,
     })
     .to_string()
 }
@@ -1987,6 +2199,18 @@ fn epoch_ms_to_systemtime(ms: i64) -> SystemTime {
     } else {
         UNIX_EPOCH
     }
+}
+
+/// Inverse of [`epoch_ms_to_systemtime`]. Used by the emission
+/// path (#60) to translate a [`LabelDraft`]'s `exp: SystemTime`
+/// into the i64 ms that [`rfc3339_from_epoch_ms`] formats. Errors
+/// when the value pre-dates UNIX_EPOCH — the emission core never
+/// produces such a value (caller-supplied `expires_at` is
+/// epoch-ms-derived), so this should be unreachable in practice.
+fn systemtime_to_epoch_ms(st: SystemTime) -> Result<i64> {
+    st.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .map_err(|e| Error::Signing(format!("SystemTime before unix epoch: {e}")))
 }
 
 /// Route a subject string into (subject_did, subject_uri) per the
@@ -2352,6 +2576,10 @@ mod tests {
 
     #[test]
     fn record_action_audit_reason_shape() {
+        let emitted = vec![
+            serde_json::json!({"val": "!hide", "uri": "did:plc:subject0000000000000000"}),
+            serde_json::json!({"val": "reason-spam", "uri": "did:plc:subject0000000000000000"}),
+        ];
         let json = build_record_action_audit_reason(
             42,
             ActionType::TempSuspension,
@@ -2360,6 +2588,7 @@ mod tests {
             4,
             2,
             true,
+            &emitted,
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["action_id"], 42);
@@ -2369,6 +2598,24 @@ mod tests {
         assert_eq!(v["strike_value_base"], 4);
         assert_eq!(v["strike_value_applied"], 2);
         assert_eq!(v["was_dampened"], true);
+        assert_eq!(v["emitted_labels"][0]["val"], "!hide");
+        assert_eq!(v["emitted_labels"][1]["val"], "reason-spam");
+    }
+
+    #[test]
+    fn record_action_audit_reason_empty_emitted_labels() {
+        let json = build_record_action_audit_reason(
+            7,
+            ActionType::Note,
+            "spam",
+            &["spam".to_string()],
+            0,
+            0,
+            false,
+            &[],
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["emitted_labels"], serde_json::json!([]));
     }
 
     #[test]

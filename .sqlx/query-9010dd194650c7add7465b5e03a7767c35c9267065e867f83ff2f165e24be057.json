@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT val, uri, neg, src FROM labels ORDER BY seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "val",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "neg",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "src",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "9010dd194650c7add7465b5e03a7767c35c9267065e867f83ff2f165e24be057"
+}

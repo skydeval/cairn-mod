@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT val, exp FROM labels ORDER BY seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "val",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "exp",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "338a331ca3f3dd93119ed1d7b370b4b28d9b5e91a98d6a03a562b9480d4a5d3b"
+}

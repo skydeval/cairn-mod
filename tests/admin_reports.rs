@@ -121,6 +121,7 @@ async fn spawn(admin_cfg: AdminConfig) -> Harness {
         cairn_mod::RetentionConfig::default(),
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
+        cairn_mod::LabelEmissionPolicy::defaults(),
     )
     .await
     .unwrap();
@@ -166,6 +167,7 @@ async fn spawn_full() -> FullHarness {
         cairn_mod::RetentionConfig::default(),
         cairn_mod::ReasonVocabulary::defaults(),
         cairn_mod::StrikePolicy::defaults(),
+        cairn_mod::LabelEmissionPolicy::defaults(),
     )
     .await
     .unwrap();
