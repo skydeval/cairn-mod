@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.public.getMyStrikeState",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Return the calling DID's currently-active strike state (#54). Establishes the tools.cairn.public.* namespace: ATProto service auth required, but authorization is self-identity — the verified `iss` IS the subject. There is intentionally no `subject` parameter; if you need to query someone else's state you need admin/mod role on tools.cairn.admin.getSubjectStrikes. Same wire shape as the admin endpoint via cross-namespace ref.",
+      "parameters": {
+        "type": "params",
+        "properties": {}
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#subjectStrikeState"
+        }
+      },
+      "errors": [
+        {
+          "name": "SubjectNotFound",
+          "description": "No subject_actions row has ever been recorded for the calling DID. Same semantic as the admin endpoint."
+        }
+      ]
+    }
+  }
+}

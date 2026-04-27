@@ -37,13 +37,16 @@ mod create_report;
 pub mod did_document;
 pub mod health;
 pub mod limits;
+pub mod public;
 mod query;
+pub(crate) mod strike_state;
 pub(crate) mod subscribe;
 pub mod wellknown;
 pub mod xrpc;
 
 pub use admin::{AdminConfig, admin_router};
 pub use create_report::{CreateReportConfig, create_report_router};
+pub use public::public_router;
 pub use subscribe::current_retention_floor;
 
 /// Sweep-execution policy for the subscribeLabels retention sweep (§F4

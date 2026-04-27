@@ -136,23 +136,3 @@ pub(super) fn project(row: SubjectActionRow) -> Result<SubjectActionEntry> {
         created_at: rfc3339_from_epoch_ms(row.created_at)?,
     })
 }
-
-/// Whether any `subject_actions` row exists for this DID. Used by
-/// the read endpoints to surface SubjectNotFound (404) when the
-/// subject has never been actioned, distinct from "actioned but
-/// filtered to empty" (which returns 200 with an empty array).
-pub(super) async fn subject_has_history(
-    pool: &sqlx::Pool<sqlx::Sqlite>,
-    subject_did: &str,
-) -> Result<bool> {
-    // The partial index `subject_actions_subject_idx` makes this
-    // O(1) on the typical SELECT. Using EXISTS rather than COUNT to
-    // short-circuit on the first matching row.
-    let row = sqlx::query!(
-        r#"SELECT EXISTS(SELECT 1 FROM subject_actions WHERE subject_did = ?1) AS "exists!: i64""#,
-        subject_did,
-    )
-    .fetch_one(pool)
-    .await?;
-    Ok(row.exists != 0)
-}

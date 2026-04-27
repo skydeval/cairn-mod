@@ -44,7 +44,7 @@ pub use moderation::reasons::ReasonVocabulary;
 pub use server::{
     AdminConfig, CreateReportConfig, RetentionConfig, SubscribeConfig, admin_router,
     create_report_router, current_retention_floor, did_document_router, health_router,
-    router as subscribe_router, serve, wellknown_router,
+    public_router, router as subscribe_router, serve, wellknown_router,
 };
 pub use signing::{canonical_bytes, label_to_lex_value_with_sig, sign_label, verify_label};
 pub use signing_key::SigningKey;

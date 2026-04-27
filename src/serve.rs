@@ -32,8 +32,8 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::signing_key::SigningKey;
 use crate::{
-    admin_router, create_report_router, did_document_router, health_router, spawn_writer, storage,
-    subscribe_router, wellknown_router,
+    admin_router, create_report_router, did_document_router, health_router, public_router,
+    spawn_writer, storage, subscribe_router, wellknown_router,
 };
 
 /// How long we give in-flight handlers to drain after the shutdown
@@ -161,6 +161,11 @@ where
         pool.clone(),
         writer.clone(),
         crate::SubscribeConfig::default(),
+    ))
+    .merge(public_router(
+        pool.clone(),
+        auth.clone(),
+        strike_policy.clone(),
     ))
     .merge(wellknown_router())
     .merge(did_document_router(pool.clone(), config.clone()))

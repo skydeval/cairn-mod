@@ -1,9 +1,18 @@
 //! Embedded lexicon bundle + `.well-known/lexicons/…` endpoint (§8 + §F13).
 //!
-//! Cairn's custom lexicons live in the repo at
-//! `lexicons/tools/cairn/admin/*.json`. They are bundled into the
-//! binary via [`include_dir::include_dir!`] so a cargo-installed
+//! Cairn's custom lexicons live in the repo under
+//! `lexicons/tools/cairn/{admin,public}/*.json`. They are bundled into
+//! the binary via [`include_dir::include_dir!`] so a cargo-installed
 //! `cairn` carries authoritative schema even when offline.
+//!
+//! Two namespaces, two bundles:
+//! - `tools.cairn.admin.*` — moderator/operator endpoints.
+//! - `tools.cairn.public.*` — user-facing endpoints (#54+).
+//!
+//! Both share the same on-disk + over-the-wire posture: schemas
+//! are public, unauthenticated, CORS-open. The split exists so the
+//! lexicon ID structure mirrors the Rust module structure
+//! (`src/server/admin/` vs `src/server/public/`).
 //!
 //! **Two canonical serving locations.** §8 pins
 //! `https://cairn.tools/.well-known/lexicons/tools/cairn/admin/{name}.json`
@@ -40,16 +49,28 @@ use serde_json::json;
 /// new `.json` file to that directory is picked up on the next
 /// build; forgetting to register it is impossible — the compiler is
 /// the forcing function, not a test.
+///
+/// Aliased as `LEXICON_BUNDLE` for callers that pre-date the
+/// `tools.cairn.public.*` split (#54).
 pub const LEXICON_BUNDLE: Dir<'static> =
     include_dir!("$CARGO_MANIFEST_DIR/lexicons/tools/cairn/admin");
 
-/// The NSID prefix every bundled lexicon must share. Checked at
-/// build time (via the unit test below) and at runtime lookup.
+/// Compile-time snapshot of `lexicons/tools/cairn/public/` (#54).
+/// Same posture as [`LEXICON_BUNDLE`] but for the user-facing
+/// namespace.
+pub const LEXICON_BUNDLE_PUBLIC: Dir<'static> =
+    include_dir!("$CARGO_MANIFEST_DIR/lexicons/tools/cairn/public");
+
+/// The NSID prefix every admin-bundled lexicon must share. Checked
+/// at build time (via the unit test below) and at runtime lookup.
 pub const LEXICON_NSID_PREFIX: &str = "tools.cairn.admin";
 
-/// Expected bundle contents — the §8 set plus retentionSweep (#12,
-/// §F4). The unit tests below assert set-equality so an accidental
-/// file addition or removal surfaces immediately.
+/// The NSID prefix every public-bundled lexicon must share (#54).
+pub const LEXICON_NSID_PREFIX_PUBLIC: &str = "tools.cairn.public";
+
+/// Expected admin-bundle contents — the §8 set plus retentionSweep
+/// (#12, §F4). The unit tests below assert set-equality so an
+/// accidental file addition or removal surfaces immediately.
 pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "applyLabel",
     "defs",
@@ -69,6 +90,10 @@ pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "revokeAction",
 ];
 
+/// Expected public-bundle contents (#54). v1.4 ships with one
+/// public endpoint; future user-facing endpoints land here.
+pub const EXPECTED_LEXICON_STEMS_PUBLIC: &[&str] = &["getMyStrikeState"];
+
 /// Build a router exposing the `.well-known/lexicons/…` read endpoint.
 /// The router carries no state — all lookups hit [`LEXICON_BUNDLE`].
 ///
@@ -76,23 +101,36 @@ pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
 /// [`crate::server::admin_router`] and the other per-feature
 /// routers when the `cairn serve` binary lands.
 pub fn wellknown_router() -> Router {
-    Router::new().route(
-        "/.well-known/lexicons/tools/cairn/admin/{name}",
-        get(serve_lexicon),
-    )
+    Router::new()
+        .route(
+            "/.well-known/lexicons/tools/cairn/admin/{name}",
+            get(serve_admin_lexicon),
+        )
+        .route(
+            "/.well-known/lexicons/tools/cairn/public/{name}",
+            get(serve_public_lexicon),
+        )
 }
 
-/// Return the embedded JSON for `tools.cairn.admin.<stem>` where
-/// `{name}` is `<stem>.json`. Anything else is 404 — we do not
-/// serve extension-less aliases or alternate NSID trees.
-async fn serve_lexicon(Path(name): Path<String>) -> Response {
+/// Serve a JSON file from the admin lexicon bundle. Path pattern
+/// already pins the namespace; the handler just looks up `{stem}.json`.
+async fn serve_admin_lexicon(Path(name): Path<String>) -> Response {
+    serve_from_bundle(&LEXICON_BUNDLE, &name)
+}
+
+/// Serve a JSON file from the public lexicon bundle (#54).
+async fn serve_public_lexicon(Path(name): Path<String>) -> Response {
+    serve_from_bundle(&LEXICON_BUNDLE_PUBLIC, &name)
+}
+
+/// Shared bundle-lookup. Returns 404 for missing extension or
+/// missing file.
+fn serve_from_bundle(bundle: &Dir<'static>, name: &str) -> Response {
     let Some(stem) = name.strip_suffix(".json") else {
         return not_found();
     };
-    // The route pattern already pins `tools/cairn/admin/` as the
-    // path prefix, so the lookup file is just `{stem}.json`.
     let file_name = format!("{stem}.json");
-    let Some(file) = LEXICON_BUNDLE.get_file(&file_name) else {
+    let Some(file) = bundle.get_file(&file_name) else {
         return not_found();
     };
     (
@@ -179,6 +217,65 @@ mod tests {
             assert_eq!(
                 id, expected,
                 "lexicon file {stem}.json has id {id:?}; expected {expected:?}"
+            );
+        }
+    }
+
+    // ---------- public bundle (#54) ----------
+
+    #[test]
+    fn public_bundle_contains_exactly_the_expected_set() {
+        let have: BTreeSet<String> = LEXICON_BUNDLE_PUBLIC
+            .files()
+            .map(|f| {
+                f.path()
+                    .file_name()
+                    .expect("file in public bundle")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let want: BTreeSet<String> = EXPECTED_LEXICON_STEMS_PUBLIC
+            .iter()
+            .map(|s| format!("{s}.json"))
+            .collect();
+        assert_eq!(
+            have, want,
+            "public lexicon set drifted from EXPECTED_LEXICON_STEMS_PUBLIC"
+        );
+    }
+
+    #[test]
+    fn every_public_bundled_file_parses_as_json() {
+        for file in LEXICON_BUNDLE_PUBLIC.files() {
+            let contents = file.contents();
+            serde_json::from_slice::<Value>(contents).unwrap_or_else(|e| {
+                panic!(
+                    "public lexicon {} does not parse as JSON: {e}",
+                    file.path().display()
+                )
+            });
+        }
+    }
+
+    #[test]
+    fn every_public_lexicon_id_matches_its_filename_stem() {
+        for file in LEXICON_BUNDLE_PUBLIC.files() {
+            let stem = file
+                .path()
+                .file_stem()
+                .expect("file has stem")
+                .to_string_lossy()
+                .into_owned();
+            let doc: Value = serde_json::from_slice(file.contents()).unwrap();
+            let id = doc
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("public file {stem}.json missing top-level id"));
+            let expected = format!("{LEXICON_NSID_PREFIX_PUBLIC}.{stem}");
+            assert_eq!(
+                id, expected,
+                "public lexicon file {stem}.json has id {id:?}; expected {expected:?}"
             );
         }
     }

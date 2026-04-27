@@ -31,9 +31,8 @@ use sqlx::{QueryBuilder, Sqlite};
 use crate::writer::parse_rfc3339_ms;
 
 use super::common::{AdminError, AdminState, verify_and_authorize};
-use super::subject_action_view::{
-    SubjectActionEntry, SubjectActionRow, project, subject_has_history,
-};
+use super::subject_action_view::{SubjectActionEntry, SubjectActionRow, project};
+use crate::server::strike_state::subject_has_history;
 use crate::server::xrpc::{decode_cursor, encode_cursor};
 
 const LXM: &str = "tools.cairn.admin.getSubjectHistory";
