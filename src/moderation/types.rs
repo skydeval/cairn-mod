@@ -26,7 +26,7 @@ use std::time::SystemTime;
 /// `subject_actions.action_type` SQL CHECK values exactly. New
 /// variants here would require a coordinated migration + admin/CLI
 /// surface change, so the set is closed for v1.4.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ActionType {
     /// Operator-issued warning. Does not carry strikes; surfaced to
     /// the subject for awareness. Stored so warnings appear in

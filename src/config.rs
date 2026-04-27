@@ -115,6 +115,24 @@ pub struct Config {
     ///   convention, strict-ascending curve, positive decay window).
     #[serde(default)]
     pub strike_policy: Option<StrikePolicyToml>,
+    /// Label-emission policy for the v1.5 graduated-action moderation
+    /// model (§F21, #58). TOML projection of the operator's
+    /// `[label_emission]` block; resolve to a runtime
+    /// [`crate::labels::policy::LabelEmissionPolicy`] via
+    /// `LabelEmissionPolicy::from_config`.
+    ///
+    /// Two states:
+    /// - `None` — operator declared no block; the resolver returns
+    ///   shipped defaults (emission enabled, reason labels emitted,
+    ///   warnings not emitted, default per-action mappings —
+    ///   `!takedown`, `!hide`, `!warn`).
+    /// - `Some(_)` — partial or full operator declaration. Per-field
+    ///   serde defaults fill any unspecified sub-fields; the
+    ///   resolved values are validated together (label-value naming
+    ///   conventions, no-collision across action_type overrides,
+    ///   valid action_type keys in override maps).
+    #[serde(default)]
+    pub label_emission: Option<LabelEmissionPolicyToml>,
 }
 
 /// TOML projection of one entry in
@@ -210,6 +228,102 @@ fn default_cache_freshness_window_seconds() -> u32 {
     3600
 }
 
+/// TOML projection of [`crate::labels::policy::LabelEmissionPolicy`]
+/// (§F21, #58). Each sub-field carries a `#[serde(default = "...")]`
+/// so a partial `[label_emission]` declaration fills the rest from
+/// shipped defaults. The fully-defaulted struct matches
+/// [`crate::labels::policy::LabelEmissionPolicy::defaults`].
+///
+/// `action_label_overrides` keys are action-type strings
+/// (`takedown`, `temp_suspension`, etc.) parsed at projection time
+/// against [`crate::moderation::types::ActionType::from_db_str`];
+/// invalid keys fail config load with a clear error rather than
+/// silently mapping to nothing.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LabelEmissionPolicyToml {
+    /// Master toggle. When `false`, no labels are emitted regardless
+    /// of other policy fields. Default `true`.
+    #[serde(default = "default_label_emission_enabled")]
+    pub enabled: bool,
+    /// Whether to emit `reason-<code>` labels alongside the action
+    /// label. Default `true`.
+    #[serde(default = "default_emit_reason_labels")]
+    pub emit_reason_labels: bool,
+    /// Whether `warning` actions emit a label. Default `false` —
+    /// warnings are typically advisory and don't surface to AppViews.
+    /// Operators that want to surface warnings (e.g., a "first
+    /// strike" community signal) flip this to `true`.
+    #[serde(default = "default_warning_emits_label")]
+    pub warning_emits_label: bool,
+    /// Prefix prepended to each `reason_code` to form the reason
+    /// label's `val`. Default `"reason-"` so e.g. `hate-speech`
+    /// becomes `reason-hate-speech`. Empty string permitted but
+    /// surfaces a startup warning.
+    #[serde(default = "default_reason_label_prefix")]
+    pub reason_label_prefix: String,
+    /// Per-action-type label override. Keys are action-type strings
+    /// (`takedown`, `temp_suspension`, etc.); values are full
+    /// [`LabelSpecToml`] declarations that replace the shipped
+    /// defaults for that action type.
+    #[serde(default)]
+    pub action_label_overrides: BTreeMap<String, LabelSpecToml>,
+    /// Per-action-type severity override. Keys are action-type
+    /// strings; values are severities. Use this when only the
+    /// severity needs adjustment without changing the label `val`.
+    /// Ignored for action types that have a full
+    /// [`LabelSpecToml`] in `action_label_overrides` — the explicit
+    /// override wins.
+    #[serde(default)]
+    pub severity_overrides: BTreeMap<String, SeverityToml>,
+}
+
+/// TOML projection of one entry in
+/// [`LabelEmissionPolicyToml::action_label_overrides`] (§F21, #58).
+/// Same field shape as [`LabelValueDefinitionToml`] minus the
+/// `identifier` (which is the action-type key in the parent map).
+#[derive(Debug, Clone, Deserialize)]
+pub struct LabelSpecToml {
+    /// The label `val` emitted for this action type. Validated as
+    /// 1..=128 bytes (§6.4 schema CHECK), lowercase ASCII letters +
+    /// digits + `-`, optionally prefixed with `!` for ATProto global
+    /// label values.
+    pub val: String,
+    /// Severity hint for consumer AppViews. Default
+    /// [`SeverityToml::Alert`].
+    #[serde(default = "default_label_spec_severity")]
+    pub severity: SeverityToml,
+    /// Optional blur policy. `None` means no blur signal — the
+    /// label semantics are entirely consumer-determined. Most
+    /// graduated-action labels do not specify blurs since they
+    /// represent account-level state, not content-level visual
+    /// treatment.
+    #[serde(default)]
+    pub blurs: Option<BlursToml>,
+    /// Optional localized display strings. Mirrors §6.4 `locales`
+    /// on label-value definitions; an emission-time policy can
+    /// declare them so a future #56-style trust-chain consumer
+    /// can present labels with operator-supplied display strings.
+    /// Empty by default.
+    #[serde(default)]
+    pub locales: Vec<LocaleToml>,
+}
+
+fn default_label_emission_enabled() -> bool {
+    true
+}
+fn default_emit_reason_labels() -> bool {
+    true
+}
+fn default_warning_emits_label() -> bool {
+    false
+}
+fn default_reason_label_prefix() -> String {
+    "reason-".to_string()
+}
+fn default_label_spec_severity() -> SeverityToml {
+    SeverityToml::Alert
+}
+
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime
 /// type because (a) `AdminConfig` is constructed from a vector of owned
 /// strings and doesn't itself derive `Deserialize`, (b) keeping the
@@ -281,7 +395,7 @@ pub struct LabelValueDefinitionToml {
 }
 
 /// §6.4 severity enum.
-#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SeverityToml {
     /// Informational; consumers typically don't gate on this.
@@ -293,7 +407,7 @@ pub enum SeverityToml {
 }
 
 /// §6.4 blur policy — what consumer UIs should obscure on a match.
-#[derive(Debug, Clone, Copy, serde::Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlursToml {
     /// Blur the post / record body.
@@ -317,7 +431,7 @@ pub enum DefaultSettingToml {
 }
 
 /// Localized display strings for a label value definition (§6.4).
-#[derive(Debug, Clone, serde::Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct LocaleToml {
     /// BCP-47 language tag (e.g. `"en"`, `"fr-CA"`).
     pub lang: String,
@@ -428,6 +542,13 @@ impl Config {
         // [`crate::moderation::policy`] for the full validation
         // rules.
         let _ = crate::moderation::policy::StrikePolicy::from_config(self)?;
+        // Label emission policy (§F21, #58): same single-source-of-
+        // truth pattern. The resolver applies the label-value naming
+        // conventions, no-collision check across action_label_overrides
+        // entries, and valid-action_type-key check on the override
+        // maps. See [`crate::labels::policy`] for the full validation
+        // rules.
+        let _ = crate::labels::policy::LabelEmissionPolicy::from_config(self)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the

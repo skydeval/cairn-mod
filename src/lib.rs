@@ -24,6 +24,7 @@ pub mod config;
 pub mod credential_file;
 pub mod error;
 pub mod label;
+pub mod labels;
 pub mod moderation;
 pub mod moderators;
 pub mod report;
@@ -39,6 +40,7 @@ pub use auth::{AuthConfig, AuthContext, AuthError, VerifiedCaller};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use label::Label;
+pub use labels::policy::{LabelEmissionPolicy, LabelSpec};
 pub use moderation::policy::StrikePolicy;
 pub use moderation::reasons::ReasonVocabulary;
 pub use server::{
