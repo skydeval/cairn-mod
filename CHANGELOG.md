@@ -17,6 +17,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.5.0] - 2026-04-27
+
+> v1.5 "Label emission" closes the v1.4 loop: every recorded
+> action now translates into ATProto labels that consumer AppViews
+> honor, and revocation atomically negates whatever was emitted.
+> Operators declare the action-to-label mapping in
+> `[label_emission]` — defaults ship out of the box, override
+> knobs cover val / severity / blurs / locales per action type,
+> and notes never emit (defense-in-depth at the resolver). Reason
+> labels emit as `reason-<code>` alongside their action label,
+> sharing its expiry on temp_suspension. Revocation reads the
+> stored val from the linkage table (not the current policy)
+> so operator policy edits between emission and revocation can't
+> desynchronize negation. Subjects can introspect their own active
+> labels via `tools.cairn.public.getMyStrikeState`'s new
+> `activeLabels` field; operators query the same surface via
+> `cairn moderator labels <subject>`. The new §4.2 disclosure 5
+> makes the trust-chain framing explicit: internal moderation
+> state and protocol-visible labels are different surfaces, both
+> observable.
+
+### Added
+- Label-emission schema migration: `subject_actions.emitted_label_uri` column (the action label's val — the column name predates the realization that ATProto labels lack canonical URIs; locked) and `subject_action_reason_labels` linkage table with composite PK `(action_id, reason_code)`. Trigger update permits the single NULL→non-NULL transition for `emitted_label_uri`, mirroring the revocation columns' exception from #46. Linkage rows preserved across revocation as forensic record per [§F21.7](cairn-design.md#f217-schema-linkage-and-audit-log-integration) (#57)
+- `[label_emission]` config block + `LabelEmissionPolicy` runtime loader. Operator surfaces: `enabled` master toggle, `warning_emits_label` opt-in, `emit_reason_labels` reason gate, `reason_label_prefix` (default `"reason-"`, empty permitted with startup warning), `[label_emission.action_label_overrides.<type>]` for per-action val/severity/blurs/locales, `[label_emission.severity_overrides]` for severity-only overrides. Cross-action `val` uniqueness enforced at config load — labels need to discriminate by val for revocation routing per [§F21.1](cairn-design.md#f211-action-to-label-mapping) (#58)
+- Action-to-label translation core: `resolve_action_labels` and `resolve_reason_labels` pure functions translate an `ActionForEmission` plus the resolved policy into unsigned `LabelDraft`s. Same shape as the v1.4 calculators (#49 strike, #50 decay, #51 window) — no I/O, no async, no signing, no DB. Notes never emit (hard gate); warnings gated on `warning_emits_label`; reason labels share the warning's suppression gate (reasons-without-context confuses consumers, recovery path is asymmetric). TempSuspension propagates `expires_at` to both action label and reason labels per [§F21.2](cairn-design.md#f212-reason-labels) (#59)
+- Recorder integration: `handle_record_action` now signs and persists the configured ATProto labels in the same transaction as the `subject_actions` INSERT, the `subject_strike_state` cache UPSERT, and the audit_log row. Atomic — failure rolls back action + audit + labels together so the audit chain never claims emission that didn't happen. Audit reason JSON gains `emitted_labels: [{val, uri}, ...]` capturing every label this action produced; hash chain (#39) extends to lock the (action, labels) bundle per [§F21.7](cairn-design.md#f217-schema-linkage-and-audit-log-integration) (#60)
+- Revocation negation: `handle_revoke_action` now atomically emits negation labels (neg=true) for every label the original action emitted, targeting the same `(src, uri, val)` tuple. Val read from `subject_actions.emitted_label_uri` and `subject_action_reason_labels` rows, NOT from current policy resolution — operator policy edits between emission and revocation cannot desynchronize negation. Negations carry `exp = None` (negations are permanent statements that supersede the original; expiring them would resurrect the original in consumer caches). Negation is unconditional regardless of current policy state — prior emissions exist on the wire and must be negated even when emission has been disabled since recording. Audit reason JSON gains `negated_labels: [{val, uri}, ...]` mirroring emission's `emitted_labels` shape per [§F21.3](cairn-design.md#f213-negation-on-revocation) (#62)
+- Idempotency guards: defense-in-depth `should_skip_action_label_emission` and `should_skip_reason_emission` helpers gate the emission loops on the row's pre-emission state. v1.5's normal flow always finds the gates' queries returning empty/NULL (the INSERT just landed inside the same transaction), so the guards are structurally a no-op in production; they exist to protect against future paths (backfill migrations, retry helpers) where a row might already carry emission state. The `subject_action_reason_labels` PK on `(action_id, reason_code)` is the SQL-level safety net per [§F21.5](cairn-design.md#f215-idempotency) (#64)
+- Public XRPC `subjectStrikeState.activeLabels`: `tools.cairn.public.getMyStrikeState` and `tools.cairn.admin.getSubjectStrikes` now return the labels cairn-mod is currently emitting against the subject. One entry per non-revoked, non-negated action with `val`, `actionId`, `actionType`, `reasonCodes`, optional `expiresAt`. Most-recent-action-first ordering. Cache-bypass invariant from [§F20.9](cairn-design.md#f209-cache-management) extends here — always recomputed from `labels` + `subject_actions` source-of-truth. Exp-passed labels are INCLUDED (cairn-mod surfaces emitted state; AppView-side honor of `exp` is the consumer's responsibility per [§F7](cairn-design.md#f7-label-expiry-schema-only-enforcement-deferred)) per [§F21.8](cairn-design.md#f218-public-introspection-and-operator-cli) (#65)
+- Operator CLI: `cairn moderator labels <subject>` HTTP-routes via admin `getSubjectStrikes` and renders `activeLabels` as the primary output. Default tabular human format (one row per emitted label — action label plus one per reason code, all sharing action context columns); `--json` emits just the `activeLabels` array, not the full strikes envelope per [§F21.8](cairn-design.md#f218-public-introspection-and-operator-cli) (#66)
+- Test pinning: warning/note emission policy contract (the `warning_emits_label` gate at all relevant configurations + the Note hard gate at every code path) (#61); temp_suspension exp-field semantics (validation rejection paths + label-exp propagation including ms-precision RFC-3339 ↔ epoch-ms parity) (#63)
+
+### Changed
+- [`cairn-design.md`](cairn-design.md) gains [§F21](cairn-design.md#f21-label-emission-against-moderation-state-v15) (label emission against moderation state), nine subsections covering action-to-label mapping, reason labels, negation on revocation, temp suspension expiry via ATProto's native `exp` field, idempotency, customization for deployments, schema linkage and audit-log integration, public introspection and operator CLI, and deferred future work. [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience) trust-chain disclosure 5 documents that internal moderation state and protocol-visible labels are different surfaces, both observable: operators declare the translation rules in `[label_emission]`, subscribers compare config + emitted streams to verify policy variation. [§F20.10](cairn-design.md#f2010-deferred-to-future-releases) reordered: label emission marked shipped; remaining items reordered for v1.6+. [§18](cairn-design.md#18-future-roadmap) roadmap marks v1.5 shipped, adds v1.6 (policy automation) and v1.7+ (PDS administrative actions, default-disabled when `[pds_admin]` is absent), notes the continued v1.x trajectory toward Ozone parity, and contemplates cairn-mod-enterprise as eventual platform-tier sibling project (open scope; no version commitment) (#67)
+
+### Fixed
+
+### Removed
+
+### Security
+
 ## [1.4.0] - 2026-04-26
 
 > v1.4 "Account moderation state model" turns moderation into
