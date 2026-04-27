@@ -92,6 +92,7 @@ Subscribers of a cairn-mod-hosted labeler should understand:
 1. **Labels are trusted by communities to the extent the operator is trusted.** A subscriber to `did:plc:some-cairn-labeler` is trusting the operator's current and past judgment. If the operator silently swaps intent (becomes malicious, sells the DID, is compromised) there is no protocol-level mechanism for subscribers to detect this.
 2. **Historical labels can be forged by a malicious operator with DB access.** v1's audit log is not cryptographically linked to the labels table. v1.1's hash-chaining audit log is a prerequisite (but not sufficient) for historical-label integrity.
 3. **One operator per instance is a single point of compromise for that labeler.** Operators who want to reduce this risk should consider publishing transparency records (e.g., a monthly signed Merkle root of the audit log to the labeler's PDS). Out of scope for v1 but enabled by v1.1's hash-chaining.
+4. **Operators set their own moderation policy.** cairn-mod's strike-calculation rules — base weights per reason, dampening curve, decay function, good-standing threshold, cache freshness window — live in operator config (see §F20.2 / §F20.3 / §F20.4 / §F20.9). Operators can verify their own labeler's behavior against their declared policy by reading the config alongside the audit log; subscribers comparing two cairn-mod-hosted labelers can observe policy variation directly (a labeler weighting `hate-speech` at 4 strikes is not the same as one weighting it at 8, and that difference is visible from operator config alone, not hidden behavior). The trade-off is symmetric: operators can be permissive or inconsistent, and cairn-mod does not enforce a single moderation philosophy. cairn-mod's contribution is making policy declarable and observable, not adjudicating what the policy should be.
 
 ## 5. Authentication Model
 
@@ -778,6 +779,192 @@ The codes intentionally separate transient infra failure (14, retry) from operat
 - All four failure-path tests assert `COUNT(*) FROM server_instance_lease = 0` post-failure (lease release invariant).
 - Inline `serve::verify::tests` covers the drift-summary helper (label_values drift, definition_count drift, per-definition fallback).
 
+### F20. Account moderation state model (v1.4)
+
+Graduated-action moderation surface. Where Ozone has binary active/takendown, cairn-mod tracks a per-subject strike balance with operator-configurable weights, dampening for first-time offenders, and time-based decay. The labeler still emits ATProto labels (label emission against this state model is a future-release concern, see §F20.10), but the moderation actions themselves are now first-class records with their own audit surface, recorder, and read endpoints.
+
+The §F20 contract: every moderation action against a subject — warning, note, suspension, takedown — is recorded as a row in `subject_actions`, with the strike value resolved at action time and frozen on the row for forensic durability. Reads project that history through the decay calculator on every fetch, so cached values can never produce a misleading answer. Operators configure the strike-calculation rules (reason weights, dampening curve, decay window) declaratively in `[moderation_reasons]` and `[strike_policy]`; cairn-mod's job is to apply those rules consistently and surface them transparently. See §4.2 disclosure 4 for the trust-chain framing.
+
+#### F20.1. Action types
+
+Five action types, declared in the `subject_actions.action_type` SQL CHECK constraint and mirrored in [`crate::moderation::types::ActionType`]:
+
+- `warning` — operator-issued warning to the subject. Zero strikes by definition.
+- `note` — internal moderator annotation. Not visible to the subject; never carries strikes. Useful for "saw this, didn't act" annotations that should still appear in history.
+- `temp_suspension` — time-bounded suspension. Carries strikes. Requires an ISO-8601 `duration` (e.g. `P7D`); the recorder computes `expires_at` from `effective_at + duration`.
+- `indef_suspension` — open-ended suspension. Carries strikes. Revocation is the only path back to good standing while active.
+- `takedown` — account takedown. Carries strikes; not a suspension (does not trigger decay-freeze).
+
+Strike-bearing vs zero-strike is enforced by [`ActionType::contributes_strikes`]: `warning` and `note` always resolve to `strike_value_applied = 0` regardless of the reasons attached, even if a recorder bug or future write path passes a non-zero base. The recorder's defense-in-depth zero-override pins this invariant.
+
+Reasons are attached to every action type, including zero-strike ones — a `warning` with `reason = ["hate-speech"]` provides context for the historical row even though no strikes accumulate. The reason vocabulary is operator-shared across action types; there is no "warning-only" reason set.
+
+#### F20.2. Reasons
+
+Reasons are operator-declared in the `[moderation_reasons.<identifier>]` TOML blocks of `cairn.toml`. Each entry has:
+
+- `base_weight` (integer ≥ 1) — strike weight applied at action time, before dampening.
+- `severe` (boolean, default `false`) — when `true`, the reason bypasses dampening regardless of subject standing. Severe reasons always count at full `base_weight`.
+- `description` (non-empty string) — operator-facing label. Not a policy statement about how operators should act on it; the description is for the operator's own UI and runbook reference, not for users or external consumers.
+
+Identifiers are lowercase-kebab-case (`a-z`, `0-9`, `-`; must start with a letter; 1-64 chars). Validated at config load.
+
+**Shipped defaults** (eight entries, loaded when the operator's config has no `[moderation_reasons.*]` blocks):
+
+| Identifier | Base weight | Severe |
+|---|---|---|
+| `hate-speech` | 4 | no |
+| `harassment` | 4 | no |
+| `threats-of-violence` | 12 | yes |
+| `csam` | 999 | yes |
+| `spam` | 2 | no |
+| `misinformation` | 3 | no |
+| `nsfw` | 2 | no |
+| `other` | 2 | no |
+
+**Operator-extensibility rule**: the moment any `[moderation_reasons.*]` block is declared, defaults are NOT loaded. Either accept the full default set, or declare every reason from scratch. This prevents accidental mixing of operator-declared and shipped-default reasons; operators who want a near-default vocabulary with one tweak copy the eight defaults plus the additional entry.
+
+A bare `[moderation_reasons]` header with no sub-blocks is rejected at config load — that's almost certainly a typo, and silently treating it as "load defaults" would mask the operator's intent.
+
+For multi-reason actions, the recorder selects a single dominant reason for strike calculation: severe wins regardless of weight; among same-severity reasons, highest `base_weight` wins; ties on `base_weight` resolve to the first-listed reason for determinism. The full `reason_codes` list is stored on the row.
+
+#### F20.3. Strike calculation and dampening
+
+The strike calculator (a pure function — no I/O, frozen at action time) consumes four inputs: the subject's current strike count, the dominant reason's base/severe, the resolved policy, and the action's 1-indexed position within the current good-standing window. It produces a `StrikeApplication` with three fields stored verbatim on the new row: `applied`, `was_dampened`, `base_weight`.
+
+**Good standing**: `current_strike_count < good_standing_threshold` (default 3). New offenses while in good standing get dampened per the curve.
+
+**Dampening curve**: per-position weights for in-good-standing offenses. Default `[1, 2]`. Length always equals `max(0, threshold - 1)` — see worked example below. Strictly ascending, each entry ≥ 1.
+
+**Decision rules** (in order):
+
+1. Severe reason → full `base_weight`, `was_dampened = false`. Bypasses the curve regardless of standing.
+2. Out of good standing (`current_count >= threshold`) → full `base_weight`, `was_dampened = false`.
+3. In good standing, position covered → `applied = min(curve[position - 1], base_weight)`, `was_dampened = true`. The cap means dampening can lower a strike value below the curve entry but never raise it above the reason's declared base.
+4. In good standing, position past the curve → full `base_weight`, `was_dampened = false`. Defensive branch — normally unreachable under the curve-length convention, but handled cleanly for unusual operator policies.
+
+**Worked example** (default policy: threshold 3, curve `[1, 2]`, hate-speech base 4):
+
+| Offense # | Pre-state | Result |
+|---|---|---|
+| 1st | current=0, good standing | curve[0] = 1 strike applied |
+| 2nd | current=1, good standing | curve[1] = 2 strikes applied (running 3) |
+| 3rd | current=3, AT threshold (out of good standing) | full base = 4 strikes applied (running 7) |
+| 4th | current=7, well past | full base = 4 strikes applied |
+
+A severe action (e.g. CSAM, base 999) at any pre-state applies its full base — bypassing both the curve and any standing check.
+
+**Frozen-at-action-time invariant**: `was_dampened`, `strikes_at_time_of_action`, and `strike_value_applied` are written to the `subject_actions` row at the moment of recording and never recomputed. Years later, an operator can verify exactly what state the user was in when this decision was made, even after policy edits. Position counting (the input to the calculator) reads `was_dampened` from prior rows as the in-good-standing predicate; this signal is stable across `[strike_policy]` edits because it was frozen at each prior action's time.
+
+The position-in-window input is computed by the recorder before calling the strike calculator; it counts in-window unrevoked strike-bearing actions where the prior action's `was_dampened` flag is `true`. This separation keeps the strike calculator pure and the position computation in the recorder where DB access is appropriate.
+
+#### F20.4. Decay
+
+Strike contributions decay over time. Operator-configurable shape via `[strike_policy].decay_function`:
+
+- `linear` (default) — decays linearly from full at `effective_at` to zero at `effective_at + decay_window_days`. Formula: `applied * max(0, 1 - elapsed_days / window_days)`.
+- `exponential` — half-life decay tuned so ~1% remains at the window boundary. Half-life ≈ `window_days / log_2(100)` ≈ `window_days / 6.64`.
+
+`decay_window_days` (default 90) lives on the policy, not the variant — both `linear` and `exponential` consume the same window. Decay is computed at read time; the calculator sums the per-action contributions in `f64` and rounds once at the end so many small actions don't lose precision through accumulated rounding.
+
+**Suspension freezes decay** (controlled by `suspension_freezes_decay`, default `true`). v1.4 ships a deliberate simplification:
+
+- **Only the most recent unrevoked suspension affects decay.** Earlier suspensions in history do not retroactively pause decay.
+- **If that suspension is currently active**: decay is paused at the suspension's `effective_at`. Actions before the suspension cap their elapsed clock at that boundary; actions during the suspension contribute their full `strike_value_applied` (elapsed = 0).
+- **If that suspension has expired** (only possible for `temp_suspension`): decay resumes from the expiry. Actions before lose `(suspension.expires_at - suspension.effective_at)` from their elapsed clock; actions during start their decay clock from the expiry.
+- **Revoked suspensions never freeze decay**, even retroactively. A revoked suspension is treated as if it never happened — decay resumes from the original `effective_at` of every other action.
+
+Multiple-suspension-history accuracy is a v1.5 refinement; the v1.4 simplification is sufficient for the strike model's intended use cases.
+
+Decay state is recomputed on every read; the cache table (§F20.9) holds a snapshot for performance, but v1.4 read endpoints intentionally bypass the cache.
+
+#### F20.5. Revocation
+
+Any action can be revoked via `WriteCommand::RevokeAction`. Revocation:
+
+- Sets `revoked_at`, `revoked_by_did`, and `revoked_reason` on the original row. The schema's no-update-except-revoke trigger permits exactly this NULL→non-NULL transition; all other column changes abort. Revocation is one-way — re-revocation and un-revocation both abort at the trigger.
+- Recomputes the subject's strike state and updates the cache. Revoked actions are excluded from `current_strike_count` but still appear in `raw_total` and `revoked_count` for forensic display.
+- Writes a hash-chained `audit_log` row (`subject_action_revoked`) referencing the revoked action's id.
+
+Revocation never produces a separate row — the original row's revocation columns are the durable record. This keeps the `subject_actions` table append-only-with-one-exception and means the action's full history (recorded → revoked) is reachable through a single id lookup.
+
+#### F20.6. Schema
+
+Two tables, declared in `migrations/0003_account_moderation_state.sql`:
+
+- **`subject_actions`** — append-only log of moderation actions. Columns include `subject_did`, optional `subject_uri` (for record-level actions), `actor_did`, `action_type`, `reason_codes` (JSON-encoded), `effective_at` / `expires_at` epoch-ms timestamps, the strike accounting trio (`strike_value_base`, `strike_value_applied`, `was_dampened`), `strikes_at_time_of_action`, the revocation columns (`revoked_at`, `revoked_by_did`, `revoked_reason`, all NULL until revoked), and `audit_log_id` linking to §F10's audit chain.
+- **`subject_strike_state`** — single-row-per-account cache. Columns: `subject_did` (PK), `current_strike_count`, `last_action_at`, `last_recompute_at`. No triggers; freely updateable as the recorder writes through and §F20.9's recompute helper updates on stale-read.
+
+**Triggers on `subject_actions`** (correctness defense, not security defense — same posture as §F10's audit_log triggers):
+
+- `subject_actions_no_update_except_revoke BEFORE UPDATE` — aborts any UPDATE that changes the immutable columns. The revocation columns are exempt for the NULL→non-NULL transition only; once set, further changes also abort (no re-revocation).
+- `subject_actions_no_delete BEFORE DELETE` — unconditionally aborts.
+
+**Audit-log integration**: every recordAction and every revokeAction writes a hash-chained `audit_log` row in the same transaction as the `subject_actions` mutation, via the §F10 / v1.3 hash-chain pathway. The audit row carries the resolved action_id, action_type, primary reason, full reason_codes list, applied strike value, and `was_dampened` flag — enough for forensic reconstruction without joining back to `subject_actions`. §F10's actions list gains `subject_action_recorded` and `subject_action_revoked`.
+
+Strike accounting unifies at the account level: `subject_actions` rows can target either a DID (account-level action) or an `at://`-URI (record-level action), but `subject_strike_state` is keyed by the parent account DID only.
+
+#### F20.7. XRPC surface
+
+Two namespaces: `tools.cairn.admin.*` for moderator/operator-tier endpoints, and `tools.cairn.public.*` (new in v1.4) for user-facing endpoints.
+
+**Admin (Mod or Admin role; same auth gate as §F12 endpoints):**
+
+- `tools.cairn.admin.recordAction` (procedure) — record a graduated-action event. Backed by `WriteCommand::RecordAction`. Returns `actionId`, `strikeValueBase`, `strikeValueApplied`, `wasDampened`, `strikesAtTimeOfAction`.
+- `tools.cairn.admin.revokeAction` (procedure) — revoke a previously-recorded row. Backed by `WriteCommand::RevokeAction`. Returns `actionId`, `revokedAt`.
+- `tools.cairn.admin.getSubjectHistory` (query) — paginated list of subject_actions rows for a subject. Cursor on the trailing row's id. Optional filters: `subjectUri`, `since`, `includeRevoked`.
+- `tools.cairn.admin.getSubjectStrikes` (query) — current strike state for a subject. Returns `currentStrikeCount`, `rawTotal`, `decayedCount`, `revokedCount`, `goodStanding`, optional `activeSuspension`, optional `decayWindowRemainingDays`, optional `lastActionAt`.
+
+Lexicon errors declared in the lexicon files: `InvalidReason`, `InvalidActionType`, `DurationRequired`, `DurationNotAllowed`, `SubjectUriMismatch`, `ActionNotFound`, `ActionAlreadyRevoked`, `SubjectNotFound`. Every name appears in the corresponding `errors[]` array; same lexicon-declaration discipline as §F12.
+
+**Public (`tools.cairn.public.getMyStrikeState`, no role required, browser-safe CORS):**
+
+- ATProto service-auth required — same JWT verification as the admin endpoints.
+- Authorization is **self-identity**: the verified `iss` IS the subject. There is no `subject` parameter on the endpoint by design; querying someone else's state requires Mod or Admin role on the admin endpoint.
+- Returns the same wire shape as `getSubjectStrikes` via cross-namespace lexicon ref to `tools.cairn.admin.defs#subjectStrikeState`. Single source of truth for the field set.
+- CORS allow-any-origin, mirroring `com.atproto.label.queryLabels` from §F3 — public endpoints are intended for browser-side AppView callers. Admin endpoints continue to reject `Origin` outright.
+
+The `tools.cairn.public.*` namespace establishes the convention: ATProto service auth + self-identity authorization + browser-safe CORS. Future user-facing endpoints (e.g., a `getMyActionHistory` companion to `getMyStrikeState`) follow this pattern.
+
+`SubjectNotFound` (404) on the read endpoints fires only when the subject_did has never been actioned. Once any row exists, all subsequent reads return 200 — even if filters reduce the result set to empty. Matches the intuition "the subject is known to the system" vs "the subject matched my filter."
+
+#### F20.8. Operator CLIs
+
+Moderator-tier subcommands under `cairn moderator` (HTTP-routed; require a moderator session via `cairn login`):
+
+- `cairn moderator action <subject> --type <type> --reason <code> ...` — generic record-action form.
+- `cairn moderator warn <subject> --reason <code>` — sugar for `--type warning`.
+- `cairn moderator note <subject> <text>` — sugar for `--type note`; positional `<text>` becomes the row's note.
+- `cairn moderator revoke <action-id> [--reason <text>]` — revoke a row.
+- `cairn moderator history <subject>` — paginated tabular history with the `--since` / `--limit` / `--cursor` / `--no-include-revoked` filters from `getSubjectHistory`.
+- `cairn moderator strikes <subject>` — current strike state with active suspension (if any) and trajectory hint.
+
+These are distinct from the v1.1-era `cairn moderator add/remove/list` commands (operator-tier, direct-DB, manage who CAN moderate). The new commands are moderator-tier (HTTP-routed via admin XRPC, manage what moderators DO). The split: operator-policy commands run direct-DB while `cairn serve` may be down; moderator-action commands run against a live `cairn serve` and require a moderator's PDS session for service-auth.
+
+#### F20.9. Cache management
+
+The `subject_strike_state` cache is a performance hint, not a source of truth. v1.4 invariants:
+
+- **Write-through**: every recordAction and revokeAction UPSERTs the cache in the same transaction as the `subject_actions` mutation.
+- **Read endpoints bypass the cache**: `getSubjectStrikes` and `getMyStrikeState` always recompute from `subject_actions` via the decay calculator. A stale cache row can never produce a misleading public read.
+- **Lazy recompute-on-read helper** (`crate::moderation::cache::get_or_recompute_strike_count`) — for v1.5+ consumers that want O(1) "is this subject past threshold right now?" without a full history walk. Reads the cache; returns the cached count if `now - last_recompute_at < cache_freshness_window_seconds` (default 3600); otherwise loads history, runs the decay calculator, writes back, and returns the recomputed count. Cache write-back failures are best-effort: logged but the recomputed count still returns to the caller.
+- **Missing cache returns a typed error** (`Error::StrikeCacheMissing`). Same semantic as the read endpoints' `SubjectNotFound`: the subject has never been actioned. v1.5 consumers wanting optimistic "never-actioned == 0" semantics wrap with `unwrap_or(0)`.
+
+The freshness window is operator-tunable via `[strike_policy].cache_freshness_window_seconds`. v1.4 ships the helper but has zero in-tree consumers — landing the cache management alongside the cache write path that the recorder establishes (instead of split across releases) keeps the invariants reviewable in one place.
+
+No background refresh job in v1.4. Lazy recompute-on-read is sufficient for v1.4's needs; scheduling adds real complexity (lease coordination, restart handling) that defers cleanly to v1.5+ when a real performance need surfaces.
+
+#### F20.10. Deferred to future releases
+
+The v1.4 contribution is the moderation state model: how actions are recorded, how strikes accumulate and decay, how operators configure the rules, how reads surface the state. Several adjacent capabilities are deliberately out of scope:
+
+- **Policy automation** (v1.5) — automatic action recording when a subject's strike count crosses a threshold. v1.4's recorder is moderator-driven; v1.5 will add policy-driven action paths. The cache management surface in §F20.9 ships ahead of this consumer.
+- **Label emission against moderation state** (v1.6) — translating internal strike state into ATProto labels for AppView consumption. Today, recordAction populates `subject_actions` and `audit_log` but doesn't emit a label. The operator's labeler can run §F12 `applyLabel` independently, but the bridge between the two is a v1.6 concern.
+- **Multiple-suspension-history accuracy in decay** (v1.5+) — v1.4's "only the most recent unrevoked suspension affects decay" simplification is documented in §F20.4. Full history fidelity adds complexity disproportionate to any v1.4 use case.
+- **Background cache refresh job** (v1.5+) — see §F20.9.
+- **Accessory bot or Web UI** for user-facing strike-state rendering — separate project from cairn-mod itself; `getMyStrikeState` is the substrate, not the UI.
+- **Per-reason decay overrides** (v1.5+) — currently all reasons share the same decay function and window; per-reason tuning is conceivable but not motivated.
+
 ## 8. Lexicons
 
 cairn-mod defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
@@ -1014,6 +1201,13 @@ The signals exist because they're real release-quality indicators. They are soft
 - Cross-language interop tests (TypeScript consumer).
 - Multi-label-per-frame batching in `subscribeLabels`.
 - Operator-facing metrics surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause) and structured-log conventions. (`/health` and `/ready` probe endpoints shipped in v1.1 — see §F14.)
+- Account moderation state model shipped in v1.4 (see §F20). Items deferred from §F20.10:
+  - Policy automation: auto-action recording when a subject crosses a strike threshold (v1.5).
+  - Label emission against moderation state: bridge between `subject_actions` and `applyLabel` so internal state surfaces as ATProto labels for AppView consumption (v1.6).
+  - Multiple-suspension-history accuracy in decay (v1.5+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
+  - Background cache refresh job for `subject_strike_state` (v1.5+). v1.4 ships lazy recompute-on-read; a background job adds lease coordination + restart-handling complexity that defers cleanly until a real performance need surfaces.
+  - Per-reason decay overrides (v1.5+). All reasons currently share one decay function and window.
+  - Accessory bot or Web UI for user-facing strike-state rendering — separate project from cairn-mod itself; `tools.cairn.public.getMyStrikeState` is the substrate, not the UI.
 
 ## 19. Release Runbook
 
