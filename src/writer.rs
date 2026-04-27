@@ -38,6 +38,7 @@
 //!   or `signing_key_id` (§6.2 step 1, §6.1: seq lives on the frame, not
 //!   the label).
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use proto_blue_crypto::{K256Keypair, Keypair as _, format_multikey};
@@ -1684,6 +1685,54 @@ impl Writer {
             )));
         }
 
+        // ---------- idempotency guard (#64, v1.5) ----------
+        //
+        // Defense-in-depth: skip emission for any state already
+        // present on the row. v1.5's recordAction flow always
+        // finds these queries returning the empty/NULL case (the
+        // INSERT just landed and nothing else has touched the row
+        // yet), so the guard is structurally a no-op in
+        // production. It exists to protect against future paths
+        // that might invoke emission against a row already
+        // carrying linkage state — backfill migrations, retry
+        // helpers, alternate code paths — and against bugs that
+        // would otherwise silently produce duplicate (src, uri,
+        // val) records on the wire.
+        //
+        // The audit row's `emitted_labels` was already written
+        // above (intent, derived from the drafts). In v1.5 normal
+        // flow intent matches reality. If a future defensive
+        // scenario fires the guard and skips emissions, the audit
+        // row will claim more emissions than the labels table
+        // holds. That divergence is the future-implementer's
+        // responsibility to handle (e.g., by adding a re-emission
+        // entry point that constructs its own audit row); v1.5
+        // accepts the limitation because the divergence is
+        // structurally unreachable from this code path.
+        //
+        // The guard's "fire" branch is structurally unreachable
+        // from the public XRPC + writer-task API in v1.5 (every
+        // recordAction goes through this same INSERT). That makes
+        // it untestable end-to-end without a re-emission entry
+        // point we don't ship; the pure decision logic is
+        // exercised via unit tests on
+        // `should_skip_action_label_emission` /
+        // `should_skip_reason_emission` instead.
+        let existing_action_label_val: Option<String> = sqlx::query_scalar!(
+            "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+            inserted_id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let existing_reason_codes: Vec<String> = sqlx::query_scalar!(
+            "SELECT reason_code FROM subject_action_reason_labels WHERE action_id = ?1",
+            inserted_id,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let existing_reason_set: HashSet<&str> =
+            existing_reason_codes.iter().map(String::as_str).collect();
+
         // ---------- emission (#60, v1.5) ----------
         //
         // Sign + persist each draft (action label first so its
@@ -1702,36 +1751,43 @@ impl Writer {
         let mut label_events: Vec<LabelEvent> =
             Vec::with_capacity(action_drafts.len() + reason_drafts.len());
         let mut action_label_val: Option<String> = None;
-        for draft in &action_drafts {
-            let event = self
-                .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
-                .await?;
-            if action_label_val.is_none() {
-                action_label_val = Some(draft.val.clone());
+        if !should_skip_action_label_emission(existing_action_label_val.as_deref()) {
+            for draft in &action_drafts {
+                let event = self
+                    .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
+                    .await?;
+                if action_label_val.is_none() {
+                    action_label_val = Some(draft.val.clone());
+                }
+                label_events.push(event);
             }
-            label_events.push(event);
-        }
 
-        if let Some(ref val) = action_label_val {
-            // emitted_label_uri stores the action label's `val`,
-            // not a URI: ATProto labels have no canonical URI; the
-            // discriminator within (src=service_did, uri=subject,
-            // val) is just the val. Column name predates the
-            // realization (#57); locked once shipped.
-            sqlx::query!(
-                "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
-                val,
-                inserted_id,
-            )
-            .execute(&mut *tx)
-            .await?;
+            if let Some(ref val) = action_label_val {
+                // emitted_label_uri stores the action label's `val`,
+                // not a URI: ATProto labels have no canonical URI; the
+                // discriminator within (src=service_did, uri=subject,
+                // val) is just the val. Column name predates the
+                // realization (#57); locked once shipped.
+                sqlx::query!(
+                    "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
+                    val,
+                    inserted_id,
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
         }
 
         // Per-(action, reason) linkage rows. resolve_reason_labels
         // emits drafts in `reason_codes` order, so a parallel
         // iteration recovers the source reason_code without
-        // re-parsing the label val.
+        // re-parsing the label val. Reasons whose linkage row
+        // already exists are skipped per the idempotency guard
+        // above.
         for (draft, reason_code) in reason_drafts.iter().zip(req.reason_codes.iter()) {
+            if should_skip_reason_emission(reason_code, &existing_reason_set) {
+                continue;
+            }
             let event = self
                 .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
                 .await?;
@@ -2254,6 +2310,36 @@ pub(crate) fn build_flag_reporter_audit_reason(
     .to_string()
 }
 
+/// Idempotency guard for the recorder's action-label emission
+/// step (#64). Returns `true` when a row already carries an
+/// emitted action-label `val`, signalling the emission loop
+/// should skip producing a duplicate (src, uri, val) record.
+///
+/// v1.5's [`Writer::handle_record_action`] always passes `None`
+/// here in production (the row was just INSERTed and nothing
+/// else has touched it inside the same transaction). The
+/// function exists so future paths that operate on existing
+/// rows — backfill migrations, retry helpers — can call into
+/// the same gate logic, and so the gate's behavior is testable
+/// without DB scaffolding.
+fn should_skip_action_label_emission(existing_emitted_label_uri: Option<&str>) -> bool {
+    existing_emitted_label_uri.is_some()
+}
+
+/// Idempotency guard for the recorder's reason-label emission
+/// step (#64). Returns `true` when a `subject_action_reason_labels`
+/// row already exists for `(action_id, reason_code)`, signalling
+/// the per-reason emission loop should skip this draft.
+///
+/// Same v1.5 production posture as
+/// [`should_skip_action_label_emission`]: `existing` is always
+/// empty when called from [`Writer::handle_record_action`]; the
+/// function is the gate logic future paths can reuse and tests
+/// can exercise.
+fn should_skip_reason_emission(reason_code: &str, existing: &HashSet<&str>) -> bool {
+    existing.contains(reason_code)
+}
+
 /// `subject_action_recorded` audit reason JSON — see
 /// [`AUDIT_REASON_RECORD_ACTION`] for the schema.
 #[allow(clippy::too_many_arguments)]
@@ -2764,5 +2850,53 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["negated_labels"][0]["val"], "!takedown");
         assert_eq!(v["negated_labels"][1]["val"], "reason-spam");
+    }
+
+    // ---------- emission idempotency guards (#64) ----------
+
+    #[test]
+    fn skip_action_label_when_row_already_carries_an_emitted_val() {
+        // The defense-in-depth case the guard exists for: an
+        // existing emitted_label_uri value means the action label
+        // was already produced on the wire; the emission loop
+        // must skip to avoid a duplicate (src, uri, val) record.
+        assert!(should_skip_action_label_emission(Some("!takedown")));
+    }
+
+    #[test]
+    fn emit_action_label_when_row_has_no_emitted_val() {
+        // v1.5's recordAction always reaches this branch in
+        // production (fresh INSERT, NULL column). Pin the
+        // happy-path so a future refactor that flips the
+        // sense of the check breaks here.
+        assert!(!should_skip_action_label_emission(None));
+    }
+
+    #[test]
+    fn skip_reason_emission_when_already_linked() {
+        let existing: HashSet<&str> = ["spam", "harassment"].into_iter().collect();
+        assert!(should_skip_reason_emission("spam", &existing));
+        assert!(should_skip_reason_emission("harassment", &existing));
+    }
+
+    #[test]
+    fn emit_reason_when_not_already_linked() {
+        let existing: HashSet<&str> = ["spam"].into_iter().collect();
+        assert!(!should_skip_reason_emission("hate-speech", &existing));
+        // Empty existing set (the v1.5 production case): never skip.
+        let empty: HashSet<&str> = HashSet::new();
+        assert!(!should_skip_reason_emission("anything", &empty));
+    }
+
+    #[test]
+    fn reason_emission_skip_check_is_case_sensitive() {
+        // Reason codes are operator-vocabulary identifiers from
+        // [moderation_reasons] (#47). Case sensitivity matches
+        // SQLite's default text comparison and the recorder's
+        // primary-reason resolution; pinning here defends
+        // against an accidental case-fold in the guard during
+        // refactoring.
+        let existing: HashSet<&str> = ["SPAM"].into_iter().collect();
+        assert!(!should_skip_reason_emission("spam", &existing));
     }
 }
