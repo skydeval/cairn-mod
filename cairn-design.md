@@ -93,6 +93,7 @@ Subscribers of a cairn-mod-hosted labeler should understand:
 2. **Historical labels can be forged by a malicious operator with DB access.** v1's audit log is not cryptographically linked to the labels table. v1.1's hash-chaining audit log is a prerequisite (but not sufficient) for historical-label integrity.
 3. **One operator per instance is a single point of compromise for that labeler.** Operators who want to reduce this risk should consider publishing transparency records (e.g., a monthly signed Merkle root of the audit log to the labeler's PDS). Out of scope for v1 but enabled by v1.1's hash-chaining.
 4. **Operators set their own moderation policy.** cairn-mod's strike-calculation rules — base weights per reason, dampening curve, decay function, good-standing threshold, cache freshness window — live in operator config (see §F20.2 / §F20.3 / §F20.4 / §F20.9). Operators can verify their own labeler's behavior against their declared policy by reading the config alongside the audit log; subscribers comparing two cairn-mod-hosted labelers can observe policy variation directly (a labeler weighting `hate-speech` at 4 strikes is not the same as one weighting it at 8, and that difference is visible from operator config alone, not hidden behavior). The trade-off is symmetric: operators can be permissive or inconsistent, and cairn-mod does not enforce a single moderation philosophy. cairn-mod's contribution is making policy declarable and observable, not adjudicating what the policy should be.
+5. **Internal moderation state and protocol-visible labels are different surfaces, both observable.** cairn-mod's account moderation state model (§F20) records actions in cairn-mod's own database; the label emission system (§F21) translates those actions into ATProto labels that AppViews and other consumers can honor or ignore. The translation rules — which action types emit which labels, with what severity and expiry — live in operator config (`[label_emission]`; see §F21.1 for the default mapping table and override knobs). They are observable on both sides: operators read config alongside the audit log to verify their own labeler's emission, and subscribers comparing two cairn-mod-hosted labelers can see policy variation in both layers (action recording AND label emission). Operators retain the same latitude as disclosure 4: a deployment may emit `!hideaway-takedown` instead of `!takedown`, gate warnings on or off, customize blurs and locales — all visible from config. The invariant cairn-mod enforces is that *every recorded action either emits or explicitly doesn't*, and that revocation atomically negates whatever was emitted. Notes never emit (defense-in-depth at the resolver, regardless of operator override attempts). cairn-mod's contribution is making the translation declarable and observable, not adjudicating what the mapping should be.
 
 ## 5. Authentication Model
 
@@ -958,12 +959,151 @@ No background refresh job in v1.4. Lazy recompute-on-read is sufficient for v1.4
 
 The v1.4 contribution is the moderation state model: how actions are recorded, how strikes accumulate and decay, how operators configure the rules, how reads surface the state. Several adjacent capabilities are deliberately out of scope:
 
-- **Policy automation** (v1.5) — automatic action recording when a subject's strike count crosses a threshold. v1.4's recorder is moderator-driven; v1.5 will add policy-driven action paths. The cache management surface in §F20.9 ships ahead of this consumer.
-- **Label emission against moderation state** (v1.6) — translating internal strike state into ATProto labels for AppView consumption. Today, recordAction populates `subject_actions` and `audit_log` but doesn't emit a label. The operator's labeler can run §F12 `applyLabel` independently, but the bridge between the two is a v1.6 concern.
-- **Multiple-suspension-history accuracy in decay** (v1.5+) — v1.4's "only the most recent unrevoked suspension affects decay" simplification is documented in §F20.4. Full history fidelity adds complexity disproportionate to any v1.4 use case.
-- **Background cache refresh job** (v1.5+) — see §F20.9.
+- **Label emission against moderation state** — shipped in v1.5 (see §F21). The bridge between `subject_actions` and the `labels` table now lives in the recorder.
+- **Policy automation** (v1.6) — automatic action recording when a subject's strike count crosses a threshold. v1.4's recorder is moderator-driven; v1.5's emission flow doesn't change that. v1.6 will add operator-config-gated automatic-action paths. The cache management surface in §F20.9 ships ahead of this consumer.
+- **Multiple-suspension-history accuracy in decay** (v1.6+) — v1.4's "only the most recent unrevoked suspension affects decay" simplification is documented in §F20.4. Full history fidelity adds complexity disproportionate to any v1.4 / v1.5 use case.
+- **Background cache refresh job** (v1.6+) — see §F20.9.
 - **Accessory bot or Web UI** for user-facing strike-state rendering — separate project from cairn-mod itself; `getMyStrikeState` is the substrate, not the UI.
-- **Per-reason decay overrides** (v1.5+) — currently all reasons share the same decay function and window; per-reason tuning is conceivable but not motivated.
+- **Per-reason decay overrides** (v1.6+) — currently all reasons share the same decay function and window; per-reason tuning is conceivable but not motivated.
+
+### F21. Label emission against moderation state (v1.5)
+
+Bridge from §F20's internal moderation state to the protocol-visible labeler surface. Where v1.4 records actions to `subject_actions` and runs decay calculations against them, v1.5 takes that same action stream and translates it into ATProto labels — emitted to the `labels` table, signed by the labeler key, broadcast on `subscribeLabels`, surfaced by `queryLabels`, and negated on revocation. The internal moderation state (§F20) and the protocol-visible label state are now two synchronized views of the same underlying decisions; operators configure the translation declaratively, and consumers honor the labels via the existing ATProto consumer surface.
+
+The §F21 contract: every recordAction that produces strikes (or warnings opted into emission) atomically signs and persists ATProto label records alongside the `subject_actions` row, the strike-state cache update, and the audit_log row. Every revokeAction atomically emits negation labels for every label that the original action emitted. Operators declare the action-type-to-label mapping in `[label_emission]`; subscribers can verify both layers independently. See §4.2 disclosure 5 for the trust-chain framing.
+
+#### F21.1. Action-to-label mapping
+
+Each action type maps to at most one action label `val`, optionally accompanied by reason labels (§F21.2). Defaults:
+
+| Action type | Action label `val` | Severity | Carries `exp`? | Emits by default? |
+|---|---|---|---|---|
+| `takedown` | `!takedown` | `alert` | no | yes |
+| `indef_suspension` | `!hide` | `alert` | no | yes |
+| `temp_suspension` | `!hide` | `alert` | yes (= `expires_at`) | yes |
+| `warning` | `!warn` | `inform` | no | only if `warning_emits_label = true` |
+| `note` | — | — | — | never |
+
+Notes never emit labels. Notes are internal forensic context for operators, not protocol-visible moderation surface; this is enforced at the resolver layer regardless of any operator-declared override (defense-in-depth — even an `action_label_overrides.note` entry in config does not produce a label).
+
+Warnings are gated on `warning_emits_label`. Default is `false`: warnings are recorded as `subject_actions` rows for forensic and good-standing purposes but do not produce wire labels. Operators who want public-facing warnings flip the flag in their `[label_emission]` block.
+
+**[label_emission] config block.** Operator-declared via `cairn.toml`:
+
+- `enabled` (bool, default `true`) — master toggle. When `false`, every emission gate closes; recordAction still records the row, just without a label tail.
+- `warning_emits_label` (bool, default `false`) — opt-in for warning emission. When `true`, warnings emit per the action-type table above.
+- `emit_reason_labels` (bool, default `true`) — top-level gate on §F21.2 reason emission. When `false`, the action label still emits but no `reason-<code>` labels accompany it.
+- `reason_label_prefix` (string, default `"reason-"`) — prefixed onto each `reason_code` to form reason labels' `val`. Empty prefix is permitted but logs a startup warning (the bare reason code becomes the label val, which can collide with other custom vals).
+- `[label_emission.action_label_overrides.<action_type>]` — per-action-type overrides. Each entry replaces the default `val` plus optionally `severity`, `blurs`, `locales`. The `note` action type is permitted as a key for symmetry but the resolver still returns no label.
+- `[label_emission.severity_overrides]` — lighter-weight knob: change just the severity for an action type without re-declaring the full label spec. Ignored when an `action_label_overrides` entry exists for the same action type (the explicit override's severity wins).
+
+**Cross-action `val` uniqueness.** The config loader rejects two `action_label_overrides` entries with the same `val`. Each label value must discriminate to exactly one action type: revocation (§F21.3) reads `subject_actions.emitted_label_uri` and constructs a negation that targets the same `(src, uri, val)` tuple. If two action types could emit the same `val`, revocation routing would be ambiguous.
+
+#### F21.2. Reason labels
+
+In addition to the action label, an action with non-empty `reason_codes` emits one reason label per code:
+
+- `val = reason_label_prefix + reason_code` (e.g., `reason-spam`, `reason-hate-speech` under the default prefix).
+- `severity = inform` (fixed at this layer in v1.5 — reason labels describe *why* a moderation event occurred, not *what* effect it has, so they're advisory by design). Per-reason severity is deferred to v1.6+ if real demand surfaces.
+- `blurs = None`, `locales = []`.
+- `uri` and `cid` mirror the action label's targeting (account-level → `subject_did`; record-level → `subject_uri`).
+- `cts` matches the action label's emission time; `exp` matches the action's `expires_at` (so a `temp_suspension`'s reason labels expire alongside the action label).
+
+**Gate composition.** Reason emission requires all of: `[label_emission].enabled = true`, `emit_reason_labels = true`, non-empty `reason_codes`, action type ≠ `note`, and (for warnings) `warning_emits_label = true`. The warning gate is shared between action label and reason labels by design — a warning whose action label is suppressed cannot surface reason labels alone (reasons-without-context confuses consumers, and the recovery path is asymmetric since reason-only labels would have to be negated even though they were never paired with a wire-visible action label).
+
+**Worked example** (default prefix, default policy, takedown with reasons `["hate-speech", "harassment"]` against `did:plc:abc`):
+
+| Emission order | `val` | `uri` | `severity` | `exp` |
+|---|---|---|---|---|
+| 1 | `!takedown` | `did:plc:abc` | `alert` | — |
+| 2 | `reason-hate-speech` | `did:plc:abc` | `inform` | — |
+| 3 | `reason-harassment` | `did:plc:abc` | `inform` | — |
+
+#### F21.3. Negation on revocation
+
+Revoking an action atomically emits negation labels for every label that the original action emitted. The mechanism is ATProto's standard negation: a fresh label record with `neg = true` targeting the same `(src, uri, val)` tuple as the original. Consumers honoring the labeler's stream see the negation supersede the original; the original record stays in place as forensic record.
+
+**Val-from-storage rule.** The negation reads `val` from `subject_actions.emitted_label_uri` (action label) and `subject_action_reason_labels.emitted_label_uri` (reason labels), NOT from a fresh policy lookup at revocation time. If an operator edits `[label_emission].action_label_overrides` between the action's emission and its revocation, the stored val is what was actually emitted on the wire — using a re-resolved val would produce a "negation" that doesn't actually negate anything because it targets a different tuple. The val must match the original tuple for negation to work; storage is the source of truth for what was emitted.
+
+**Negation is unconditional.** The recorder does not consult `[label_emission].enabled` or `warning_emits_label` at revocation time. Even when emission has been disabled since the action was recorded, prior emissions exist on the wire and must be negated; otherwise consumer AppViews would honor a stale takedown forever. The "is this action_type emittable now?" gate from §F21.1 governs emission only; negation has no such gate.
+
+**Negations carry no `exp`.** Even when negating a `temp_suspension` whose original labels carried an expiry, the negation itself is a permanent statement that supersedes the original. Expiring the negation would resurrect the original label in consumer caches.
+
+**Linkage rows preserved.** `subject_action_reason_labels` rows are NOT deleted on revocation. They are forensic record of "at this point in time, these labels were emitted." The negation labels are the protocol-visible signal; the linkage rows are the audit substrate.
+
+#### F21.4. Temp-suspension expiry via ATProto's native `exp`
+
+For `temp_suspension`, the emitted action label and every reason label carry `exp = action.expires_at` (RFC-3339 in the wire record). ATProto's label record schema (§F7) defines `exp` as the wall-clock at which consumers stop honoring the label; AppView consumers natively respect this. cairn-mod does **not** run a scheduled job to emit a negation when `exp` passes — the native exp is the right primitive, and a scheduled job would be a redundant second source of truth.
+
+Two timestamps run in parallel and flip together by design:
+
+- `subject_actions.expires_at` drives the §F20.4 decay calculator. Once past, the suspension stops freezing decay; strike contributions from prior actions resume their decay clocks.
+- `labels.exp` drives consumer AppView visibility. Once past, the label is no longer applied to the subject in consumer feeds.
+
+Because these are derived from the same input (`effective_at + duration_iso`), they always have the same value. The two surfaces are independent in implementation but converge on the same wall-clock.
+
+Revoking a `temp_suspension` early follows §F21.3: negations with `exp = None` ship in the same transaction as the revocation. Consumers see the negation supersede before `exp` would have fired naturally.
+
+#### F21.5. Idempotency
+
+The recorder applies a defense-in-depth idempotency guard between the `subject_actions` INSERT and the emission step:
+
+- **Action-label gate:** if `subject_actions.emitted_label_uri` is already non-NULL, the action-label emission loop skips entirely.
+- **Reason-label gate:** for each reason code in the request, if a `subject_action_reason_labels` row already exists for `(action_id, reason_code)`, that reason's emission is skipped.
+
+In v1.5's normal recordAction flow the row was just INSERTed inside the same transaction with `emitted_label_uri = NULL` and no linkage rows yet, so both gates are structurally a no-op in production. They exist to protect against future paths (backfill migrations, retry helpers, alternate write paths) where a row might already carry emission state, and against bugs that would otherwise silently produce duplicate `(src, uri, val)` records on the wire.
+
+The reason-label `subject_action_reason_labels` PK on `(action_id, reason_code)` is the SQL-level safety net: any duplicate INSERT aborts at the constraint regardless of whether the application-level gate fired.
+
+The audit row's `emitted_labels` list is built from drafts BEFORE the guard runs (the audit row writes before the INSERT, by §F20's predict-then-verify pattern). In v1.5 normal flow the guard never fires, so audit-recorded intent matches reality. If a future defensive scenario fires the guard and skips work, the audit row may claim more emissions than landed — accepted as a v1.5 limitation, since the divergence is structurally unreachable from any code path that v1.5 ships. Future re-emission paths are responsible for handling audit accordingly.
+
+#### F21.6. Customization for deployments
+
+The customization-via-config-in-shared-schema principle from §F20.2 (operator-declared reason vocabulary) extends directly to label emission. Different deployments — Hideaway, Northsky, Eurosky, Speakeasy, Blacksky, others — use the same cairn-mod code paths but declare different `[label_emission]` config:
+
+- A community-tier labeler emphasizing operator branding might declare `action_label_overrides.takedown.val = "!hideaway-takedown"` so consumer AppViews see the deployment-specific value.
+- A labeler with stricter visibility intent might set `severity_overrides.warning = "alert"` to give warnings more consumer-side weight.
+- A labeler with custom blurs (e.g., obscuring NSFW content under a `media` blur) configures `action_label_overrides.<type>.blurs` per action type.
+- A labeler with consumer-localized strings declares `action_label_overrides.<type>.locales` with `{lang, name, description}` per supported language.
+
+The recorder's path is the same across deployments. What differs is config — observable at startup time and verifiable against emitted label streams. This matches §F20.2's reason-vocabulary stance: cairn-mod's job is making policy declarable and observable, not adjudicating what the policy should be.
+
+#### F21.7. Schema linkage and audit log integration
+
+Two schema changes from migration `0004_label_emission.sql` (#57):
+
+- **`subject_actions.emitted_label_uri`** (TEXT, nullable). Despite the column name, it stores the action label's `val`, not a URI: ATProto labels have no canonical URIs, and the discriminator within `(src=service_did, uri=subject, val)` is the val alone (the labeler's `src` and the subject's `uri` are recoverable from the row). Populated in the same transaction as the action INSERT (NULL → non-NULL once); the schema trigger from §F20.6 is rewritten to permit this single transition (mirroring the revocation columns' NULL → non-NULL exception). Any further change aborts. Column name predates the realization that labels lack canonical URIs; locked once shipped.
+
+- **`subject_action_reason_labels`** — composite-PK `(action_id, reason_code)` linkage table. Columns: `action_id` (FK → `subject_actions.id`), `reason_code` (operator-vocabulary identifier from §F20.2), `emitted_label_uri` (the val, same convention as above), `emitted_at` (epoch-ms wall-clock at emission). One row per emitted reason label; written once on emit, preserved across revocation per §F21.3.
+
+**Audit log integration.** The audit chain (§F10 / v1.3) extends to cover emitted and negated label vals:
+
+- Every `recordAction` audit row's reason JSON gains `emitted_labels: [{val, uri}, ...]` — one entry per label this action will produce, in (action label first, reason labels by request order) sequence. Empty array when emission is gated (note, suppressed warning, policy disabled).
+- Every `revokeAction` audit row's reason JSON gains `negated_labels: [{val, uri}, ...]` — the same shape, listing each negation. Empty array when the revoked action emitted nothing.
+
+The hash chain locks both the action plus its emitted/negated label vals. Forensic verification proves not only "this action happened" but also "these specific labels were emitted alongside it" or "these specific labels were negated by this revocation." A consumer rebuilding the chain from the audit log can verify the labels table by walking each `subject_action_recorded` row and checking that `emitted_labels` matches the labels table's records for the action's tuple.
+
+#### F21.8. Public introspection and operator CLI
+
+Two read surfaces shipped alongside emission:
+
+**`subjectStrikeState.activeLabels`** (`tools.cairn.public.getMyStrikeState` and the admin-tier `tools.cairn.admin.getSubjectStrikes`, sharing the projection per §F20.7). One entry per non-revoked action that emitted labels and whose action label has not been negated. Action-centric grouping: each entry has `val` (action label), `actionId`, `actionType`, `reasonCodes` (array of bare codes — clients prefix with `reason_label_prefix` to recover reason-label vals), and optional `expiresAt`. Ordered most-recent-action-first. Cache-bypass invariant from §F20.9 extends here: the projection always reads `subject_actions`, `subject_action_reason_labels`, and the `labels` table directly; no caching layer in front.
+
+`exp`-passed labels are INCLUDED in `activeLabels`. The labels table is the source of truth for what cairn-mod has emitted; AppView-side honor of `exp` is the consumer's responsibility per §F7. Clients wanting a strictly-honored-now view filter on `expiresAt < now` themselves.
+
+**`cairn moderator labels <subject>`** (HTTP-routed, moderator-tier). Mirrors `cairn moderator strikes` in flag pattern but renders `activeLabels` as the primary output. Default human format is tabular (one row per emitted label — action label plus one per reason code, all sharing the action's context columns); `--json` emits just the `activeLabels` array, not the full strikes envelope. Operators wanting the full state continue to use `cairn moderator strikes --json`.
+
+#### F21.9. Deferred to future releases
+
+The v1.5 contribution is the action → label translation: how operators declare the mapping, how emission lands atomically with the action INSERT, how revocation negates, how reads expose the active set. Several adjacent capabilities are deliberately out of scope:
+
+- **Policy automation** (v1.6) — automatic action recording when a subject's strike count crosses an operator-declared threshold. v1.4's recorder is moderator-driven; v1.5's recorder still is; v1.6 will add operator-config-gated automatic-action paths (auto-vs-flag mode chosen per rule).
+- **PDS administrative actions** (v1.7+) — operator-config-gated bridge to `com.atproto.admin.*` on operator-controlled PDSes. Operators provide PDS admin credentials and declare which action types translate into PDS-level account state changes; cairn-mod calls the admin endpoints in lockstep with label emission. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments.
+- **Per-reason severity overrides** (v1.6+ if demand) — currently all reason labels are `inform`. Per-reason tuning is conceivable but not motivated.
+- **Per-reason decay overrides** — already deferred per §F20.10; the v1.5 emission surface does not change the calculus.
+- **Background cache refresh job** — already deferred per §F20.9; activeLabels recomputation rides the same cache-bypass posture and inherits the same deferral.
+- **Single-JOIN optimization for `activeLabels`** — the v1.5 implementation uses an N+1 query pattern (one SELECT per candidate action). Acceptable for v1.5's bounded-history use cases; query optimization deferred until profiling against real deployments surfaces a need.
+- **CID plumbing for record-level subjects** — `ActionForEmission.cid` exists but v1.5 always passes `None` (subject CIDs aren't yet plumbed through `RecordActionRequest`). Record-level labels without CID are protocol-valid, just less specific. Wiring through `tools.cairn.admin.recordAction` + the operator CLI is a future ticket.
 
 ## 8. Lexicons
 
@@ -1201,13 +1341,18 @@ The signals exist because they're real release-quality indicators. They are soft
 - Cross-language interop tests (TypeScript consumer).
 - Multi-label-per-frame batching in `subscribeLabels`.
 - Operator-facing metrics surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause) and structured-log conventions. (`/health` and `/ready` probe endpoints shipped in v1.1 — see §F14.)
-- Account moderation state model shipped in v1.4 (see §F20). Items deferred from §F20.10:
-  - Policy automation: auto-action recording when a subject crosses a strike threshold (v1.5).
-  - Label emission against moderation state: bridge between `subject_actions` and `applyLabel` so internal state surfaces as ATProto labels for AppView consumption (v1.6).
-  - Multiple-suspension-history accuracy in decay (v1.5+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
-  - Background cache refresh job for `subject_strike_state` (v1.5+). v1.4 ships lazy recompute-on-read; a background job adds lease coordination + restart-handling complexity that defers cleanly until a real performance need surfaces.
-  - Per-reason decay overrides (v1.5+). All reasons currently share one decay function and window.
-  - Accessory bot or Web UI for user-facing strike-state rendering — separate project from cairn-mod itself; `tools.cairn.public.getMyStrikeState` is the substrate, not the UI.
+- Account moderation state model shipped in v1.4 (see §F20). Label emission against moderation state shipped in v1.5 (see §F21) — the bridge between `subject_actions` and the labels table now lives in the recorder, with operator-declared mapping in `[label_emission]`. Items still deferred:
+  - Policy automation: auto-action recording when a subject crosses a strike threshold (v1.6). Operator-declared rules trigger automatic recordAction calls; per-rule mode (auto-record vs flag-for-review) chosen by operator config.
+  - PDS administrative actions (v1.7+). Operator-config-gated bridge that translates emitted labels into PDS-level account state changes by calling `com.atproto.admin.*` on operator-controlled PDSes. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments. Operators who run a PDS for their community (e.g., Hideaway with Prism credentials, or any deployment with admin access to its members' PDSes) opt in by declaring credentials and the per-action-type mapping; cairn-mod calls the admin endpoints in lockstep with label emission.
+  - Multiple-suspension-history accuracy in decay (v1.6+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
+  - Background cache refresh job for `subject_strike_state` (v1.6+). v1.4 ships lazy recompute-on-read; v1.5 didn't change the cache surface; a background job adds lease coordination + restart-handling complexity that defers cleanly until a real performance need surfaces.
+  - Per-reason decay overrides (v1.6+). All reasons currently share one decay function and window.
+  - Per-reason severity overrides on emitted reason labels (v1.6+ if demand). v1.5 fixes reason-label severity at `inform`; per-reason tuning is conceivable but not motivated.
+  - Accessory bot or Web UI for user-facing strike-state rendering — separate project from cairn-mod itself; `tools.cairn.public.getMyStrikeState` (with `activeLabels` from §F21.8) is the substrate, not the UI.
+
+**Continued v1.x trajectory.** Subsequent v1.x releases continue toward Ozone parity for community-tier deployments. Full parity expected around v1.10 (review queue with distinct workflows for signals vs reports, source management with negation-on-revocation default, webhook signal intake, team management refinement). The v1.x sequence is incremental and each release ships in isolation; the trajectory is not a commitment to any particular release sequencing.
+
+**Future direction: cairn-mod-enterprise (open scope).** A platform-tier sibling project for large-scale deployments — Postgres backend, multi-node coordination, observability primitives, HA posture, scheduled jobs, operational tooling — is contemplated as eventual direction but not currently in scope. The split between community-tier (single-binary SQLite, what cairn-mod is today) and enterprise-tier (cluster-aware Postgres) lets the community-tier surface stay tight while the enterprise-tier project absorbs the operational complexity that doesn't belong in a single-maintainer crate. No version commitment; depends on community-tier completion plus genuine adoption pull. Could land alongside v1.x as a separate project, or anchor v2.0 as a unification of both. Deferred for explicit decision when the conditions are clearer.
 
 ## 19. Release Runbook
 
