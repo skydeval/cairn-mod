@@ -1,0 +1,61 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.dismissPendingAction",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Dismiss a pending policy action (§F22). The pending row's `resolution` column transitions NULL → 'dismissed' with `resolved_at` and `resolved_by_did` set; no `subject_actions` row is created, no labels emit, no strike-state recompute. The pending row stays in the table as forensic record (`confirmed_action_id` stays NULL since no action was created). A single hash-chained `pending_policy_action_dismissed` audit row commits with the UPDATE in one transaction; the moderator's optional `reason` lands in the audit row's reason JSON (the pending table itself has no `resolved_reason` column — rationale lives in audit).",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "pendingId"
+          ],
+          "properties": {
+            "pendingId": {
+              "type": "integer",
+              "description": "`pending_policy_actions.id` of the pending row to dismiss."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Optional moderator-facing rationale for the dismissal. Echoed in the audit row's `moderator_reason` field; not stored on the pending row."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "pendingId",
+            "resolvedAt"
+          ],
+          "properties": {
+            "pendingId": {
+              "type": "integer",
+              "description": "Echoed `pending_policy_actions.id` (now `resolution = 'dismissed'`)."
+            },
+            "resolvedAt": {
+              "type": "string",
+              "format": "datetime",
+              "description": "Wall-clock the dismissal took effect, RFC-3339 Z."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "PendingActionNotFound",
+          "description": "No `pending_policy_actions` row matches `pendingId`."
+        },
+        {
+          "name": "PendingAlreadyResolved",
+          "description": "The pending row's `resolution` column is already non-NULL (already confirmed or dismissed)."
+        }
+      ]
+    }
+  }
+}

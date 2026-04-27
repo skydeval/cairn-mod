@@ -85,6 +85,7 @@ fn procedures_have_input_queries_have_parameters() {
         "recordAction",
         "revokeAction",
         "confirmPendingAction",
+        "dismissPendingAction",
     ]);
     let queries: HashSet<&str> = HashSet::from([
         "listLabels",
@@ -295,6 +296,7 @@ fn expected_endpoint_files_all_present() {
         "getSubjectHistory",
         "getSubjectStrikes",
         "confirmPendingAction",
+        "dismissPendingAction",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

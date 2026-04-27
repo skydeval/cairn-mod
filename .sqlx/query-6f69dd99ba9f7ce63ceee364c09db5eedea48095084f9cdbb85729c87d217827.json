@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT actor_did AS \"actor_did!: String\", reason\n           FROM audit_log\n           WHERE action = 'pending_policy_action_dismissed'\n           ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "actor_did!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "6f69dd99ba9f7ce63ceee364c09db5eedea48095084f9cdbb85729c87d217827"
+}

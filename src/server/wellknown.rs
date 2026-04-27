@@ -75,6 +75,7 @@ pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "applyLabel",
     "confirmPendingAction",
     "defs",
+    "dismissPendingAction",
     "flagReporter",
     "getAuditLog",
     "getReport",

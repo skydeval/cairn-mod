@@ -2929,3 +2929,291 @@ async fn confirm_pending_action_takedown_emits_hide_label() {
         "takedown emits the !takedown action label by default",
     );
 }
+
+// =================== dismissPendingAction (#75, v1.6) ===================
+//
+// Inverse of #74's confirm flow: a pending row's resolution
+// transitions NULL → 'dismissed' with no subject_actions row,
+// no label emission, no strike-state recompute. The pending
+// stays in the table as forensic record. A single hash-chained
+// `pending_policy_action_dismissed` audit row commits with the
+// UPDATE in one transaction.
+
+const DISMISS_PENDING_LXM: &str = "tools.cairn.admin.dismissPendingAction";
+
+async fn post_dismiss_pending(
+    h: &Harness,
+    actor_did: &str,
+    body: serde_json::Value,
+) -> reqwest::Response {
+    http()
+        .post(format!("http://{}/xrpc/{DISMISS_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(actor_did, DISMISS_PENDING_LXM))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_no_auth_returns_401() {
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{DISMISS_PENDING_LXM}", h.addr))
+        .json(&serde_json::json!({"pendingId": pending_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_with_origin_header_returns_403() {
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{DISMISS_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, DISMISS_PENDING_LXM))
+        .header("Origin", "https://example.com")
+        .json(&serde_json::json!({"pendingId": pending_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_unknown_pending_returns_404() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": 99_999})).await;
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "PendingActionNotFound");
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_already_confirmed_returns_400() {
+    // Pending was confirmed first via #74; dismissing it now
+    // should hit the resolution-already-set check.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let confirm =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(confirm.status().is_success());
+
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "PendingAlreadyResolved");
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_already_dismissed_returns_400() {
+    // Same lexicon error code regardless of whether the prior
+    // resolution was confirmed or dismissed (resolution column is
+    // already non-NULL either way).
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let first =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(first.status().is_success());
+
+    let second =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert_eq!(second.status(), 400);
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"], "PendingAlreadyResolved");
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_happy_path_no_action_no_emission() {
+    // Dismiss flips the pending row to resolution='dismissed'
+    // with resolved_at + resolved_by_did set; confirmed_action_id
+    // stays NULL (no action created); no new subject_actions row;
+    // no new labels.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+
+    let actions_before: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM subject_actions")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    let labels_before: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["pendingId"].as_i64().unwrap(), pending_id);
+    assert!(body["resolvedAt"].as_str().unwrap().ends_with('Z'));
+
+    // Pending row resolved to 'dismissed', linkage NULL.
+    let pending = sqlx::query!(
+        r#"SELECT
+             resolution,
+             resolved_at,
+             resolved_by_did,
+             confirmed_action_id
+           FROM pending_policy_actions WHERE id = ?1"#,
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending.resolution.as_deref(), Some("dismissed"));
+    assert!(pending.resolved_at.is_some());
+    assert_eq!(pending.resolved_by_did.as_deref(), Some(ADMIN_DID));
+    assert!(
+        pending.confirmed_action_id.is_none(),
+        "dismissal does not link to a materialized action"
+    );
+
+    // No new subject_actions / labels rows landed.
+    let actions_after: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM subject_actions")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    let labels_after: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        actions_after, actions_before,
+        "no subject_actions row created"
+    );
+    assert_eq!(labels_after, labels_before, "no labels emitted");
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_with_reason_echoed_in_audit() {
+    // Optional moderator reason lands in the audit row's reason
+    // JSON as moderator_reason (option (b) — pending table has no
+    // resolved_reason column; rationale lives in audit).
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = post_dismiss_pending(
+        &h,
+        ADMIN_DID,
+        serde_json::json!({"pendingId": pending_id, "reason": "policy applied too aggressively"}),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let audit_row = sqlx::query!(
+        r#"SELECT actor_did AS "actor_did!: String", reason
+           FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+           ORDER BY id DESC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_row.actor_did, ADMIN_DID);
+    let reason: Value = serde_json::from_str(audit_row.reason.as_deref().unwrap()).unwrap();
+    assert_eq!(reason["pending_id"].as_i64().unwrap(), pending_id);
+    assert_eq!(reason["triggered_by_policy_rule"], "flag_at_1");
+    assert_eq!(reason["action_type"], "indef_suspension");
+    assert_eq!(
+        reason["moderator_reason"],
+        "policy applied too aggressively"
+    );
+    // Echoed pending reason_codes for forensic ease (avoids
+    // joining to pending_policy_actions to read the audit alone).
+    assert_eq!(reason["reason_codes"][0], "spam");
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_without_reason_audit_moderator_reason_is_null() {
+    // No reason supplied → audit reason JSON's moderator_reason
+    // is JSON null (not omitted) so consumers reading the audit
+    // know the field is "explicitly absent" vs "schema doesn't
+    // include it."
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+
+    let reason: Value = serde_json::from_str(
+        sqlx::query_scalar!(
+            r#"SELECT reason FROM audit_log
+               WHERE action = 'pending_policy_action_dismissed'
+               ORDER BY id DESC LIMIT 1"#,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+        .as_deref()
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(reason["moderator_reason"].is_null());
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_against_takendown_subject_succeeds() {
+    // Dismiss has no SubjectTakendown defensive check (unlike
+    // confirm in #74). A moderator explicitly closing the loop on
+    // a pending after the subject is takendown is meaningful —
+    // and is in fact what auto-dismissal-on-takedown (#76) will
+    // automate.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    record_takedown(&h, &["hate-speech"]).await;
+
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(
+        resp.status().is_success(),
+        "dismiss against takendown subject should succeed: {}",
+        resp.status()
+    );
+
+    let resolution: Option<String> = sqlx::query_scalar!(
+        "SELECT resolution FROM pending_policy_actions WHERE id = ?1",
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(resolution.as_deref(), Some("dismissed"));
+}
+
+#[tokio::test]
+async fn dismiss_pending_action_leaves_strike_state_cache_unchanged() {
+    // Dismissal is a pure pending-row UPDATE plus an audit row;
+    // it does not touch subject_strike_state. Capture the cache
+    // pre-dismiss and assert byte-for-byte equality post-dismiss.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let before = sqlx::query!(
+        r#"SELECT
+             current_strike_count AS "current_strike_count!: i64",
+             last_action_at,
+             last_recompute_at AS "last_recompute_at!: i64"
+           FROM subject_strike_state WHERE subject_did = ?1"#,
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+
+    let after = sqlx::query!(
+        r#"SELECT
+             current_strike_count AS "current_strike_count!: i64",
+             last_action_at,
+             last_recompute_at AS "last_recompute_at!: i64"
+           FROM subject_strike_state WHERE subject_did = ?1"#,
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(after.current_strike_count, before.current_strike_count);
+    assert_eq!(after.last_action_at, before.last_action_at);
+    assert_eq!(
+        after.last_recompute_at, before.last_recompute_at,
+        "dismiss must not recompute strike state",
+    );
+}

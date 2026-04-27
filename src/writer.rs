@@ -168,6 +168,7 @@ pub const AUDIT_ACTION_VALUES: &[&str] = &[
     "label_applied",
     "label_negated",
     "pending_policy_action_confirmed",
+    "pending_policy_action_dismissed",
     "report_resolved",
     "reporter_flagged",
     "reporter_unflagged",
@@ -288,6 +289,16 @@ enum WriteCommand {
     ConfirmPendingAction(
         ConfirmPendingActionRequest,
         oneshot::Sender<Result<ConfirmedPendingAction>>,
+    ),
+    /// Dismiss a pending policy action (§F22 / #75). Single-
+    /// transaction: pending row load + state-check, UPDATE to
+    /// resolution='dismissed', `pending_policy_action_dismissed`
+    /// audit row. No subject_actions row, no label emission, no
+    /// strike-state change — the moderator is explicitly closing
+    /// the loop on what the policy engine flagged.
+    DismissPendingAction(
+        DismissPendingActionRequest,
+        oneshot::Sender<Result<DismissedPendingAction>>,
     ),
     Shutdown(oneshot::Sender<Result<()>>),
 }
@@ -527,6 +538,46 @@ pub struct ConfirmedPendingAction {
     pub resolved_at: String,
 }
 
+/// Request to dismiss a pending policy action (§F22 / #75). The
+/// pending row stays in the table as forensic record with
+/// `resolution = 'dismissed'`; no subject_actions row, no label
+/// emission, no strike-state change. Single-transaction: pending
+/// load + state-check, UPDATE, audit_log hash-chain append.
+///
+/// Note that there is no `SubjectTakendown` defensive check here
+/// (unlike confirm in #74): explicit dismissal is meaningful
+/// regardless of takedown state, and is in fact part of the
+/// cleanup path #76 will automate when a takedown lands.
+#[derive(Debug, Clone)]
+pub struct DismissPendingActionRequest {
+    /// `pending_policy_actions.id` to dismiss. Errors with
+    /// [`Error::PendingActionNotFound`] when the row doesn't
+    /// exist; [`Error::PendingAlreadyResolved`] when the
+    /// resolution column is already non-NULL (already confirmed
+    /// or dismissed).
+    pub pending_id: i64,
+    /// DID of the moderator dismissing the pending. Lands on
+    /// `pending_policy_actions.resolved_by_did` and the audit
+    /// row's `actor_did`.
+    pub moderator_did: String,
+    /// Optional moderator-facing rationale. Captured in the
+    /// audit row's reason JSON as `moderator_reason` (option
+    /// (b) per the design — the pending table tracks resolution
+    /// state; rationale lives in audit). The pending row itself
+    /// has no `resolved_reason` column.
+    pub reason: Option<String>,
+}
+
+/// Result of a successful [`WriterHandle::dismiss_pending_action`].
+#[derive(Debug, Clone)]
+pub struct DismissedPendingAction {
+    /// The pending row that was just resolved (echoed for
+    /// confirmation).
+    pub pending_id: i64,
+    /// Wall-clock the dismissal took effect, as RFC-3339 Z.
+    pub resolved_at: String,
+}
+
 /// Aggregate result of a full sweep run (returned by
 /// [`WriterHandle::sweep`] after looping over batches).
 #[derive(Debug, Clone)]
@@ -716,6 +767,35 @@ impl WriterHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(WriteCommand::ConfirmPendingAction(req, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
+    /// Dismiss a pending policy action (§F22 / #75). The pending
+    /// row's resolution columns transition NULL → 'dismissed' and
+    /// a single hash-chained `pending_policy_action_dismissed`
+    /// audit row commits with the UPDATE — no subject_actions
+    /// row, no label emission, no strike-state change. The
+    /// pending row stays in the table as forensic record
+    /// (confirmed_action_id stays NULL since no action was
+    /// created).
+    ///
+    /// Errors:
+    ///
+    /// - [`Error::PendingActionNotFound`] when no row matches
+    ///   `pending_id`.
+    /// - [`Error::PendingAlreadyResolved`] when the row's
+    ///   resolution column is already non-NULL.
+    pub async fn dismiss_pending_action(
+        &self,
+        req: DismissPendingActionRequest,
+    ) -> Result<DismissedPendingAction> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::DismissPendingAction(req, reply_tx))
             .await
             .map_err(|_| Error::Signing("writer task is shut down".into()))?;
         reply_rx
@@ -998,6 +1078,10 @@ impl Writer {
                         }
                         Some(WriteCommand::ConfirmPendingAction(req, reply)) => {
                             let res = self.handle_confirm_pending_action(req).await;
+                            let _ = reply.send(res);
+                        }
+                        Some(WriteCommand::DismissPendingAction(req, reply)) => {
+                            let res = self.handle_dismiss_pending_action(req).await;
                             let _ = reply.send(res);
                         }
                         Some(WriteCommand::Shutdown(reply)) => {
@@ -2900,6 +2984,115 @@ impl Writer {
         })
     }
 
+    /// Atomic dismissPendingAction flow (§F22 / #75). Loads the
+    /// pending row, validates state, UPDATEs the resolution
+    /// columns to 'dismissed', and writes a hash-chained
+    /// `pending_policy_action_dismissed` audit row — all in one
+    /// transaction. Inverse of `handle_confirm_pending_action`:
+    /// no subject_actions row, no label emission, no strike-state
+    /// recompute. The pending row stays in the table as forensic
+    /// record (`confirmed_action_id` stays NULL; only confirmed
+    /// pendings link forward to a materialized action).
+    ///
+    /// No `SubjectTakendown` defensive check (unlike confirm in
+    /// #74): explicit dismissal is meaningful regardless of
+    /// takedown state, and is in fact part of the cleanup path
+    /// #76 will automate when a takedown lands.
+    async fn handle_dismiss_pending_action(
+        &self,
+        req: DismissPendingActionRequest,
+    ) -> Result<DismissedPendingAction> {
+        let mut tx = self.pool.begin().await?;
+
+        // ---------- load + validate pending ----------
+        let pending = sqlx::query!(
+            r#"SELECT
+                 subject_did             AS "subject_did!: String",
+                 subject_uri,
+                 action_type             AS "action_type!: String",
+                 reason_codes            AS "reason_codes!: String",
+                 triggered_by_policy_rule AS "triggered_by_policy_rule!: String",
+                 resolution
+               FROM pending_policy_actions
+               WHERE id = ?1"#,
+            req.pending_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let pending = pending.ok_or(Error::PendingActionNotFound(req.pending_id))?;
+        if pending.resolution.is_some() {
+            return Err(Error::PendingAlreadyResolved(req.pending_id));
+        }
+
+        let now_ms = epoch_ms_now();
+
+        // ---------- audit row ----------
+        //
+        // Reason JSON cross-references the pending row and echoes
+        // the proposed-action shape (action_type, reason_codes)
+        // so a forensic reader can reconstruct "moderator
+        // dismissed a proposed indef_suspension for spam"
+        // without joining to pending_policy_actions. subject_did
+        // / actor_did are already on the audit_log row's target /
+        // actor_did — not duplicated in the reason JSON.
+        let reason_codes_for_audit: serde_json::Value =
+            serde_json::from_str(&pending.reason_codes).unwrap_or(serde_json::Value::Null);
+        let audit_reason = build_pending_dismissed_audit_reason(
+            req.pending_id,
+            &pending.triggered_by_policy_rule,
+            &pending.action_type,
+            reason_codes_for_audit,
+            req.reason.as_deref(),
+        );
+        let audit_target = pending
+            .subject_uri
+            .clone()
+            .unwrap_or_else(|| pending.subject_did.clone());
+        crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: now_ms,
+                action: "pending_policy_action_dismissed".into(),
+                actor_did: req.moderator_did.clone(),
+                target: Some(audit_target),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        // ---------- UPDATE pending: NULL → 'dismissed' ----------
+        //
+        // The schema trigger (migration 0005) permits this single
+        // NULL → non-NULL transition on resolution / resolved_at
+        // / resolved_by_did; confirmed_action_id stays NULL by
+        // design (no action was created). Setting all three
+        // columns together so the row's "dismissed implies who
+        // and when" invariant holds at every queryable instant.
+        let dismissed_resolution = "dismissed";
+        sqlx::query!(
+            "UPDATE pending_policy_actions
+             SET resolution = ?1,
+                 resolved_at = ?2,
+                 resolved_by_did = ?3
+             WHERE id = ?4",
+            dismissed_resolution,
+            now_ms,
+            req.moderator_did,
+            req.pending_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(DismissedPendingAction {
+            pending_id: req.pending_id,
+            resolved_at: rfc3339_from_epoch_ms(now_ms)?,
+        })
+    }
+
     async fn heartbeat(&self) -> Result<()> {
         let now_ms = epoch_ms_now();
         sqlx::query!(
@@ -3181,6 +3374,28 @@ pub const AUDIT_REASON_REVOKE_ACTION: &str =
 #[doc(alias = "audit_log.reason.pending_policy_action_confirmed")]
 pub const AUDIT_REASON_CONFIRM_PENDING_ACTION: &str = "pending_policy_action_confirmed: { pending_id, action_id, triggered_by_policy_rule, action_type, primary_reason, reason_codes, strike_value_base, strike_value_applied, was_dampened, emitted_labels, moderator_note }";
 
+/// Audit-log `reason` JSON schema for `pending_policy_action_dismissed`
+/// (§F22 / #75). Single audit row commits with the pending →
+/// dismissed transition: the pending_policy_actions UPDATE
+/// hash-chains under one audit entry. No subject_actions row is
+/// created, no labels emit; the dismissed pending stays in the
+/// table as forensic record. The audit row's reason JSON echoes
+/// the proposed-action shape so forensic readers can reconstruct
+/// "moderator dismissed proposed action X" without joining to
+/// pending_policy_actions.
+///
+/// ```json
+/// {
+///   "pending_id": <i64>,
+///   "triggered_by_policy_rule": "<rule name>",
+///   "action_type": "<warning|note|temp_suspension|indef_suspension|takedown>",
+///   "reason_codes": ["<id1>", "<id2>"],
+///   "moderator_reason": "<free text>" | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.pending_policy_action_dismissed")]
+pub const AUDIT_REASON_DISMISS_PENDING_ACTION: &str = "pending_policy_action_dismissed: { pending_id, triggered_by_policy_rule, action_type, reason_codes, moderator_reason }";
+
 /// `reporter_flagged` / `reporter_unflagged` audit reason JSON —
 /// see [`AUDIT_REASON_FLAG_REPORTER`]. Shared with the flagReporter
 /// handler (not the writer — flagReporter is a direct handler txn
@@ -3334,6 +3549,36 @@ fn build_pending_confirmed_audit_reason(
         "was_dampened": was_dampened,
         "emitted_labels": emitted_labels,
         "moderator_note": moderator_note,
+    })
+    .to_string()
+}
+
+/// `pending_policy_action_dismissed` audit reason JSON — see
+/// [`AUDIT_REASON_DISMISS_PENDING_ACTION`] for the schema. Cross-
+/// references the originating pending row (`pending_id`,
+/// `triggered_by_policy_rule`) and echoes the proposed-action
+/// shape (`action_type`, `reason_codes`) so forensic readers can
+/// reconstruct "moderator dismissed proposed action X for reason
+/// Y" without joining back to `pending_policy_actions`.
+///
+/// `reason_codes_json` is the parsed JSON value from the pending
+/// row's `reason_codes` column (already a JSON array of strings);
+/// callers pass [`serde_json::Value::Null`] when the column is
+/// somehow unparseable, which preserves the audit row rather
+/// than failing the dismissal.
+fn build_pending_dismissed_audit_reason(
+    pending_id: i64,
+    triggered_by_policy_rule: &str,
+    action_type: &str,
+    reason_codes_json: serde_json::Value,
+    moderator_reason: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "pending_id": pending_id,
+        "triggered_by_policy_rule": triggered_by_policy_rule,
+        "action_type": action_type,
+        "reason_codes": reason_codes_json,
+        "moderator_reason": moderator_reason,
     })
     .to_string()
 }

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                 subject_did             AS \"subject_did!: String\",\n                 subject_uri,\n                 action_type             AS \"action_type!: String\",\n                 reason_codes            AS \"reason_codes!: String\",\n                 triggered_by_policy_rule AS \"triggered_by_policy_rule!: String\",\n                 resolution\n               FROM pending_policy_actions\n               WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_did!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "action_type!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason_codes!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "triggered_by_policy_rule!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolution",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "bafd0de884202c71fff924a580edc6ebc3028d2d58e351f45ebf4195adc888c3"
+}

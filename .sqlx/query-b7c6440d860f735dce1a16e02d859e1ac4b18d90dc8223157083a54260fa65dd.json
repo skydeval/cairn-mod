@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pending_policy_actions\n             SET resolution = ?1,\n                 resolved_at = ?2,\n                 resolved_by_did = ?3\n             WHERE id = ?4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b7c6440d860f735dce1a16e02d859e1ac4b18d90dc8223157083a54260fa65dd"
+}

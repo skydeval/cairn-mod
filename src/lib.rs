@@ -60,7 +60,8 @@ pub use server::{
 pub use signing::{canonical_bytes, label_to_lex_value_with_sig, sign_label, verify_label};
 pub use signing_key::SigningKey;
 pub use writer::{
-    ApplyLabelRequest, ConfirmPendingActionRequest, ConfirmedPendingAction, LabelEvent,
-    NegateLabelRequest, RecordActionRequest, RecordedAction, RevokeActionRequest, RevokedAction,
-    SweepBatchResult, SweepRequest, SweepResult, WriterHandle, spawn as spawn_writer,
+    ApplyLabelRequest, ConfirmPendingActionRequest, ConfirmedPendingAction,
+    DismissPendingActionRequest, DismissedPendingAction, LabelEvent, NegateLabelRequest,
+    RecordActionRequest, RecordedAction, RevokeActionRequest, RevokedAction, SweepBatchResult,
+    SweepRequest, SweepResult, WriterHandle, spawn as spawn_writer,
 };
