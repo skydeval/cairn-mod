@@ -133,6 +133,26 @@ pub struct Config {
     ///   valid action_type keys in override maps).
     #[serde(default)]
     pub label_emission: Option<LabelEmissionPolicyToml>,
+    /// `[policy_automation]` block (§F22, #71). TOML projection of
+    /// the operator's policy-automation surface; resolve to a
+    /// runtime [`crate::policy::automation::PolicyAutomationPolicy`]
+    /// via `PolicyAutomationPolicy::from_config`. Cross-validation
+    /// against `[moderation_reasons]` (rule reason_codes must exist
+    /// in the operator's vocabulary) lives at the [`Config::validate`]
+    /// level, not on the resolver, mirroring the v1.4 / v1.5
+    /// per-block-resolver convention.
+    ///
+    /// Two states:
+    /// - `None` — operator declared no block; the resolver returns
+    ///   shipped defaults (engine enabled, empty rule set — the
+    ///   engine evaluates each recordAction and finds nothing to
+    ///   fire).
+    /// - `Some(_)` — operator-declared rules. Each rule gets
+    ///   per-field validation (positive threshold, valid
+    ///   action_type, valid mode, duration only on temp_suspension,
+    ///   reason_codes match the `[moderation_reasons]` vocabulary).
+    #[serde(default)]
+    pub policy_automation: Option<PolicyAutomationPolicyToml>,
 }
 
 /// TOML projection of one entry in
@@ -484,6 +504,74 @@ fn default_sweep_batch_size() -> i64 {
     1000
 }
 
+/// TOML projection of [`crate::policy::automation::PolicyAutomationPolicy`]
+/// (§F22, #71). The `enabled` field carries a serde default so a partial
+/// `[policy_automation]` declaration with only rules picks up the
+/// shipped default (`true`); operators wanting the engine fully off
+/// declare `enabled = false` explicitly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyAutomationPolicyToml {
+    /// Master toggle. `true` (default) — engine evaluates rules on
+    /// every recordAction. `false` — engine skips evaluation
+    /// entirely; declared rules don't fire even if their thresholds
+    /// would match.
+    #[serde(default = "default_policy_automation_enabled")]
+    pub enabled: bool,
+    /// `[policy_automation.rules.<rule_name>]` sub-blocks. Map key
+    /// is the rule's identifier (validated at load time as
+    /// lowercase a-z / 0-9 / underscore, must start with a letter,
+    /// 1-64 chars). Empty map is the default — when
+    /// `[policy_automation]` is declared without any rules, the
+    /// engine is on but has nothing to fire.
+    #[serde(default)]
+    pub rules: BTreeMap<String, PolicyRuleToml>,
+}
+
+/// One rule entry under
+/// [`PolicyAutomationPolicyToml::rules`]. The runtime equivalent
+/// (with parsed action_type, validated mode, parsed duration,
+/// resolved reason_codes) is
+/// [`crate::policy::automation::PolicyRule`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyRuleToml {
+    /// Strike count crossing point that triggers the rule.
+    /// Validated `> 0` at config-load time. Rule fires only on
+    /// crossing — pre-action count below threshold AND post-action
+    /// count at or above. See [`crate::policy::automation`] module
+    /// docs for the full semantic.
+    pub threshold_strikes: i64,
+    /// Action type the rule produces when it fires. One of
+    /// `warning` / `note` / `temp_suspension` / `indef_suspension`
+    /// / `takedown`. Validated via
+    /// [`crate::moderation::types::ActionType::from_db_str`].
+    pub action_type: String,
+    /// `auto` (cairn-mod records the action directly inside the
+    /// triggering recordAction transaction) or `flag` (cairn-mod
+    /// records a `pending_policy_actions` row awaiting moderator
+    /// review). Case-sensitive at parse.
+    pub mode: String,
+    /// ISO-8601 duration string (e.g. `"P3D"`). Required iff
+    /// `action_type == "temp_suspension"`; rejected for other
+    /// types. Same parser as v1.4 #51's `duration_iso` surface
+    /// (no Y/M support — see `crate::writer::parse_iso8601_duration`,
+    /// `pub(crate)` for cross-module reuse).
+    pub duration: Option<String>,
+    /// Reason codes attached to the action this rule produces.
+    /// Each entry must exist in the operator's
+    /// `[moderation_reasons]` vocabulary; cross-validation lives
+    /// at [`Config::validate`]. When omitted, the resolver
+    /// substitutes a single-element `["policy_threshold"]` — that
+    /// identifier must therefore appear in the vocabulary, or the
+    /// operator must specify `reason_codes` explicitly on every
+    /// rule.
+    #[serde(default)]
+    pub reason_codes: Option<Vec<String>>,
+}
+
+fn default_policy_automation_enabled() -> bool {
+    true
+}
+
 /// Operator-side PDS auth config (§F1). Scope is narrow — just the
 /// PDS URL + session file path. Named `[operator]` today; if future
 /// operator-identity fields land (contact, alerts, etc.) the table
@@ -529,12 +617,13 @@ impl Config {
             )));
         }
         // Reason vocabulary (§F20, #47): build via the canonical
-        // resolver and discard. If the operator declared an empty
-        // [moderation_reasons] section, an invalid identifier, a
-        // zero base_weight, or an empty description, the resolver
-        // returns an Error::Signing here that surfaces as a
-        // config-load failure at startup.
-        let _ = crate::moderation::reasons::ReasonVocabulary::from_config(self)?;
+        // resolver and bind it for the §F22 #71 cross-check below.
+        // If the operator declared an empty [moderation_reasons]
+        // section, an invalid identifier, a zero base_weight, or
+        // an empty description, the resolver returns an
+        // Error::Signing here that surfaces as a config-load
+        // failure at startup.
+        let vocab = crate::moderation::reasons::ReasonVocabulary::from_config(self)?;
         // Strike policy (§F20, #48): same single-source-of-truth
         // pattern. The resolver applies the curve-length convention
         // (`max(0, threshold - 1)`), strict-ascending check, and
@@ -549,6 +638,16 @@ impl Config {
         // maps. See [`crate::labels::policy`] for the full validation
         // rules.
         let _ = crate::labels::policy::LabelEmissionPolicy::from_config(self)?;
+        // Policy automation (§F22, #71): each rule's per-field
+        // validation runs in from_config; the cross-block check —
+        // every rule's reason_codes must exist in the operator's
+        // [moderation_reasons] vocabulary — runs here, where both
+        // resolvers have completed. Each loader stays focused on
+        // its own block; cross-block validation lives at the
+        // Config level.
+        let policy_automation =
+            crate::policy::automation::PolicyAutomationPolicy::from_config(self)?;
+        policy_automation.validate_reason_codes_against(&vocab)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the

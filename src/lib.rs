@@ -27,6 +27,7 @@ pub mod label;
 pub mod labels;
 pub mod moderation;
 pub mod moderators;
+pub mod policy;
 pub mod report;
 pub mod serve;
 pub mod server;
@@ -44,6 +45,10 @@ pub use labels::emission::{ActionForEmission, LabelDraft};
 pub use labels::policy::{LabelEmissionPolicy, LabelSpec};
 pub use moderation::policy::StrikePolicy;
 pub use moderation::reasons::ReasonVocabulary;
+pub use policy::automation::{
+    DEFAULT_POLICY_REASON_CODE, PolicyAutomationPolicy, PolicyMode, PolicyRule,
+    SYNTHETIC_POLICY_ACTOR_DID,
+};
 pub use server::{
     AdminConfig, CreateReportConfig, RetentionConfig, SubscribeConfig, admin_router,
     create_report_router, current_retention_floor, did_document_router, health_router,

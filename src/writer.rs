@@ -2449,7 +2449,14 @@ fn route_subject(subject: &str) -> Result<(String, Option<String>)> {
 /// real cases without the calendar-arithmetic complexity of Y/M.
 ///
 /// Returns the duration in seconds.
-fn parse_iso8601_duration(s: &str) -> Result<u64> {
+///
+/// `pub(crate)` so [`crate::policy::automation`] (#71) can validate
+/// `[policy_automation.rules.<name>].duration` at config-load time
+/// against the same parser the recorder uses on its input
+/// boundary — single source of truth for the supported duration
+/// shape across the moderator-recorded path and the policy-engine
+/// path.
+pub(crate) fn parse_iso8601_duration(s: &str) -> Result<u64> {
     let body = s.strip_prefix('P').ok_or_else(|| {
         Error::Signing(format!(
             "duration {s:?} must start with 'P' (ISO-8601 duration form, e.g. P7D)"
