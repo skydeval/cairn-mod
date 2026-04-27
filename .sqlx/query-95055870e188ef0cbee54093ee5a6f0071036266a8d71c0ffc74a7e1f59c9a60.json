@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\"\n           FROM subject_actions\n           WHERE actor_kind = 'policy' AND action_type = 'takedown'",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "95055870e188ef0cbee54093ee5a6f0071036266a8d71c0ffc74a7e1f59c9a60"
+}

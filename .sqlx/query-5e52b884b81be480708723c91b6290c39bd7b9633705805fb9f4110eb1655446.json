@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id                       AS \"id!: i64\",\n             triggered_by_policy_rule AS \"triggered_by_policy_rule!: String\",\n             action_type              AS \"action_type!: String\",\n             reason_codes             AS \"reason_codes!: String\"\n           FROM pending_policy_actions\n           WHERE subject_did = ?1 AND resolution IS NULL\n           ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "triggered_by_policy_rule!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "action_type!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason_codes!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e52b884b81be480708723c91b6290c39bd7b9633705805fb9f4110eb1655446"
+}

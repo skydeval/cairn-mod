@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT actor_did AS \"actor_did!: String\", reason\n           FROM audit_log\n           WHERE action = 'pending_policy_action_dismissed'\n             AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'",
+  "describe": {
+    "columns": [
+      {
+        "name": "actor_did!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "88745cee5e653c20ff373435a5c131086adc673471c0d774c15aef1ec28f712b"
+}

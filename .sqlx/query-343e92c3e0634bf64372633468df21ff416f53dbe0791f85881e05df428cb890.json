@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*)\n           FROM audit_log\n           WHERE action = 'pending_policy_action_dismissed'\n             AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "343e92c3e0634bf64372633468df21ff416f53dbe0791f85881e05df428cb890"
+}

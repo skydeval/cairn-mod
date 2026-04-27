@@ -1642,6 +1642,34 @@ impl Writer {
             label_events.push(event);
         }
 
+        // ---------- takedown cascade (#76, v1.6) ----------
+        //
+        // A policy-auto-recorded Takedown auto-dismisses every
+        // unresolved pending_policy_actions row for the subject —
+        // including any pending whose own rule fired in mode=flag
+        // earlier in the subject's history. The cascade's
+        // resolved_by_did is the synthetic policy DID, marking
+        // the dismissal as system-driven rather than moderator-
+        // driven for downstream filtering.
+        //
+        // The pending row that the rule itself proposed (when
+        // this auto-action's own rule was originally mode=flag)
+        // can't appear here: a rule firing in mode=auto inserts a
+        // subject_actions row directly via this function and does
+        // NOT create a pending_policy_actions row. The cascade
+        // sees only OTHER subject pendings.
+        if rule.action_type == ActionType::Takedown {
+            auto_dismiss_pendings_on_takedown(
+                tx,
+                subject_did,
+                subject_uri,
+                auto_inserted_id,
+                crate::policy::automation::SYNTHETIC_POLICY_ACTOR_DID,
+                created_at,
+            )
+            .await?;
+        }
+
         Ok(auto_inserted_id)
     }
 
@@ -2419,6 +2447,34 @@ impl Writer {
             }
         }
 
+        // ---------- takedown cascade (#76, v1.6) ----------
+        //
+        // Moderator-recorded Takedown auto-dismisses every
+        // unresolved pending_policy_actions row for the subject.
+        // The cascade audit rows hash-chain after the
+        // precipitating action's audit row (and any policy-
+        // consequence audit row from the auto-action branch
+        // above), so a forensic reader sees: takedown → cascade
+        // dismissals, in commit order.
+        //
+        // Note: the policy evaluator (#72) returns None when the
+        // precipitating action itself is a Takedown (its
+        // subject_is_takendown gate fires post-precip-projection),
+        // so `firing_rule_owned` is always None on this path —
+        // the cascade is the only consequence of a moderator
+        // takedown.
+        if req.action_type == ActionType::Takedown {
+            auto_dismiss_pendings_on_takedown(
+                &mut tx,
+                &subject_did,
+                subject_uri.as_deref(),
+                inserted_id,
+                &req.actor_did,
+                created_at,
+            )
+            .await?;
+        }
+
         // Recompute strike state for the cache. Reload history with
         // the new row so the cache reflects post-insert reality.
         // Includes the auto-recorded action when one fired.
@@ -2952,6 +3008,33 @@ impl Writer {
         .execute(&mut *tx)
         .await?;
 
+        // ---------- takedown cascade (#76, v1.6) ----------
+        //
+        // Confirming a pending whose proposed action is a Takedown
+        // makes the subject takendown the moment the new
+        // subject_actions row INSERTed; the cascade then dismisses
+        // every OTHER unresolved pending for the subject. The
+        // pending currently being confirmed is naturally excluded
+        // because its UPDATE to resolution='confirmed' has already
+        // landed above — the cascade's `WHERE resolution IS NULL`
+        // filter sees it as 'confirmed', not NULL.
+        //
+        // resolved_by_did on cascaded rows is the confirming
+        // moderator's DID — not the synthetic policy DID — because
+        // the moderator chose to confirm the takedown and is the
+        // ultimate authority for the cascade.
+        if action_type == ActionType::Takedown {
+            auto_dismiss_pendings_on_takedown(
+                &mut tx,
+                &pending.subject_did,
+                pending.subject_uri.as_deref(),
+                inserted_id,
+                &req.moderator_did,
+                now_ms,
+            )
+            .await?;
+        }
+
         // ---------- recompute strike state ----------
         let post_history = load_subject_actions_for_calc(&mut tx, &pending.subject_did).await?;
         let post_state = calculate_strike_state(&post_history, &self.strike_policy, now_systemtime);
@@ -3375,14 +3458,25 @@ pub const AUDIT_REASON_REVOKE_ACTION: &str =
 pub const AUDIT_REASON_CONFIRM_PENDING_ACTION: &str = "pending_policy_action_confirmed: { pending_id, action_id, triggered_by_policy_rule, action_type, primary_reason, reason_codes, strike_value_base, strike_value_applied, was_dampened, emitted_labels, moderator_note }";
 
 /// Audit-log `reason` JSON schema for `pending_policy_action_dismissed`
-/// (§F22 / #75). Single audit row commits with the pending →
-/// dismissed transition: the pending_policy_actions UPDATE
-/// hash-chains under one audit entry. No subject_actions row is
-/// created, no labels emit; the dismissed pending stays in the
-/// table as forensic record. The audit row's reason JSON echoes
-/// the proposed-action shape so forensic readers can reconstruct
-/// "moderator dismissed proposed action X" without joining to
-/// pending_policy_actions.
+/// (§F22 / #75 + #76). Single audit row per dismissed pending,
+/// hash-chained alongside any other writes in the transaction. No
+/// subject_actions row is created and no labels emit on the
+/// dismiss side; the dismissed pending stays in the table as
+/// forensic record.
+///
+/// Two shapes share the same audit_log.action value
+/// (`pending_policy_action_dismissed`), discriminated by the
+/// `triggered_by` field in the reason JSON:
+///
+/// - `triggered_by = "moderator_dismissed"` (#75): explicit
+///   moderator dismissal via `tools.cairn.admin.dismissPendingAction`.
+///   Carries the moderator's optional rationale on
+///   `moderator_reason`.
+///
+/// - `triggered_by = "takedown_terminal"` (#76): automatic cascade
+///   when a takedown row INSERTs against the subject. Carries
+///   `takedown_action_id` cross-referencing the triggering
+///   `subject_actions` row; `moderator_reason` is omitted.
 ///
 /// ```json
 /// {
@@ -3390,11 +3484,13 @@ pub const AUDIT_REASON_CONFIRM_PENDING_ACTION: &str = "pending_policy_action_con
 ///   "triggered_by_policy_rule": "<rule name>",
 ///   "action_type": "<warning|note|temp_suspension|indef_suspension|takedown>",
 ///   "reason_codes": ["<id1>", "<id2>"],
-///   "moderator_reason": "<free text>" | null
+///   "triggered_by": "moderator_dismissed" | "takedown_terminal",
+///   "moderator_reason": "<free text>" | null,   // moderator path only
+///   "takedown_action_id": <i64>                 // takedown path only
 /// }
 /// ```
 #[doc(alias = "audit_log.reason.pending_policy_action_dismissed")]
-pub const AUDIT_REASON_DISMISS_PENDING_ACTION: &str = "pending_policy_action_dismissed: { pending_id, triggered_by_policy_rule, action_type, reason_codes, moderator_reason }";
+pub const AUDIT_REASON_DISMISS_PENDING_ACTION: &str = "pending_policy_action_dismissed: { pending_id, triggered_by_policy_rule, action_type, reason_codes, triggered_by, moderator_reason | takedown_action_id }";
 
 /// `reporter_flagged` / `reporter_unflagged` audit reason JSON —
 /// see [`AUDIT_REASON_FLAG_REPORTER`]. Shared with the flagReporter
@@ -3553,13 +3649,16 @@ fn build_pending_confirmed_audit_reason(
     .to_string()
 }
 
-/// `pending_policy_action_dismissed` audit reason JSON — see
-/// [`AUDIT_REASON_DISMISS_PENDING_ACTION`] for the schema. Cross-
-/// references the originating pending row (`pending_id`,
-/// `triggered_by_policy_rule`) and echoes the proposed-action
-/// shape (`action_type`, `reason_codes`) so forensic readers can
-/// reconstruct "moderator dismissed proposed action X for reason
-/// Y" without joining back to `pending_policy_actions`.
+/// `pending_policy_action_dismissed` audit reason JSON for the
+/// explicit moderator-dismiss path (#75). Cross-references the
+/// originating pending row (`pending_id`, `triggered_by_policy_rule`)
+/// and echoes the proposed-action shape so forensic readers can
+/// reconstruct "moderator dismissed proposed action X" without
+/// joining back to `pending_policy_actions`. The `triggered_by`
+/// field discriminates this shape from the takedown-cascade
+/// dismissal (#76) — same audit_log.action value
+/// (`pending_policy_action_dismissed`), different reason JSON
+/// shapes.
 ///
 /// `reason_codes_json` is the parsed JSON value from the pending
 /// row's `reason_codes` column (already a JSON array of strings);
@@ -3579,6 +3678,39 @@ fn build_pending_dismissed_audit_reason(
         "action_type": action_type,
         "reason_codes": reason_codes_json,
         "moderator_reason": moderator_reason,
+        "triggered_by": "moderator_dismissed",
+    })
+    .to_string()
+}
+
+/// `pending_policy_action_dismissed` audit reason JSON for the
+/// takedown-cascade auto-dismissal path (§F22 / #76). Same
+/// audit_log.action value as the explicit moderator dismiss
+/// (#75), discriminated via the `triggered_by` field. Cross-
+/// references both the originating pending row (`pending_id`,
+/// `triggered_by_policy_rule`) and the takedown that caused the
+/// cascade (`takedown_action_id`); a forensic reader can walk
+/// either direction.
+///
+/// `reason_codes_json` is the parsed JSON value from the pending
+/// row's `reason_codes` column (already a JSON array of strings);
+/// callers pass [`serde_json::Value::Null`] when the column is
+/// somehow unparseable, which preserves the audit row rather
+/// than failing the cascade.
+fn build_pending_dismissed_on_takedown_audit_reason(
+    pending_id: i64,
+    triggered_by_policy_rule: &str,
+    action_type: &str,
+    reason_codes_json: serde_json::Value,
+    takedown_action_id: i64,
+) -> String {
+    serde_json::json!({
+        "pending_id": pending_id,
+        "triggered_by_policy_rule": triggered_by_policy_rule,
+        "action_type": action_type,
+        "reason_codes": reason_codes_json,
+        "triggered_by": "takedown_terminal",
+        "takedown_action_id": takedown_action_id,
     })
     .to_string()
 }
@@ -3901,6 +4033,116 @@ async fn load_pending_for_policy_eval(
         });
     }
     Ok(out)
+}
+
+/// Auto-dismiss every unresolved `pending_policy_actions` row for
+/// a subject when a takedown lands against them (§F22 / #76). The
+/// caller is the takedown's INSERT site (one of three: moderator-
+/// recorded via [`Writer::handle_record_action`], policy-auto-
+/// recorded via [`Writer::insert_policy_auto_action`], or pending-
+/// confirmed via [`Writer::handle_confirm_pending_action`]) — each
+/// invokes this helper inside its open transaction so the cascade
+/// commits atomically with the takedown.
+///
+/// For each unresolved pending: append a hash-chained
+/// `pending_policy_action_dismissed` audit row (with
+/// `triggered_by: "takedown_terminal"` and a `takedown_action_id`
+/// back-pointer to the triggering subject_actions row), then
+/// UPDATE the pending's resolution columns to 'dismissed'. The
+/// audit row is appended BEFORE the UPDATE so a forensic reader
+/// cannot observe a dismissed pending without an audit row
+/// explaining why.
+///
+/// Per the chainlink scope (#76):
+/// - The pending row's `confirmed_action_id` stays NULL —
+///   cascaded dismissals are not "confirmations under another
+///   name."
+/// - The pending row's `resolved_by_did` is the takedown's
+///   actor_did — moderator DID for moderator-recorded /
+///   confirm-flow takedowns; the synthetic policy DID for
+///   policy-auto-recorded takedowns.
+/// - Revoking the takedown later does NOT un-dismiss these
+///   cascaded pendings; they stay dismissed as forensic record.
+///   If the subject decay-and-recrosses post-revocation, the rule
+///   re-fires through normal threshold-crossing logic per #72.
+///
+/// Returns the ids of dismissed pendings (possibly empty when the
+/// subject had no unresolved pendings) so the caller can surface
+/// the count in tracing or its own audit context.
+async fn auto_dismiss_pendings_on_takedown(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    subject_did: &str,
+    subject_uri: Option<&str>,
+    triggering_takedown_id: i64,
+    actor_did: &str,
+    now_ms: i64,
+) -> Result<Vec<i64>> {
+    let rows = sqlx::query!(
+        r#"SELECT
+             id                       AS "id!: i64",
+             triggered_by_policy_rule AS "triggered_by_policy_rule!: String",
+             action_type              AS "action_type!: String",
+             reason_codes             AS "reason_codes!: String"
+           FROM pending_policy_actions
+           WHERE subject_did = ?1 AND resolution IS NULL
+           ORDER BY id ASC"#,
+        subject_did,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let audit_target = subject_uri
+        .map(str::to_string)
+        .unwrap_or_else(|| subject_did.to_string());
+    let dismissed_resolution = "dismissed";
+    let mut dismissed_ids = Vec::with_capacity(rows.len());
+
+    for r in rows {
+        let reason_codes_json: serde_json::Value =
+            serde_json::from_str(&r.reason_codes).unwrap_or(serde_json::Value::Null);
+        let audit_reason = build_pending_dismissed_on_takedown_audit_reason(
+            r.id,
+            &r.triggered_by_policy_rule,
+            &r.action_type,
+            reason_codes_json,
+            triggering_takedown_id,
+        );
+        crate::audit::append::append_in_tx(
+            tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: now_ms,
+                action: "pending_policy_action_dismissed".into(),
+                actor_did: actor_did.to_string(),
+                target: Some(audit_target.clone()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        sqlx::query!(
+            "UPDATE pending_policy_actions
+             SET resolution = ?1,
+                 resolved_at = ?2,
+                 resolved_by_did = ?3
+             WHERE id = ?4",
+            dismissed_resolution,
+            now_ms,
+            actor_did,
+            r.id,
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        dismissed_ids.push(r.id);
+    }
+
+    Ok(dismissed_ids)
 }
 
 #[cfg(test)]

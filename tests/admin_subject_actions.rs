@@ -2656,12 +2656,19 @@ async fn confirm_pending_action_already_resolved_returns_400() {
 
 #[tokio::test]
 async fn confirm_pending_action_subject_takendown_returns_400() {
-    // Race-closing defensive check: pending exists, then a takedown
-    // lands (auto-dismissal-on-takedown #76 isn't shipped yet, so
-    // the pending stays pending), and the confirm refuses because
-    // the subject is now terminal.
-    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
-    record_takedown(&h, &["hate-speech"]).await;
+    // Race-closing defensive check (#74). With #76's auto-
+    // dismissal-on-takedown shipped, an unresolved pending against
+    // a takendown subject cannot arise naturally — the cascade
+    // dismisses it inside the takedown's transaction. To exercise
+    // the defensive check we simulate the race: take the subject
+    // down, then DIRECTLY INSERT an unresolved pending bypassing
+    // the cascade. The confirm path's subject_takendown gate
+    // catches it before any UPDATE.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let takedown_id = record_takedown(&h, &["hate-speech"]).await;
+    let pending_id =
+        insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
 
     let resp =
         post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
@@ -2669,8 +2676,8 @@ async fn confirm_pending_action_subject_takendown_returns_400() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "SubjectTakendown");
 
-    // Pending row stays unresolved — failure rolls back nothing
-    // because nothing was written.
+    // Pending row stays unresolved — confirm errored before any
+    // UPDATE landed.
     let resolution: Option<String> = sqlx::query_scalar!(
         "SELECT resolution FROM pending_policy_actions WHERE id = ?1",
         pending_id,
@@ -3153,11 +3160,16 @@ async fn dismiss_pending_action_without_reason_audit_moderator_reason_is_null() 
 async fn dismiss_pending_action_against_takendown_subject_succeeds() {
     // Dismiss has no SubjectTakendown defensive check (unlike
     // confirm in #74). A moderator explicitly closing the loop on
-    // a pending after the subject is takendown is meaningful —
-    // and is in fact what auto-dismissal-on-takedown (#76) will
-    // automate.
-    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
-    record_takedown(&h, &["hate-speech"]).await;
+    // a pending after the subject is takendown is meaningful. In
+    // steady-state v1.6 #76 cascades takedowns auto-dismissing all
+    // pendings, so this scenario only arises via a race; we
+    // simulate it by directly inserting a pending after the
+    // takedown.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let takedown_id = record_takedown(&h, &["hate-speech"]).await;
+    let pending_id =
+        insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
 
     let resp =
         post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
@@ -3215,5 +3227,432 @@ async fn dismiss_pending_action_leaves_strike_state_cache_unchanged() {
     assert_eq!(
         after.last_recompute_at, before.last_recompute_at,
         "dismiss must not recompute strike state",
+    );
+}
+
+// =================== takedown auto-dismiss cascade (#76, v1.6) ===================
+//
+// When a takedown row INSERTs against a subject (whether
+// moderator-recorded, policy-auto-recorded, or confirm-flow-
+// promoted), every unresolved `pending_policy_actions` row for
+// the subject auto-dismisses inside the same transaction. The
+// cascade audit rows hash-chain after the takedown's audit row
+// using the same `pending_policy_action_dismissed` action value
+// as the explicit moderator dismiss (#75), discriminated by the
+// reason JSON's `triggered_by` field ("takedown_terminal" vs
+// "moderator_dismissed").
+
+const POLICY_DID: &str = "did:internal:policy";
+
+/// Insert a `pending_policy_actions` row directly. Bypasses the
+/// rule-firing path so tests can set up arbitrary pending shapes
+/// without weaving multiple threshold crossings through the
+/// strike calculator. Returns the inserted pending id.
+async fn insert_pending_row(
+    h: &Harness,
+    rule_name: &str,
+    action_type: &str,
+    triggering_action_id: i64,
+) -> i64 {
+    sqlx::query_scalar!(
+        r#"INSERT INTO pending_policy_actions (
+            subject_did, action_type, reason_codes,
+            triggered_by_policy_rule, triggered_at, triggering_action_id
+         ) VALUES (?1, ?2, '["spam"]', ?3, 0, ?4)
+         RETURNING id AS "id!: i64""#,
+        SUBJECT_DID,
+        action_type,
+        rule_name,
+        triggering_action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn moderator_takedown_with_no_pendings_writes_no_cascade_audit_rows() {
+    // Subject has never had a pending — takedown lands cleanly,
+    // no `pending_policy_action_dismissed` audit rows.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_takedown(&h, &["hate-speech"]).await;
+
+    let cascade_audit_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'pending_policy_action_dismissed'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(cascade_audit_count, 0);
+}
+
+#[tokio::test]
+async fn moderator_takedown_dismisses_all_unresolved_pendings_for_subject() {
+    // Subject has 3 unresolved pendings against an earlier
+    // (non-takedown) action. Moderator records takedown; all 3
+    // pendings transition to resolution='dismissed' with
+    // resolved_by_did = the moderator, and 3 cascade audit rows
+    // land in the audit_log.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let p1 = insert_pending_row(&h, "rule_a", "indef_suspension", warn_action_id).await;
+    let p2 = insert_pending_row(&h, "rule_b", "warning", warn_action_id).await;
+    let p3 = insert_pending_row(&h, "rule_c", "temp_suspension", warn_action_id).await;
+
+    let takedown_id = record_takedown(&h, &["hate-speech"]).await;
+
+    // All three pendings now dismissed by the moderator.
+    for pending_id in [p1, p2, p3] {
+        let row = sqlx::query!(
+            r#"SELECT
+                 resolution,
+                 resolved_at,
+                 resolved_by_did,
+                 confirmed_action_id
+               FROM pending_policy_actions WHERE id = ?1"#,
+            pending_id,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.resolution.as_deref(), Some("dismissed"));
+        assert!(row.resolved_at.is_some());
+        assert_eq!(row.resolved_by_did.as_deref(), Some(ADMIN_DID));
+        assert!(
+            row.confirmed_action_id.is_none(),
+            "cascade dismissals never link to a materialized action"
+        );
+    }
+
+    // Three cascade audit rows, each cross-referencing the
+    // takedown via takedown_action_id and discriminated by
+    // triggered_by="takedown_terminal".
+    let audit_rows = sqlx::query!(
+        r#"SELECT reason
+           FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_rows.len(), 3);
+    for row in &audit_rows {
+        let reason: Value = serde_json::from_str(row.reason.as_deref().unwrap()).unwrap();
+        assert_eq!(reason["triggered_by"], "takedown_terminal");
+        assert_eq!(reason["takedown_action_id"].as_i64().unwrap(), takedown_id);
+    }
+}
+
+#[tokio::test]
+async fn moderator_takedown_skips_already_resolved_pendings() {
+    // Subject has 2 pendings; one already explicitly dismissed
+    // via #75. The cascade only touches the still-unresolved one;
+    // the already-dismissed pending's resolved_by_did is NOT
+    // overwritten by the takedown's actor.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let p_open = insert_pending_row(&h, "rule_open", "indef_suspension", warn_action_id).await;
+    let p_dismissed =
+        insert_pending_row(&h, "rule_already_dismissed", "warning", warn_action_id).await;
+
+    // Explicit moderator dismissal of one pending.
+    let dismiss_resp = post_dismiss_pending(
+        &h,
+        ADMIN_DID,
+        serde_json::json!({"pendingId": p_dismissed, "reason": "false positive"}),
+    )
+    .await;
+    assert!(dismiss_resp.status().is_success());
+
+    record_takedown(&h, &["hate-speech"]).await;
+
+    // The previously-dismissed pending: resolution + resolved_by_did
+    // unchanged (the explicit dismiss already set them; the
+    // schema trigger forbids re-transition anyway).
+    let already = sqlx::query!(
+        r#"SELECT resolution, resolved_by_did
+           FROM pending_policy_actions WHERE id = ?1"#,
+        p_dismissed,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(already.resolution.as_deref(), Some("dismissed"));
+    assert_eq!(already.resolved_by_did.as_deref(), Some(ADMIN_DID));
+
+    // The still-open pending now dismissed via the cascade.
+    let cascaded = sqlx::query!(
+        r#"SELECT resolution FROM pending_policy_actions WHERE id = ?1"#,
+        p_open,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(cascaded.resolution.as_deref(), Some("dismissed"));
+
+    // Cascade audit rows: only one (for the still-open pending).
+    // The pre-existing explicit-dismiss audit row uses
+    // triggered_by='moderator_dismissed' and is filtered out.
+    let cascade_audit_count: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*)
+           FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+             AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(cascade_audit_count, 1);
+}
+
+#[tokio::test]
+async fn policy_auto_takedown_dismisses_with_synthetic_policy_did() {
+    // mode=auto rule with action_type=takedown fires; the
+    // resulting cascade carries the synthetic policy DID as
+    // resolved_by_did, marking the dismissal as system-driven.
+    let policy = policy_with_rules(vec![auto_takedown_rule("auto_td_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Seed two unresolved pendings against an earlier action.
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let p1 = insert_pending_row(&h, "rule_a", "indef_suspension", warn_action_id).await;
+    let p2 = insert_pending_row(&h, "rule_b", "warning", warn_action_id).await;
+
+    // Trigger the auto-takedown rule via a precipitating
+    // temp_suspension; the auto-takedown subject_actions row
+    // INSERTs and cascades the two pendings.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    // Find the auto-recorded takedown row.
+    let takedown_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND action_type = 'takedown'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    for pending_id in [p1, p2] {
+        let row = sqlx::query!(
+            r#"SELECT resolution, resolved_by_did
+               FROM pending_policy_actions WHERE id = ?1"#,
+            pending_id,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.resolution.as_deref(), Some("dismissed"));
+        assert_eq!(
+            row.resolved_by_did.as_deref(),
+            Some(POLICY_DID),
+            "policy-auto cascade attributes to synthetic policy DID"
+        );
+    }
+
+    // Cascade audit rows attribute to the synthetic policy DID
+    // and cross-reference the auto-takedown's id.
+    let audit_rows = sqlx::query!(
+        r#"SELECT actor_did AS "actor_did!: String", reason
+           FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+             AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_rows.len(), 2);
+    for row in &audit_rows {
+        assert_eq!(row.actor_did, POLICY_DID);
+        let reason: Value = serde_json::from_str(row.reason.as_deref().unwrap()).unwrap();
+        assert_eq!(reason["takedown_action_id"].as_i64().unwrap(), takedown_id);
+    }
+}
+
+#[tokio::test]
+async fn confirm_pending_takedown_dismisses_other_pendings_for_subject() {
+    // Confirm flow promotes a pending takedown to a real
+    // subject_actions row; the cascade then dismisses every
+    // OTHER unresolved pending for the subject. The just-
+    // confirmed pending stays at resolution='confirmed' (NOT
+    // re-resolved to 'dismissed' — the cascade's WHERE filter
+    // sees it as already-resolved by the time it runs).
+    let policy = policy_with_rules(vec![flag_takedown_rule("flag_td_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Trigger the flag-takedown pending.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let confirm_target: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    // Seed an unrelated pending against the same subject.
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let p_other = insert_pending_row(&h, "rule_other", "indef_suspension", warn_action_id).await;
+
+    let resp = post_confirm_pending(
+        &h,
+        ADMIN_DID,
+        serde_json::json!({"pendingId": confirm_target}),
+    )
+    .await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let confirmed_action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    // The just-confirmed pending: resolution='confirmed'.
+    let confirm_row = sqlx::query!(
+        r#"SELECT resolution, confirmed_action_id
+           FROM pending_policy_actions WHERE id = ?1"#,
+        confirm_target,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(confirm_row.resolution.as_deref(), Some("confirmed"));
+    assert_eq!(confirm_row.confirmed_action_id, Some(confirmed_action_id));
+
+    // The other pending: cascaded to 'dismissed' with the
+    // confirming moderator as resolved_by_did (NOT the synthetic
+    // policy DID — the moderator authored the takedown).
+    let other_row = sqlx::query!(
+        r#"SELECT resolution, resolved_by_did, confirmed_action_id
+           FROM pending_policy_actions WHERE id = ?1"#,
+        p_other,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(other_row.resolution.as_deref(), Some("dismissed"));
+    assert_eq!(other_row.resolved_by_did.as_deref(), Some(ADMIN_DID));
+    assert!(
+        other_row.confirmed_action_id.is_none(),
+        "cascade dismissal does not link forward"
+    );
+}
+
+#[tokio::test]
+async fn cascade_audit_row_carries_full_proposed_action_shape() {
+    // Focused test: the cascade audit row's reason JSON echoes
+    // the proposed-action shape (triggered_by_policy_rule,
+    // action_type, reason_codes) plus the cascade-specific
+    // fields (triggered_by, takedown_action_id). Mirrors #75's
+    // moderator-dismiss audit shape, plus the takedown-specific
+    // discriminator fields.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let pending_id =
+        insert_pending_row(&h, "rule_target", "indef_suspension", warn_action_id).await;
+
+    let takedown_id = record_takedown(&h, &["hate-speech"]).await;
+
+    let audit_reason = sqlx::query_scalar!(
+        r#"SELECT reason FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+           ORDER BY id DESC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap()
+    .unwrap();
+    let reason: Value = serde_json::from_str(&audit_reason).unwrap();
+    assert_eq!(reason["pending_id"].as_i64().unwrap(), pending_id);
+    assert_eq!(reason["triggered_by_policy_rule"], "rule_target");
+    assert_eq!(reason["action_type"], "indef_suspension");
+    assert_eq!(reason["reason_codes"][0], "spam");
+    assert_eq!(reason["triggered_by"], "takedown_terminal");
+    assert_eq!(reason["takedown_action_id"].as_i64().unwrap(), takedown_id);
+    // moderator_reason field is absent on the cascade shape (the
+    // discriminator is `triggered_by`, not field presence — but
+    // its absence is still observable to consumers reading the
+    // shape.)
+    assert!(
+        reason.get("moderator_reason").is_none(),
+        "cascade reason JSON omits moderator_reason"
+    );
+}
+
+#[tokio::test]
+async fn moderator_dismiss_audit_includes_triggered_by_discriminator() {
+    // Pin the symmetric-discriminator invariant: the explicit
+    // moderator-dismiss audit row's reason JSON sets
+    // triggered_by="moderator_dismissed", distinguishing it from
+    // the cascade shape and letting audit consumers filter by
+    // triggered_by without inspecting field presence.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+
+    let audit_reason = sqlx::query_scalar!(
+        r#"SELECT reason FROM audit_log
+           WHERE action = 'pending_policy_action_dismissed'
+           ORDER BY id DESC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap()
+    .unwrap();
+    let reason: Value = serde_json::from_str(&audit_reason).unwrap();
+    assert_eq!(reason["triggered_by"], "moderator_dismissed");
+    // Inverse check: no takedown_action_id on the moderator path.
+    assert!(reason.get("takedown_action_id").is_none());
+}
+
+#[tokio::test]
+async fn cascade_does_not_perturb_strike_state_for_dismissed_pendings() {
+    // Cascaded pendings never become subject_actions rows, so
+    // their dismissal cannot contribute to strike_state. Check
+    // that no ghost subject_actions rows snuck in for the
+    // cascaded pendings, and that the cache reflects only the
+    // explicit subject_actions rows.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Baseline: a warning (zero-strike) so subject_actions has a
+    // row to anchor pendings against. No strike contribution
+    // from this.
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    insert_pending_row(&h, "rule_x", "indef_suspension", warn_action_id).await;
+    insert_pending_row(&h, "rule_y", "warning", warn_action_id).await;
+    insert_pending_row(&h, "rule_z", "temp_suspension", warn_action_id).await;
+
+    record_takedown(&h, &["hate-speech"]).await;
+
+    // No ghost subject_actions rows for the cascaded pendings:
+    // warning + takedown = 2 subject_actions rows total.
+    let action_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM subject_actions")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        action_count, 2,
+        "warning + takedown = 2 subject_actions; cascade adds none"
+    );
+
+    // Strike-state cache reflects the takedown's contribution
+    // (≥1 strike) and is independent of cascaded pending count.
+    let cached: i64 = sqlx::query_scalar!(
+        r#"SELECT current_strike_count AS "c!: i64"
+           FROM subject_strike_state WHERE subject_did = ?1"#,
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(
+        cached >= 1,
+        "takedown contributes a strike; pendings do not"
     );
 }

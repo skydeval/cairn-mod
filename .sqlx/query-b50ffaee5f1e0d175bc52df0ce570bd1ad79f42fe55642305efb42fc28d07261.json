@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT resolution, resolved_by_did\n           FROM pending_policy_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "resolution",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "resolved_by_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "b50ffaee5f1e0d175bc52df0ce570bd1ad79f42fe55642305efb42fc28d07261"
+}
