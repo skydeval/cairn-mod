@@ -92,6 +92,8 @@ fn procedures_have_input_queries_have_parameters() {
         "listAuditLog",
         "getAuditLog",
         "getTrustChain",
+        "getSubjectHistory",
+        "getSubjectStrikes",
     ]);
 
     for path in all_files() {
@@ -229,6 +231,7 @@ fn declared_error_names_are_from_known_set() {
         "SubjectUriMismatch",
         "ActionNotFound",
         "ActionAlreadyRevoked",
+        "SubjectNotFound",
         // ModeratorNotFound is reserved but not currently emitted — if
         // an endpoint begins emitting it, add here + to lexicons/README.md.
     ]);
@@ -284,6 +287,8 @@ fn expected_endpoint_files_all_present() {
         "getTrustChain",
         "recordAction",
         "revokeAction",
+        "getSubjectHistory",
+        "getSubjectStrikes",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

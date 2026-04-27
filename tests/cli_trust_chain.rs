@@ -93,7 +93,13 @@ async fn spawn_cairn_with_config(admin_cfg: AdminConfig) -> CairnHarness {
     )
     .await
     .unwrap();
-    let router = admin_router(pool.clone(), writer, auth, admin_cfg);
+    let router = admin_router(
+        pool.clone(),
+        writer,
+        auth,
+        admin_cfg,
+        cairn_mod::StrikePolicy::defaults(),
+    );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -148,6 +148,7 @@ async fn spawn() -> Harness {
         writer.clone(),
         auth_ctx(),
         AdminConfig::default(),
+        cairn_mod::StrikePolicy::defaults(),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -594,4 +595,345 @@ async fn revoke_action_already_revoked_returns_400() {
     assert_eq!(r2.status(), 400);
     let body: Value = r2.json().await.unwrap();
     assert_eq!(body["error"], "ActionAlreadyRevoked");
+}
+
+// =================== getSubjectHistory ===================
+//
+// Coverage (#52 / read-half of #53):
+// - 401 unauthenticated.
+// - 200 Mod role; 200 Admin role (Mod-or-Admin per the read-side
+//   posture settled at session start).
+// - 200 with multiple actions, ordered descending by id.
+// - Cursor pagination: page 1 + cursor + page 2 disjoint.
+// - includeRevoked=false excludes revoked rows.
+// - subject filter: bare DID query.
+// - 404 SubjectNotFound when the subject_did has never been actioned.
+
+const HISTORY_LXM: &str = "tools.cairn.admin.getSubjectHistory";
+const STRIKES_LXM: &str = "tools.cairn.admin.getSubjectStrikes";
+
+#[tokio::test]
+async fn get_subject_history_no_auth_returns_401() {
+    let h = spawn().await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn get_subject_history_subject_not_found_returns_404() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "SubjectNotFound");
+}
+
+#[tokio::test]
+async fn get_subject_history_admin_role_lists_actions_descending() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_n_takedowns(&h, 3, &["spam"]).await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 3);
+    // Descending: ids should appear newest-first.
+    let ids: Vec<i64> = actions.iter().map(|a| a["id"].as_i64().unwrap()).collect();
+    let mut sorted_desc = ids.clone();
+    sorted_desc.sort_by(|a, b| b.cmp(a));
+    assert_eq!(ids, sorted_desc);
+    // No cursor since we're under the page limit.
+    assert!(body.get("cursor").is_none() || body["cursor"].is_null());
+}
+
+#[tokio::test]
+async fn get_subject_history_mod_role_also_authorized() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    grant_role(&h.pool, MOD_DID, "mod").await;
+    record_n_takedowns(&h, 1, &["spam"]).await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(MOD_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "mod role must be authorized");
+}
+
+#[tokio::test]
+async fn get_subject_history_cursor_pagination_disjoint_pages() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_n_takedowns(&h, 5, &["spam"]).await;
+
+    // Page 1: limit=2.
+    let r1 = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}&limit=2",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(r1.status().is_success());
+    let b1: Value = r1.json().await.unwrap();
+    let cursor = b1["cursor"].as_str().expect("cursor present").to_string();
+    let ids1: Vec<i64> = b1["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids1.len(), 2);
+
+    // Page 2 with cursor.
+    let r2 = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}&limit=2&cursor={cursor}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    let b2: Value = r2.json().await.unwrap();
+    let ids2: Vec<i64> = b2["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids2.len(), 2);
+    // Disjoint: no id from page 2 should appear in page 1.
+    for id in &ids2 {
+        assert!(!ids1.contains(id), "page 2 id {id} also in page 1");
+    }
+    // Page 2's largest id should be smaller than page 1's smallest.
+    assert!(*ids2.iter().max().unwrap() < *ids1.iter().min().unwrap());
+}
+
+#[tokio::test]
+async fn get_subject_history_include_revoked_false_excludes_revoked() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_ids = record_n_takedowns(&h, 2, &["spam"]).await;
+    // Revoke the first.
+    http()
+        .post(format!("http://{}/xrpc/{REVOKE_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, REVOKE_LXM))
+        .json(&serde_json::json!({"actionId": action_ids[0]}))
+        .send()
+        .await
+        .unwrap();
+
+    // includeRevoked=false should only return the unrevoked one.
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}&includeRevoked=false",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["id"].as_i64().unwrap(), action_ids[1]);
+}
+
+// =================== getSubjectStrikes ===================
+
+#[tokio::test]
+async fn get_subject_strikes_no_auth_returns_401() {
+    let h = spawn().await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{STRIKES_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn get_subject_strikes_subject_not_found_returns_404() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{STRIKES_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, STRIKES_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "SubjectNotFound");
+}
+
+#[tokio::test]
+async fn get_subject_strikes_admin_role_returns_state() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_n_takedowns(&h, 1, &["hate-speech"]).await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{STRIKES_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, STRIKES_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body: Value = resp.json().await.unwrap();
+    // Default policy: first offense in good standing → curve[0] = 1
+    // applied. base = hate-speech.base_weight (4).
+    assert_eq!(body["currentStrikeCount"], 1);
+    assert_eq!(body["rawTotal"], 1);
+    assert_eq!(body["decayedCount"], 0);
+    assert_eq!(body["revokedCount"], 0);
+    assert_eq!(body["goodStanding"], true);
+    // No suspension yet.
+    assert!(body.get("activeSuspension").is_none() || body["activeSuspension"].is_null());
+    // current > 0 → decayWindowRemainingDays present.
+    assert!(body["decayWindowRemainingDays"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn get_subject_strikes_invariant_revoked_plus_decayed_plus_current_eq_raw() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let ids = record_n_takedowns(&h, 3, &["spam"]).await;
+    // Revoke the first.
+    http()
+        .post(format!("http://{}/xrpc/{REVOKE_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, REVOKE_LXM))
+        .json(&serde_json::json!({"actionId": ids[0]}))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{STRIKES_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, STRIKES_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let current = body["currentStrikeCount"].as_u64().unwrap();
+    let decayed = body["decayedCount"].as_u64().unwrap();
+    let revoked = body["revokedCount"].as_u64().unwrap();
+    let raw = body["rawTotal"].as_u64().unwrap();
+    assert_eq!(current + decayed + revoked, raw);
+}
+
+#[tokio::test]
+async fn get_subject_strikes_active_suspension_when_temp_suspension_in_force() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    // Record a temp_suspension that won't expire immediately.
+    let r = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{STRIKES_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, STRIKES_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let body: Value = resp.json().await.unwrap();
+    let susp = body["activeSuspension"]
+        .as_object()
+        .expect("activeSuspension present while suspension is in force");
+    assert_eq!(susp["actionType"], "temp_suspension");
+    assert!(susp.get("expiresAt").is_some());
+}
+
+// ---------- helpers ----------
+
+/// Record N takedown actions back-to-back. Returns the inserted
+/// row ids in order.
+async fn record_n_takedowns(h: &Harness, n: usize, reasons: &[&str]) -> Vec<i64> {
+    let mut ids = Vec::with_capacity(n);
+    let reasons_json: Vec<String> = reasons.iter().map(|s| s.to_string()).collect();
+    for _ in 0..n {
+        let r = http()
+            .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+            .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+            .json(&serde_json::json!({
+                "subject": SUBJECT_DID,
+                "type": "takedown",
+                "reasons": reasons_json,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            r.status().is_success(),
+            "record_n_takedowns: status={}",
+            r.status()
+        );
+        let id = r.json::<Value>().await.unwrap()["actionId"]
+            .as_i64()
+            .unwrap();
+        ids.push(id);
+    }
+    ids
 }

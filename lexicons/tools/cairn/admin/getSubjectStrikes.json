@@ -1,0 +1,36 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getSubjectStrikes",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Return the subject's currently-active strike state. Loads the full subject_actions history for the DID and runs the v1.4 decay calculator (#50) over it; the cache table (subject_strike_state) is intentionally bypassed so the response is always derived from the source of truth. Mod or Admin role.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "Account DID."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#subjectStrikeState"
+        }
+      },
+      "errors": [
+        {
+          "name": "SubjectNotFound",
+          "description": "No subject_actions row has ever been recorded for the given subject DID."
+        }
+      ]
+    }
+  }
+}

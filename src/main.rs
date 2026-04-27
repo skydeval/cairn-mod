@@ -429,6 +429,51 @@ enum ModeratorSub {
     /// Revoke a previously-recorded action. Sets revoked_at on the
     /// row and removes its strikes from the subject's count.
     Revoke(ModeratorRevokeArgs),
+    /// Show the moderation history for a subject. Read-only; safe
+    /// to run while `cairn serve` is up. HTTP-routed via
+    /// `tools.cairn.admin.getSubjectHistory`.
+    History(ModeratorHistoryArgs),
+    /// Show the current strike state for a subject — current count,
+    /// good-standing flag, active suspension (if any), and a
+    /// decay-trajectory hint. HTTP-routed via
+    /// `tools.cairn.admin.getSubjectStrikes`.
+    Strikes(ModeratorStrikesArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorHistoryArgs {
+    /// Subject DID.
+    subject: String,
+    /// Optional AT-URI filter — narrows to record-level actions
+    /// on that specific URI.
+    #[arg(long = "subject-uri")]
+    subject_uri: Option<String>,
+    /// Hide revoked actions (default: included).
+    #[arg(long = "no-include-revoked")]
+    no_include_revoked: bool,
+    /// RFC-3339 lower bound on `effective_at`.
+    #[arg(long)]
+    since: Option<String>,
+    /// Per-page row limit (server caps at 250).
+    #[arg(long)]
+    limit: Option<i64>,
+    /// Opaque pagination cursor from a prior page.
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorStrikesArgs {
+    /// Subject DID.
+    subject: String,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -717,6 +762,12 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Moderator {
             sub: ModeratorSub::Revoke(args),
         } => run_moderator_revoke(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::History(args),
+        } => run_moderator_history(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Strikes(args),
+        } => run_moderator_strikes(args).await,
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
@@ -1240,6 +1291,61 @@ async fn run_moderator_revoke(args: ModeratorRevokeArgs) -> Result<(), CliError>
         println!("{}", moderator_action::format_revoke_json(&resp));
     } else {
         println!("{}", moderator_action::format_revoke_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_history(args: ModeratorHistoryArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let subject_for_msg = args.subject.clone();
+    let resp = moderator_action::history(
+        &mut session,
+        &path,
+        moderator_action::HistoryInput {
+            subject: args.subject,
+            subject_uri: args.subject_uri,
+            include_revoked: !args.no_include_revoked,
+            since: args.since,
+            limit: args.limit,
+            cursor: args.cursor,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_history_json(&resp));
+    } else {
+        println!(
+            "{}",
+            moderator_action::format_history_human(&resp, &subject_for_msg)
+        );
+    }
+    Ok(())
+}
+
+async fn run_moderator_strikes(args: ModeratorStrikesArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let subject_for_msg = args.subject.clone();
+    let resp = moderator_action::strikes(
+        &mut session,
+        &path,
+        moderator_action::StrikesInput {
+            subject: args.subject,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_strikes_json(&resp));
+    } else {
+        println!(
+            "{}",
+            moderator_action::format_strikes_human(&resp, &subject_for_msg)
+        );
     }
     Ok(())
 }

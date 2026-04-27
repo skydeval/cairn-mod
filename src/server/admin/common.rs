@@ -43,6 +43,12 @@ pub(super) struct AdminState {
     pub writer: WriterHandle,
     pub auth: Arc<AuthContext>,
     pub config: Arc<AdminConfig>,
+    /// Resolved [strike_policy] (#48). The strikes read endpoint
+    /// (#52 / read-half of #53) consults the threshold, decay
+    /// shape, and decay_window_days when projecting the strike-state
+    /// envelope. Same instance the writer task holds (cloned at
+    /// admin_router construction).
+    pub strike_policy: Arc<crate::moderation::policy::StrikePolicy>,
 }
 
 /// Error taxonomy for admin endpoints. Variants carry **only**
@@ -84,6 +90,9 @@ pub(super) enum AdminError {
     ActionNotFound,
     /// Declared in lexicons/tools/cairn/admin/revokeAction.json (#51).
     ActionAlreadyRevoked,
+    /// Declared in lexicons/tools/cairn/admin/getSubjectHistory.json
+    /// + getSubjectStrikes.json (#52 / read-half of #53).
+    SubjectNotFound,
     Internal,
 }
 
@@ -217,6 +226,13 @@ impl IntoResponse for AdminError {
                 ErrorBody {
                     error: "ActionAlreadyRevoked",
                     message: "subject action is already revoked",
+                },
+            ),
+            AdminError::SubjectNotFound => (
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "SubjectNotFound",
+                    message: "no actions recorded for subject",
                 },
             ),
             AdminError::Internal => (

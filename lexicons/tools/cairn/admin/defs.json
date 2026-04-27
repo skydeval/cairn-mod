@@ -236,6 +236,79 @@
         }
       }
     },
+    "subjectStrikeState": {
+      "type": "object",
+      "description": "Currently-active strike state for a subject (#50 decay calculator output, with operator-friendly extras for the read endpoints). Returned by tools.cairn.admin.getSubjectStrikes (this commit) and the public-tier tools.cairn.public.getMyStrikeState (#54).",
+      "required": [
+        "currentStrikeCount",
+        "rawTotal",
+        "decayedCount",
+        "revokedCount",
+        "goodStanding"
+      ],
+      "properties": {
+        "currentStrikeCount": {
+          "type": "integer",
+          "description": "Active strike total after decay and revocation. The value the recorder feeds the strike calculator (#49) as `current_strike_count` on the next action."
+        },
+        "rawTotal": {
+          "type": "integer",
+          "description": "Lifetime sum of strike_value_applied across all strike-bearing (non-warning, non-note) actions, ignoring decay and revocation."
+        },
+        "decayedCount": {
+          "type": "integer",
+          "description": "Strikes lost to time-based decay across unrevoked strike-bearing actions. Equal to (rawTotal - revokedCount) - currentStrikeCount."
+        },
+        "revokedCount": {
+          "type": "integer",
+          "description": "Sum of strike_value_applied across revoked strike-bearing actions. Surfaced separately for forensic display."
+        },
+        "goodStanding": {
+          "type": "boolean",
+          "description": "True iff currentStrikeCount <= policy.good_standing_threshold."
+        },
+        "activeSuspension": {
+          "type": "ref",
+          "ref": "#activeSuspension",
+          "description": "The most recent unrevoked suspension that's currently in force, if any."
+        },
+        "decayWindowRemainingDays": {
+          "type": "integer",
+          "description": "Days remaining until the most recent strike-bearing action falls out of the decay window — a rough 'returns to good standing at current trajectory' surface for operator dashboards. Omitted when currentStrikeCount is 0 (nothing to decay)."
+        },
+        "lastActionAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "effective_at of the most recent strike-bearing unrevoked action; absent if none."
+        }
+      }
+    },
+    "activeSuspension": {
+      "type": "object",
+      "description": "Summary of a subject's currently-active suspension, returned on subjectStrikeState.activeSuspension.",
+      "required": [
+        "actionType",
+        "effectiveAt"
+      ],
+      "properties": {
+        "actionType": {
+          "type": "string",
+          "knownValues": [
+            "temp_suspension",
+            "indef_suspension"
+          ]
+        },
+        "effectiveAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Absent for indef_suspension."
+        }
+      }
+    },
     "subjectAction": {
       "type": "object",
       "description": "One row from the subject_actions table (§F20 graduated-action moderation). Returned by tools.cairn.admin.recordAction (after insert) and by the read-half history/strikes endpoints (#52, ships in a follow-up commit).",

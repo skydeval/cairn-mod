@@ -22,6 +22,8 @@ mod common;
 mod flag_reporter;
 mod get_audit_log;
 mod get_report;
+mod get_subject_history;
+mod get_subject_strikes;
 mod get_trust_chain;
 mod list_audit_log;
 mod list_labels;
@@ -32,6 +34,7 @@ mod report_view;
 mod resolve_report;
 mod retention_sweep;
 mod revoke_action;
+mod subject_action_view;
 
 /// Operator configuration for admin endpoints. Kept separate from the
 /// subscribe/query configs so operators can tune label-value policy
@@ -80,17 +83,25 @@ pub struct AdminConfig {
 /// Build a Router exposing the tools.cairn.admin.* endpoints
 /// registered so far. Compose with subscribe/query/createReport
 /// routers via `Router::merge`.
+///
+/// `strike_policy` is the resolved v1.4 `[strike_policy]` (#48); the
+/// strikes read endpoint consults the threshold + decay window when
+/// projecting the wire envelope. Pass the same instance the writer
+/// task holds — `serve::run` resolves once at startup and clones
+/// here.
 pub fn admin_router(
     pool: Pool<Sqlite>,
     writer: WriterHandle,
     auth: Arc<AuthContext>,
     config: AdminConfig,
+    strike_policy: crate::moderation::policy::StrikePolicy,
 ) -> Router {
     let state = common::AdminState {
         pool,
         writer,
         auth,
         config: Arc::new(config),
+        strike_policy: Arc::new(strike_policy),
     };
     Router::new()
         .route(
@@ -144,6 +155,14 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.revokeAction",
             post(revoke_action::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getSubjectHistory",
+            get(get_subject_history::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getSubjectStrikes",
+            get(get_subject_strikes::handler),
         )
         .layer(Extension(state))
 }

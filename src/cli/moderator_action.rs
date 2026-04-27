@@ -34,6 +34,8 @@ use super::session::SessionFile;
 
 const RECORD_ACTION_LXM: &str = "tools.cairn.admin.recordAction";
 const REVOKE_ACTION_LXM: &str = "tools.cairn.admin.revokeAction";
+const GET_SUBJECT_HISTORY_LXM: &str = "tools.cairn.admin.getSubjectHistory";
+const GET_SUBJECT_STRIKES_LXM: &str = "tools.cairn.admin.getSubjectStrikes";
 
 // ============================================================
 // `cairn moderator action` — record a graduated-action moderation
@@ -250,6 +252,452 @@ pub fn format_revoke_human(resp: &RevokeResponse) -> String {
 /// JSON output for `cairn moderator revoke`.
 pub fn format_revoke_json(resp: &RevokeResponse) -> String {
     serde_json::to_string_pretty(resp).expect("RevokeResponse serializes")
+}
+
+// ============================================================
+// `cairn moderator history` — list subject_actions for a subject.
+// Backs `getSubjectHistory` admin XRPC (#52 / read-half of #53).
+// ============================================================
+
+/// Input to `cairn moderator history`.
+#[derive(Debug, Clone)]
+pub struct HistoryInput {
+    /// Subject DID. AT-URIs are normalized to the parent DID
+    /// before sending; this matches the lexicon's account-rollup
+    /// invariant (strike accounting is always at the account
+    /// level).
+    pub subject: String,
+    /// Optional AT-URI filter — when set, narrows to record-level
+    /// actions on that URI.
+    pub subject_uri: Option<String>,
+    /// `false` excludes revoked actions from the response. Default
+    /// `true` (lexicon default).
+    pub include_revoked: bool,
+    /// RFC-3339 timestamp lower bound on `effective_at`.
+    pub since: Option<String>,
+    /// Page size. Server caps at 250; default 50.
+    pub limit: Option<i64>,
+    /// Opaque pagination cursor.
+    pub cursor: Option<String>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    pub cairn_server_override: Option<String>,
+}
+
+impl Default for HistoryInput {
+    fn default() -> Self {
+        Self {
+            subject: String::new(),
+            subject_uri: None,
+            include_revoked: true,
+            since: None,
+            limit: None,
+            cursor: None,
+            cairn_server_override: None,
+        }
+    }
+}
+
+/// One row in a `getSubjectHistory` response. Field set tracks
+/// `tools.cairn.admin.defs#subjectAction`; optional fields use
+/// `serde(default)` so deserialization tolerates server-side
+/// projections that drop them.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HistoryEntry {
+    /// `subject_actions.id` — primary key.
+    pub id: i64,
+    /// Account DID this action attributes to. Always the parent
+    /// DID for record-level actions.
+    #[serde(rename = "subjectDid")]
+    pub subject_did: String,
+    /// AT-URI for record-level actions; absent for account-level.
+    #[serde(
+        rename = "subjectUri",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub subject_uri: Option<String>,
+    /// DID of the moderator/admin that recorded the action.
+    #[serde(rename = "actorDid")]
+    pub actor_did: String,
+    /// `warning` / `note` / `temp_suspension` / `indef_suspension` /
+    /// `takedown`.
+    #[serde(rename = "actionType")]
+    pub action_type: String,
+    /// Reason identifiers from the `[moderation_reasons]` vocabulary.
+    #[serde(rename = "reasonCodes")]
+    pub reason_codes: Vec<String>,
+    /// Original ISO-8601 duration string (e.g. `P7D`); only present
+    /// for `temp_suspension`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub duration: Option<String>,
+    /// RFC-3339 wall-clock the action took effect.
+    #[serde(rename = "effectiveAt")]
+    pub effective_at: String,
+    /// RFC-3339 wall-clock the action ends; only `temp_suspension`.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none", default)]
+    pub expires_at: Option<String>,
+    /// Moderator-facing rationale stored on the row.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub notes: Option<String>,
+    /// Report ids that motivated this action, if any.
+    #[serde(rename = "reportIds", skip_serializing_if = "Option::is_none", default)]
+    pub report_ids: Option<Vec<i64>>,
+    /// Reason's `base_weight` before dampening.
+    #[serde(rename = "strikeValueBase")]
+    pub strike_value_base: i64,
+    /// Strike weight actually applied after dampening.
+    #[serde(rename = "strikeValueApplied")]
+    pub strike_value_applied: i64,
+    /// `true` iff the dampening curve was consulted at action time.
+    #[serde(rename = "wasDampened")]
+    pub was_dampened: bool,
+    /// Subject's `current_strike_count` BEFORE this action.
+    #[serde(rename = "strikesAtTimeOfAction")]
+    pub strikes_at_time_of_action: i64,
+    /// RFC-3339 revocation wall-clock; absent if not revoked.
+    #[serde(rename = "revokedAt", skip_serializing_if = "Option::is_none", default)]
+    pub revoked_at: Option<String>,
+    /// DID of the moderator/admin who revoked this action; absent
+    /// if not revoked.
+    #[serde(
+        rename = "revokedByDid",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub revoked_by_did: Option<String>,
+    /// Free-text revocation rationale; absent if not provided.
+    #[serde(
+        rename = "revokedReason",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub revoked_reason: Option<String>,
+    /// `audit_log.id` of the row this action's intent was attested
+    /// as.
+    #[serde(
+        rename = "auditLogId",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub audit_log_id: Option<i64>,
+    /// RFC-3339 wall-clock at INSERT.
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+/// Wire-shaped response from `tools.cairn.admin.getSubjectHistory`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HistoryResponse {
+    /// Matched actions, newest-first.
+    pub actions: Vec<HistoryEntry>,
+    /// Opaque pagination cursor; absent when this is the final page.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cursor: Option<String>,
+}
+
+/// Fetch one page of history. Pagination across pages is the
+/// caller's job — the dispatcher loops on the returned cursor.
+/// Mirrors `cli/report.rs::list` posture.
+pub async fn history(
+    session: &mut SessionFile,
+    session_path: &Path,
+    input: HistoryInput,
+) -> Result<HistoryResponse, CliError> {
+    if !input.subject.starts_with("did:") {
+        return Err(CliError::Config(format!(
+            "subject must be a DID (`did:...`); got {:?}",
+            input.subject
+        )));
+    }
+
+    let cairn_server = input
+        .cairn_server_override
+        .as_deref()
+        .unwrap_or(&session.cairn_server_url)
+        .trim_end_matches('/')
+        .to_string();
+    let pds = PdsClient::new(&session.pds_url)?;
+    let token = acquire_service_auth(&pds, session, session_path, GET_SUBJECT_HISTORY_LXM).await?;
+
+    let url = format!("{cairn_server}/xrpc/{GET_SUBJECT_HISTORY_LXM}");
+    let limit_owned = input.limit.map(|n| n.to_string());
+    let mut query: Vec<(&str, &str)> = vec![("subject", input.subject.as_str())];
+    if let Some(u) = &input.subject_uri {
+        query.push(("subjectUri", u.as_str()));
+    }
+    if !input.include_revoked {
+        query.push(("includeRevoked", "false"));
+    }
+    if let Some(s) = &input.since {
+        query.push(("since", s.as_str()));
+    }
+    if let Some(n) = &limit_owned {
+        query.push(("limit", n.as_str()));
+    }
+    if let Some(c) = &input.cursor {
+        query.push(("cursor", c.as_str()));
+    }
+
+    let client = build_client();
+    let resp = client
+        .get(&url)
+        .bearer_auth(&token)
+        .query(&query)
+        .send()
+        .await
+        .map_err(|source| CliError::Http {
+            url: url.clone(),
+            source,
+        })?;
+    cairn_response::<HistoryResponse>(url, resp).await
+}
+
+/// Tabular human renderer for `cairn moderator history`. Columns:
+/// id | when | type | reasons | applied (vs base) | dampened | revoked.
+/// Empty result renders as a friendly "no actions" line rather than an
+/// empty table — matches the listReports posture from v1.2.
+pub fn format_history_human(resp: &HistoryResponse, subject: &str) -> String {
+    use std::fmt::Write;
+    if resp.actions.is_empty() {
+        let mut s = format!("No actions recorded for {subject}");
+        if let Some(c) = &resp.cursor {
+            let _ = write!(s, "\nnext cursor: {c}");
+        }
+        return s;
+    }
+
+    let id_w = resp
+        .actions
+        .iter()
+        .map(|e| e.id.to_string().len())
+        .max()
+        .unwrap_or(2)
+        .max(2);
+    let type_w = resp
+        .actions
+        .iter()
+        .map(|e| e.action_type.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let reasons_w = resp
+        .actions
+        .iter()
+        .map(|e| e.reason_codes.join(",").len().min(40))
+        .max()
+        .unwrap_or(7)
+        .max(7);
+
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "{:>id_w$}  {:<24}  {:<type_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
+        "ID",
+        "EFFECTIVE_AT",
+        "TYPE",
+        "REASONS",
+        "APPLIED",
+        "DAMPENED",
+        "REVOKED",
+        id_w = id_w,
+        type_w = type_w,
+        reasons_w = reasons_w,
+    );
+    for e in &resp.actions {
+        let reasons = e.reason_codes.join(",");
+        let reasons = if reasons.len() > 40 {
+            format!("{}…", &reasons[..39])
+        } else {
+            reasons
+        };
+        let applied = if e.strike_value_applied != e.strike_value_base {
+            format!("{}/{}", e.strike_value_applied, e.strike_value_base)
+        } else {
+            e.strike_value_applied.to_string()
+        };
+        let dampened = if e.was_dampened { "yes" } else { "no" };
+        let revoked = if e.revoked_at.is_some() { "yes" } else { "no" };
+        let _ = writeln!(
+            s,
+            "{:>id_w$}  {:<24}  {:<type_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
+            e.id,
+            e.effective_at,
+            e.action_type,
+            reasons,
+            applied,
+            dampened,
+            revoked,
+            id_w = id_w,
+            type_w = type_w,
+            reasons_w = reasons_w,
+        );
+    }
+    if let Some(c) = &resp.cursor {
+        let _ = write!(s, "next cursor: {c}");
+    } else if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
+/// JSON renderer for `cairn moderator history`. The full
+/// [`HistoryResponse`] verbatim.
+pub fn format_history_json(resp: &HistoryResponse) -> String {
+    serde_json::to_string_pretty(resp).expect("HistoryResponse serializes")
+}
+
+// ============================================================
+// `cairn moderator strikes` — current strike state for a subject.
+// Backs `getSubjectStrikes` admin XRPC (#52 / read-half of #53).
+// ============================================================
+
+/// Input to `cairn moderator strikes`.
+#[derive(Debug, Clone)]
+pub struct StrikesInput {
+    /// Subject DID. The endpoint enforces the DID-prefix shape;
+    /// the CLI checks early so a bad shape doesn't cost an HTTP
+    /// round-trip.
+    pub subject: String,
+    /// Per-invocation override of the session's stored Cairn URL.
+    pub cairn_server_override: Option<String>,
+}
+
+/// Wire-shaped response from `tools.cairn.admin.getSubjectStrikes`.
+/// Mirrors `tools.cairn.admin.defs#subjectStrikeState`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StrikesResponse {
+    /// Active strike total after decay and revocation.
+    #[serde(rename = "currentStrikeCount")]
+    pub current_strike_count: u32,
+    /// Lifetime sum of strike_value_applied (ignores decay + revoke).
+    #[serde(rename = "rawTotal")]
+    pub raw_total: u32,
+    /// Strikes lost to time-based decay across unrevoked actions.
+    #[serde(rename = "decayedCount")]
+    pub decayed_count: u32,
+    /// Strikes that have been revoked.
+    #[serde(rename = "revokedCount")]
+    pub revoked_count: u32,
+    /// `true` iff `currentStrikeCount <= policy.good_standing_threshold`.
+    #[serde(rename = "goodStanding")]
+    pub good_standing: bool,
+    /// Currently-active suspension if any.
+    #[serde(
+        rename = "activeSuspension",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub active_suspension: Option<ActiveSuspensionView>,
+    /// Days until the most recent strike-bearing action falls out
+    /// of the decay window. Omitted when `currentStrikeCount == 0`.
+    #[serde(
+        rename = "decayWindowRemainingDays",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub decay_window_remaining_days: Option<u32>,
+    /// RFC-3339 effective_at of the most recent strike-bearing
+    /// unrevoked action. Absent if none.
+    #[serde(
+        rename = "lastActionAt",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub last_action_at: Option<String>,
+}
+
+/// Active-suspension sub-object surfaced on a [`StrikesResponse`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActiveSuspensionView {
+    /// `temp_suspension` or `indef_suspension`.
+    #[serde(rename = "actionType")]
+    pub action_type: String,
+    /// RFC-3339 wall-clock the suspension took effect.
+    #[serde(rename = "effectiveAt")]
+    pub effective_at: String,
+    /// RFC-3339 wall-clock the suspension ends; absent for indef.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none", default)]
+    pub expires_at: Option<String>,
+}
+
+/// Fetch the subject's current strike state.
+pub async fn strikes(
+    session: &mut SessionFile,
+    session_path: &Path,
+    input: StrikesInput,
+) -> Result<StrikesResponse, CliError> {
+    if !input.subject.starts_with("did:") {
+        return Err(CliError::Config(format!(
+            "subject must be a DID (`did:...`); got {:?}",
+            input.subject
+        )));
+    }
+    let cairn_server = input
+        .cairn_server_override
+        .as_deref()
+        .unwrap_or(&session.cairn_server_url)
+        .trim_end_matches('/')
+        .to_string();
+    let pds = PdsClient::new(&session.pds_url)?;
+    let token = acquire_service_auth(&pds, session, session_path, GET_SUBJECT_STRIKES_LXM).await?;
+
+    let url = format!("{cairn_server}/xrpc/{GET_SUBJECT_STRIKES_LXM}");
+    let client = build_client();
+    let resp = client
+        .get(&url)
+        .bearer_auth(&token)
+        .query(&[("subject", input.subject.as_str())])
+        .send()
+        .await
+        .map_err(|source| CliError::Http {
+            url: url.clone(),
+            source,
+        })?;
+    cairn_response::<StrikesResponse>(url, resp).await
+}
+
+/// Multi-line human renderer for `cairn moderator strikes`. Sections:
+/// summary numbers, suspension state (if any), trajectory.
+pub fn format_strikes_human(resp: &StrikesResponse, subject: &str) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    let _ = writeln!(s, "Strike state for {subject}");
+    let _ = writeln!(s, "  current strikes:    {}", resp.current_strike_count);
+    let _ = writeln!(
+        s,
+        "  good standing:      {}",
+        if resp.good_standing { "yes" } else { "no" }
+    );
+    let _ = writeln!(s, "  raw total:          {}", resp.raw_total);
+    let _ = writeln!(s, "  decayed:            {}", resp.decayed_count);
+    let _ = writeln!(s, "  revoked:            {}", resp.revoked_count);
+    match &resp.active_suspension {
+        None => {
+            let _ = writeln!(s, "  active suspension:  none");
+        }
+        Some(susp) => {
+            let when = match &susp.expires_at {
+                None => format!("{} (indefinite)", susp.effective_at),
+                Some(e) => format!("{} → {}", susp.effective_at, e),
+            };
+            let _ = writeln!(s, "  active suspension:  {} {}", susp.action_type, when);
+        }
+    }
+    if let Some(t) = &resp.last_action_at {
+        let _ = writeln!(s, "  last action:        {t}");
+    }
+    if let Some(d) = resp.decay_window_remaining_days {
+        let _ = writeln!(s, "  returns to good standing in: {d} day(s)");
+    }
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
+/// JSON renderer for `cairn moderator strikes`.
+pub fn format_strikes_json(resp: &StrikesResponse) -> String {
+    serde_json::to_string_pretty(resp).expect("StrikesResponse serializes")
 }
 
 // ============================================================

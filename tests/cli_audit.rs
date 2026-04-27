@@ -102,6 +102,7 @@ async fn spawn_cairn() -> CairnHarness {
             label_values: Some(vec!["spam".into()]),
             ..Default::default()
         },
+        cairn_mod::StrikePolicy::defaults(),
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

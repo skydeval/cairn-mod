@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM subject_actions WHERE subject_did = ?1) AS \"exists!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "751e89a07a03a728e480cfd48e73530bd15c1699f147c4ccdf7349f5bb301cc2"
+}

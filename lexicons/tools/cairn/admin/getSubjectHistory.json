@@ -1,0 +1,75 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getSubjectHistory",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List the moderation actions recorded against a subject (account or record). Newest-first, with opaque cursor pagination. The `subject` is normalized to a DID for account-level filtering; `subjectUri` narrows further to record-level actions on a specific URI. Mod or Admin role.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "subject"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "Account DID. Strike accounting always rolls up to this DID; record-level actions are reachable via the `subjectUri` filter."
+          },
+          "subjectUri": {
+            "type": "string",
+            "description": "Optional AT-URI filter. When set, only record-level actions on this URI are returned."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a prior response."
+          },
+          "since": {
+            "type": "string",
+            "format": "datetime",
+            "description": "Only return actions whose effective_at is at or after this timestamp."
+          },
+          "includeRevoked": {
+            "type": "boolean",
+            "default": true,
+            "description": "When false, revoked actions are omitted from the response."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actions"
+          ],
+          "properties": {
+            "actions": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "tools.cairn.admin.defs#subjectAction"
+              }
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Opaque pagination cursor for the next page; absent when this is the last page."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "SubjectNotFound",
+          "description": "No subject_actions row has ever been recorded for the given subject DID."
+        }
+      ]
+    }
+  }
+}

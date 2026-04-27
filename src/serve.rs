@@ -96,7 +96,7 @@ where
         crate::SubscribeConfig::default().retention_days,
         config.retention.clone().into(),
         reason_vocabulary,
-        strike_policy,
+        strike_policy.clone(),
     )
     .await
     .map_err(map_spawn_writer_error)?;
@@ -142,23 +142,29 @@ where
         c.declared_label_values = config.labeler.as_ref().map(|l| l.label_values.clone());
         c
     };
-    let router = admin_router(pool.clone(), writer.clone(), auth.clone(), admin_cfg)
-        .merge(create_report_router(
-            pool.clone(),
-            auth.clone(),
-            crate::CreateReportConfig {
-                db_path: config.db_path.clone(),
-                ..crate::CreateReportConfig::default()
-            },
-        ))
-        .merge(subscribe_router(
-            pool.clone(),
-            writer.clone(),
-            crate::SubscribeConfig::default(),
-        ))
-        .merge(wellknown_router())
-        .merge(did_document_router(pool.clone(), config.clone()))
-        .merge(health_router(pool.clone(), writer.clone()));
+    let router = admin_router(
+        pool.clone(),
+        writer.clone(),
+        auth.clone(),
+        admin_cfg,
+        strike_policy.clone(),
+    )
+    .merge(create_report_router(
+        pool.clone(),
+        auth.clone(),
+        crate::CreateReportConfig {
+            db_path: config.db_path.clone(),
+            ..crate::CreateReportConfig::default()
+        },
+    ))
+    .merge(subscribe_router(
+        pool.clone(),
+        writer.clone(),
+        crate::SubscribeConfig::default(),
+    ))
+    .merge(wellknown_router())
+    .merge(did_document_router(pool.clone(), config.clone()))
+    .merge(health_router(pool.clone(), writer.clone()));
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see
     // the module-level note on the L3 ordering invariant.
