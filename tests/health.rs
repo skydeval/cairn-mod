@@ -75,6 +75,8 @@ async fn harness(dir: &TempDir) -> (Pool<Sqlite>, SocketAddr, tokio::task::JoinH
         TEST_SERVICE_DID.into(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();

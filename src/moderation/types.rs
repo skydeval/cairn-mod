@@ -75,10 +75,38 @@ impl ActionType {
             ActionType::TempSuspension | ActionType::IndefSuspension
         )
     }
+
+    /// String form matching the `subject_actions.action_type` SQL
+    /// CHECK constraint (#46). Stable wire identifier — used by the
+    /// recorder to insert rows, by the lexicon `knownValues` set,
+    /// and by CLI flag parsing.
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            ActionType::Warning => "warning",
+            ActionType::Note => "note",
+            ActionType::TempSuspension => "temp_suspension",
+            ActionType::IndefSuspension => "indef_suspension",
+            ActionType::Takedown => "takedown",
+        }
+    }
+
+    /// Parse the SQL/wire string form. Returns `None` for any value
+    /// not in the §F20 enum — the caller surfaces this as
+    /// `InvalidActionType` at the request boundary.
+    pub fn from_db_str(s: &str) -> Option<Self> {
+        match s {
+            "warning" => Some(ActionType::Warning),
+            "note" => Some(ActionType::Note),
+            "temp_suspension" => Some(ActionType::TempSuspension),
+            "indef_suspension" => Some(ActionType::IndefSuspension),
+            "takedown" => Some(ActionType::Takedown),
+            _ => None,
+        }
+    }
 }
 
 /// Read-side projection of a `subject_actions` row, holding only
-/// the columns the strike + decay calculators consume.
+/// the columns the strike + decay + window calculators consume.
 ///
 /// Field set is deliberately narrow:
 ///
@@ -95,6 +123,10 @@ impl ActionType {
 ///   whether a suspension is currently active vs. expired); `None`
 ///   for `IndefSuspension` (no end) and for non-suspensions
 ///   (irrelevant).
+/// - `was_dampened` — frozen on the row by the strike calculator
+///   (#49) at action time. Read by the window calculator (#51) as
+///   the "in-good-standing at action time" predicate; a stable
+///   signal that doesn't drift if `[strike_policy]` is later edited.
 ///
 /// Ordering convention: callers pass slices in id-ascending order
 /// (matching `SELECT ... ORDER BY id` from `subject_actions`). The
@@ -120,6 +152,14 @@ pub struct ActionRecord {
     /// Expiration wall-clock for `TempSuspension`; `None` for
     /// `IndefSuspension` (open-ended) and for non-suspensions.
     pub expires_at: Option<SystemTime>,
+    /// `true` iff the strike calculator's dampening curve was
+    /// consulted at action time — i.e., the subject was in good
+    /// standing AND the position was covered by the curve (#49).
+    /// Used by the window calculator (#51) as the "in-good-standing
+    /// at action time" predicate. Frozen on the row, so historical
+    /// position counting reflects the standing the subject was
+    /// actually in when each prior action fired.
+    pub was_dampened: bool,
 }
 
 #[cfg(test)]
@@ -145,5 +185,25 @@ mod tests {
             !ActionType::Takedown.is_suspension(),
             "Takedown carries strikes but is not a suspension — it does not trigger decay freeze"
         );
+    }
+
+    #[test]
+    fn db_str_round_trip_for_every_variant() {
+        for v in [
+            ActionType::Warning,
+            ActionType::Note,
+            ActionType::TempSuspension,
+            ActionType::IndefSuspension,
+            ActionType::Takedown,
+        ] {
+            assert_eq!(ActionType::from_db_str(v.as_db_str()), Some(v));
+        }
+    }
+
+    #[test]
+    fn db_str_unknown_value_yields_none() {
+        assert!(ActionType::from_db_str("WARNING").is_none()); // case-sensitive
+        assert!(ActionType::from_db_str("ban").is_none());
+        assert!(ActionType::from_db_str("").is_none());
     }
 }

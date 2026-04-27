@@ -81,6 +81,50 @@ pub enum Error {
         /// Report primary key that was already resolved.
         id: i64,
     },
+
+    /// `recordAction` (§F20, #51) carried a reason identifier that
+    /// isn't declared in the operator's `[moderation_reasons]`
+    /// vocabulary. Handler surfaces this as `InvalidReason` (400).
+    #[error("reason {0:?} is not declared in [moderation_reasons]")]
+    ReasonNotFound(String),
+
+    /// `recordAction` (§F20, #51) was called with `type=temp_suspension`
+    /// but no `duration`. Handler surfaces this as `DurationRequired`
+    /// (400). Required because `expires_at` on the row is computed
+    /// from `effective_at + duration`; without one the row would
+    /// silently behave as `indef_suspension`.
+    #[error("recordAction: temp_suspension requires duration")]
+    DurationRequiredForTempSuspension,
+
+    /// `recordAction` (§F20, #51) was called with a non-temp_suspension
+    /// `type` plus a `duration`. Handler surfaces this as
+    /// `DurationNotAllowed` (400). Strict reject (rather than silent
+    /// drop) so an operator who meant `temp_suspension` doesn't end
+    /// up with an `indef_suspension` whose duration string is lost.
+    #[error("recordAction: duration is only valid for temp_suspension")]
+    DurationOnlyForTempSuspension,
+
+    /// `revokeAction` (§F20, #51) targeted a `subject_actions.id` that
+    /// doesn't exist. Handler surfaces this as `ActionNotFound` (404).
+    #[error("subject_actions row not found: id={0}")]
+    ActionNotFound(i64),
+
+    /// `revokeAction` (§F20, #51) targeted a row whose `revoked_at`
+    /// is already non-NULL. Handler surfaces this as
+    /// `ActionAlreadyRevoked` (400). The schema trigger forbids
+    /// re-revocation; the recorder catches it before the UPDATE for
+    /// a clean lexicon error.
+    #[error("subject_actions row already revoked: id={0}")]
+    ActionAlreadyRevoked(i64),
+
+    /// `recordAction` (§F20, #51) was called with an `at://`-URI
+    /// `subject` whose repo DID does not match a separate
+    /// subject_did context. Reserved for future use; v1.4 derives
+    /// subject_did from the URI directly so this variant is
+    /// currently unreachable in practice but kept for the lexicon
+    /// error surface.
+    #[error("recordAction: subject_uri repo DID does not match subject_did")]
+    SubjectUriMismatch,
 }
 
 impl From<figment::Error> for Error {

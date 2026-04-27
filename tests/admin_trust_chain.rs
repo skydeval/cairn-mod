@@ -130,6 +130,8 @@ async fn spawn_with_config(admin_cfg: AdminConfig) -> Harness {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();

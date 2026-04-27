@@ -55,6 +55,11 @@ pub(super) enum AdminError {
     AuthenticationRequired,
     Forbidden,
     InvalidRequest(&'static str),
+    /// Owned-string variant of `InvalidRequest` for messages that
+    /// can't be `'static` (e.g., dynamic validation errors from the
+    /// writer's input checks). Same 400 status / `InvalidRequest`
+    /// XRPC error code; the variant just owns the body.
+    InvalidRequestOwned(String),
     /// Declared in lexicons/tools/cairn/admin/negateLabel.json.
     LabelNotFound,
     /// Declared in lexicons/tools/cairn/admin/{getReport,resolveReport}.json.
@@ -65,18 +70,57 @@ pub(super) enum AdminError {
     /// Message MUST NOT enumerate the allowed label values — same
     /// anti-leak principle as #14's reason-length guard.
     InvalidLabelValue,
+    /// Declared in lexicons/tools/cairn/admin/recordAction.json (#51).
+    InvalidReason,
+    /// Declared in lexicons/tools/cairn/admin/recordAction.json (#51).
+    InvalidActionType,
+    /// Declared in lexicons/tools/cairn/admin/recordAction.json (#51).
+    DurationRequired,
+    /// Declared in lexicons/tools/cairn/admin/recordAction.json (#51).
+    DurationNotAllowed,
+    /// Declared in lexicons/tools/cairn/admin/recordAction.json (#51).
+    SubjectUriMismatch,
+    /// Declared in lexicons/tools/cairn/admin/revokeAction.json (#51).
+    ActionNotFound,
+    /// Declared in lexicons/tools/cairn/admin/revokeAction.json (#51).
+    ActionAlreadyRevoked,
     Internal,
 }
 
+/// Error body for static-message variants. Static `&str` lets the
+/// majority of error responses skip an allocation. The
+/// owned-message variants below wrap an [`OwnedErrorBody`].
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
     message: &'static str,
 }
 
+/// Error body for variants that carry a runtime-formatted message
+/// (e.g., [`AdminError::InvalidRequestOwned`]).
+#[derive(Serialize)]
+struct OwnedErrorBody {
+    error: &'static str,
+    message: String,
+}
+
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
+        // Owned-message variants take a different early-exit path so
+        // ErrorBody can stay `'static`-only.
+        if let AdminError::InvalidRequestOwned(msg) = self {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(OwnedErrorBody {
+                    error: "InvalidRequest",
+                    message: msg,
+                }),
+            )
+                .into_response();
+        }
+
         let (status, body) = match self {
+            AdminError::InvalidRequestOwned(_) => unreachable!("handled above"),
             AdminError::AuthenticationRequired => (
                 StatusCode::UNAUTHORIZED,
                 ErrorBody {
@@ -124,6 +168,55 @@ impl IntoResponse for AdminError {
                 ErrorBody {
                     error: "InvalidLabelValue",
                     message: "label value not accepted by this labeler",
+                },
+            ),
+            AdminError::InvalidReason => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "InvalidReason",
+                    message: "reason identifier not declared in [moderation_reasons]",
+                },
+            ),
+            AdminError::InvalidActionType => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "InvalidActionType",
+                    message: "type must be one of warning / note / temp_suspension / indef_suspension / takedown",
+                },
+            ),
+            AdminError::DurationRequired => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "DurationRequired",
+                    message: "duration is required for type=temp_suspension",
+                },
+            ),
+            AdminError::DurationNotAllowed => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "DurationNotAllowed",
+                    message: "duration is only valid for type=temp_suspension",
+                },
+            ),
+            AdminError::SubjectUriMismatch => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "SubjectUriMismatch",
+                    message: "subject URI repo does not match subject_did",
+                },
+            ),
+            AdminError::ActionNotFound => (
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "ActionNotFound",
+                    message: "subject action not found",
+                },
+            ),
+            AdminError::ActionAlreadyRevoked => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "ActionAlreadyRevoked",
+                    message: "subject action is already revoked",
                 },
             ),
             AdminError::Internal => (

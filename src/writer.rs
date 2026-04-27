@@ -51,6 +51,14 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::label::Label;
+use crate::moderation::decay::calculate_strike_state;
+use crate::moderation::policy::StrikePolicy;
+use crate::moderation::reasons::ReasonVocabulary;
+use crate::moderation::strike::{
+    StrikeApplication, calculate as strike_calculate, resolve_primary_reason,
+};
+use crate::moderation::types::{ActionRecord, ActionType};
+use crate::moderation::window::compute_position_in_window;
 use crate::server::RetentionConfig;
 use crate::signing::sign_label;
 use crate::signing_key::SigningKey;
@@ -159,6 +167,8 @@ pub const AUDIT_ACTION_VALUES: &[&str] = &[
     "reporter_flagged",
     "reporter_unflagged",
     "retention_sweep",
+    "subject_action_recorded",
+    "subject_action_revoked",
 ];
 
 /// Closed set of `audit_log.outcome` values matching the SQL `CHECK`
@@ -253,6 +263,16 @@ enum WriteCommand {
         crate::audit::append::AuditRowForAppend,
         oneshot::Sender<Result<i64>>,
     ),
+    /// Record a graduated-action subject_actions row (§F20 / #51).
+    /// Single-transaction: input validation, strike calculation,
+    /// subject_actions INSERT, strike_state UPSERT, audit_log
+    /// hash-chain append.
+    RecordAction(RecordActionRequest, oneshot::Sender<Result<RecordedAction>>),
+    /// Revoke a previously-recorded subject_actions row (§F20 /
+    /// #51). Single-transaction: row lookup + state-check,
+    /// revoked_at UPDATE, strike_state recompute, audit_log
+    /// hash-chain append.
+    RevokeAction(RevokeActionRequest, oneshot::Sender<Result<RevokedAction>>),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -365,6 +385,92 @@ pub struct SweepBatchResult {
     /// spawned with `retention_days = None` — the sweep is a no-op
     /// in that configuration and `rows_deleted` is always 0.
     pub retention_days_applied: Option<u32>,
+}
+
+/// Request to record a new subject_actions row (§F20 / #51 graduated-
+/// action moderation). The handler validates the inputs, computes
+/// the strike value at action time via the v1.4 calculators
+/// (#48/#49/#50/#51), inserts the row, updates the strike-state
+/// cache, and writes a hash-chained audit_log row — all in a
+/// single transaction per §F5 atomicity.
+#[derive(Debug, Clone)]
+pub struct RecordActionRequest {
+    /// Raw subject — DID (`did:plc:...`, `did:web:...`) or AT-URI
+    /// (`at://did:.../col/r`). The handler routes to subject_did vs
+    /// subject_uri based on prefix; for AT-URIs the parent repo DID
+    /// is extracted as subject_did and strike accounting rolls up
+    /// to the account.
+    pub subject: String,
+    /// DID of the moderator/admin recording the action (JWT iss
+    /// from XRPC; CLI caller DID otherwise). Becomes
+    /// subject_actions.actor_did and audit_log.actor_did.
+    pub actor_did: String,
+    /// Graduated-action category. The handler enforces:
+    /// `temp_suspension` requires `duration_iso`; everything else
+    /// rejects it.
+    pub action_type: ActionType,
+    /// Operator-vocabulary identifiers from `[moderation_reasons]`.
+    /// Must be non-empty. Multi-reason resolution: severe wins; else
+    /// highest base_weight wins; ties → first-listed.
+    pub reason_codes: Vec<String>,
+    /// ISO-8601 duration string (e.g. `P7D`). Required for
+    /// `temp_suspension`; rejected for other types. Stored verbatim
+    /// on the row for display; `expires_at` is the canonical
+    /// "when does it end" surface.
+    pub duration_iso: Option<String>,
+    /// Optional moderator-facing rationale.
+    pub notes: Option<String>,
+    /// Optional report row ids that motivated this action.
+    pub report_ids: Vec<i64>,
+}
+
+/// Result of a successful [`WriterHandle::record_action`]. The
+/// admin handler echoes these fields verbatim in the
+/// `tools.cairn.admin.recordAction` response; the CLI surfaces them
+/// in human and JSON output.
+#[derive(Debug, Clone)]
+pub struct RecordedAction {
+    /// Inserted subject_actions row id.
+    pub action_id: i64,
+    /// Reason's `base_weight` before dampening. `0` for warning/note.
+    pub strike_value_base: u32,
+    /// Strike weight actually applied after dampening.
+    pub strike_value_applied: u32,
+    /// `true` iff the dampening curve was consulted (see #49).
+    pub was_dampened: bool,
+    /// Subject's `current_strike_count` BEFORE this action — frozen
+    /// for forensic history.
+    pub strikes_at_time_of_action: u32,
+}
+
+/// Request to revoke a previously-recorded subject_actions row
+/// (§F20 / #51). Sets the row's revoked_at/revoked_by_did/
+/// revoked_reason columns (the schema's no-update-except-revoke
+/// trigger permits exactly this NULL→non-NULL transition);
+/// recomputes the strike-state cache; writes a hash-chained
+/// audit_log row. All in a single transaction.
+#[derive(Debug, Clone)]
+pub struct RevokeActionRequest {
+    /// subject_actions.id to revoke. Errors with
+    /// [`Error::ActionNotFound`] when the row doesn't exist;
+    /// [`Error::ActionAlreadyRevoked`] when revoked_at is already
+    /// non-NULL.
+    pub action_id: i64,
+    /// DID of the moderator/admin performing the revocation.
+    pub revoked_by_did: String,
+    /// Optional rationale stored on the row's revoked_reason column.
+    pub revoked_reason: Option<String>,
+}
+
+/// Result of a successful [`WriterHandle::revoke_action`].
+#[derive(Debug, Clone)]
+pub struct RevokedAction {
+    /// The revoked row's id (echoed for confirmation).
+    pub action_id: i64,
+    /// Wall-clock the revocation took effect, as RFC-3339 Z
+    /// (matches the [`AUDIT_REASON_RECORD_ACTION`] surface for
+    /// consumer convenience).
+    pub revoked_at: String,
 }
 
 /// Aggregate result of a full sweep run (returned by
@@ -490,6 +596,48 @@ impl WriterHandle {
         }
     }
 
+    /// Record a graduated-action moderation event (§F20 / #51).
+    /// The writer validates inputs, computes the strike value at
+    /// action time via the v1.4 calculators (#48/#49/#50/#51),
+    /// inserts the subject_actions row, updates the strike-state
+    /// cache, and writes a hash-chained audit_log row — all in a
+    /// single transaction. Errors:
+    ///
+    /// - [`Error::ReasonNotFound`] when a reason identifier is not
+    ///   declared in `[moderation_reasons]`.
+    /// - [`Error::DurationRequiredForTempSuspension`] for
+    ///   `temp_suspension` without `duration_iso`.
+    /// - [`Error::DurationOnlyForTempSuspension`] for non-temp
+    ///   types with `duration_iso` set.
+    /// - [`Error::Signing`] for malformed subject / duration / etc.
+    pub async fn record_action(&self, req: RecordActionRequest) -> Result<RecordedAction> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::RecordAction(req, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
+    /// Revoke a previously-recorded action (§F20 / #51). Errors:
+    ///
+    /// - [`Error::ActionNotFound`] when no row matches `action_id`.
+    /// - [`Error::ActionAlreadyRevoked`] when the row's revoked_at
+    ///   is already non-NULL — the schema trigger forbids
+    ///   re-revocation; the handler catches it before the UPDATE.
+    pub async fn revoke_action(&self, req: RevokeActionRequest) -> Result<RevokedAction> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::RevokeAction(req, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
     /// Append a hash-chained audit row through the writer task (#39).
     /// Used by in-process callers that don't already hold a transaction
     /// — e.g., `retentionSweep`'s post-sweep audit row. Callers that
@@ -566,12 +714,22 @@ impl WriterHandle {
 ///
 /// `retention` is the sweep execution policy (schedule + batching);
 /// distinct from `retention_days` per the [§F4 split](crate::RetentionConfig).
+///
+/// `reason_vocabulary` and `strike_policy` are the resolved v1.4
+/// moderation surface (#47 / #48). The recorder (#51 RecordAction
+/// handler) consults them at action time to validate reason codes
+/// and compute strike values. They're held by the writer task so
+/// the recorder doesn't have to thread them through every call.
+/// Operators restart `cairn serve` to change either — same posture
+/// as `[labeler]` config.
 pub async fn spawn(
     pool: Pool<Sqlite>,
     key: SigningKey,
     service_did: String,
     retention_days: Option<u32>,
     retention: RetentionConfig,
+    reason_vocabulary: ReasonVocabulary,
+    strike_policy: StrikePolicy,
 ) -> Result<WriterHandle> {
     let instance_id = acquire_lease(&pool).await?;
     let signing_key_id = ensure_signing_key_row(&pool, &key).await?;
@@ -591,6 +749,8 @@ pub async fn spawn(
         shutdown_tx,
         retention_days,
         retention,
+        reason_vocabulary,
+        strike_policy,
     };
 
     tokio::spawn(writer.run());
@@ -618,6 +778,14 @@ struct Writer {
     retention_days: Option<u32>,
     /// Sweep execution policy (schedule + batching).
     retention: RetentionConfig,
+    /// Resolved [moderation_reasons] vocabulary (#47). Consulted by
+    /// the RecordAction handler to validate reason codes and look
+    /// up base_weight / severe.
+    reason_vocabulary: ReasonVocabulary,
+    /// Resolved [strike_policy] (#48). Consulted by the RecordAction
+    /// handler for the dampening curve, threshold, and decay
+    /// parameters.
+    strike_policy: StrikePolicy,
 }
 
 /// Internal accumulator for an in-flight scheduled sweep. Lives only
@@ -712,6 +880,14 @@ impl Writer {
                         }
                         Some(WriteCommand::AppendAudit(row, reply)) => {
                             let res = self.handle_append_audit(row).await;
+                            let _ = reply.send(res);
+                        }
+                        Some(WriteCommand::RecordAction(req, reply)) => {
+                            let res = self.handle_record_action(req).await;
+                            let _ = reply.send(res);
+                        }
+                        Some(WriteCommand::RevokeAction(req, reply)) => {
+                            let res = self.handle_revoke_action(req).await;
                             let _ = reply.send(res);
                         }
                         Some(WriteCommand::Shutdown(reply)) => {
@@ -1196,6 +1372,304 @@ impl Writer {
         })
     }
 
+    /// Atomic recordAction flow (§F20 / #51). Validates inputs,
+    /// resolves the primary reason, computes strike values via the
+    /// v1.4 calculators (#48/#49/#50/#51), inserts the audit_log
+    /// row first (so subject_actions can carry audit_log_id at
+    /// INSERT — the schema's no-update-except-revoke trigger
+    /// forbids backfilling it later), inserts the subject_actions
+    /// row, then UPSERTs subject_strike_state. All in one
+    /// transaction.
+    async fn handle_record_action(&self, req: RecordActionRequest) -> Result<RecordedAction> {
+        // ---------- pre-flight validation ----------
+
+        if req.reason_codes.is_empty() {
+            return Err(Error::Signing(
+                "recordAction: reason_codes must be non-empty".into(),
+            ));
+        }
+        // Note/Warning don't take reasons in the §F20 design intent,
+        // but the issue body says "warning requires --reason" for
+        // the audit trail. Accept reasons for all types; only
+        // strike-bearing types actually use them for strike
+        // calculation.
+        match req.action_type {
+            ActionType::TempSuspension => {
+                if req.duration_iso.as_deref().unwrap_or("").is_empty() {
+                    return Err(Error::DurationRequiredForTempSuspension);
+                }
+            }
+            _ => {
+                if req.duration_iso.is_some() {
+                    return Err(Error::DurationOnlyForTempSuspension);
+                }
+            }
+        }
+
+        let (subject_did, subject_uri) = route_subject(&req.subject)?;
+
+        // Resolve primary reason against the writer's vocabulary.
+        // Vocabulary lookups are cheap; doing it before opening the
+        // transaction keeps a bad-reason failure from acquiring the
+        // SQLite write lock unnecessarily.
+        let primary = resolve_primary_reason(&req.reason_codes, &self.reason_vocabulary)?;
+
+        // Parse duration (cheap; pre-tx for the same reason).
+        let duration_secs = match (req.action_type, req.duration_iso.as_deref()) {
+            (ActionType::TempSuspension, Some(iso)) => Some(parse_iso8601_duration(iso)?),
+            _ => None,
+        };
+
+        // ---------- transaction ----------
+
+        let mut tx = self.pool.begin().await?;
+        let created_at = epoch_ms_now();
+        let effective_at = created_at;
+        let expires_at: Option<i64> = duration_secs.map(|s| effective_at + (s as i64) * 1000);
+
+        // Load history for strike + position calculation. id-ascending
+        // (oldest-first) per the calculators' contract.
+        let history = load_subject_actions_for_calc(&mut tx, &subject_did).await?;
+
+        // Compute current count via the decay calculator.
+        let now_systemtime = epoch_ms_to_systemtime(created_at);
+        let pre_state = calculate_strike_state(&history, &self.strike_policy, now_systemtime);
+        let strikes_at_time_of_action = pre_state.current_count;
+
+        // Compute position and strike value.
+        let position = compute_position_in_window(&history, &self.strike_policy, now_systemtime);
+        let calc: StrikeApplication = strike_calculate(
+            strikes_at_time_of_action,
+            &primary,
+            &self.strike_policy,
+            position,
+        );
+
+        // Note/Warning don't carry strikes regardless of reason
+        // (§F20 design + #48 semantics). Override with zero values
+        // and was_dampened=false; defense-in-depth for an operator
+        // who attaches a strike-bearing reason to a Note row.
+        let (strike_base, strike_applied, was_dampened) = match req.action_type {
+            ActionType::Note | ActionType::Warning => (0u32, 0u32, false),
+            _ => (calc.base_weight, calc.applied, calc.was_dampened),
+        };
+
+        // Build audit_log reason JSON before the INSERT so the
+        // audit row can carry the resolved values for forensic
+        // reconstruction.
+        // action_id is unknown until subject_actions INSERT, so we
+        // patch it in after that step.
+        let reason_codes_json = serde_json::to_string(&req.reason_codes)
+            .map_err(|e| Error::Signing(format!("serialize reason_codes: {e}")))?;
+        let report_ids_json = if req.report_ids.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&req.report_ids)
+                    .map_err(|e| Error::Signing(format!("serialize report_ids: {e}")))?,
+            )
+        };
+
+        // Append audit_log row first. target = subject_did (the
+        // account being moderated); target_cid = None. We don't
+        // know action_id yet — pass 0 as a placeholder; the actual
+        // id is patched into the reason JSON after the
+        // subject_actions INSERT, but only the reason JSON gets
+        // the patch. The audit row's hash chain locks at this
+        // INSERT, so the action_id is captured at write time.
+        //
+        // Order rationale: audit_log first so subject_actions
+        // can carry audit_log_id at INSERT (the trigger forbids
+        // UPDATE of audit_log_id). The audit row's reason JSON
+        // captures the action_id IT will reference, computed
+        // post-INSERT via the next-id query.
+        let next_action_id = predict_next_subject_action_id(&mut tx).await?;
+        let audit_reason = build_record_action_audit_reason(
+            next_action_id,
+            req.action_type,
+            &primary.identifier,
+            &req.reason_codes,
+            strike_base,
+            strike_applied,
+            was_dampened,
+        );
+        let audit_target = subject_uri.clone().unwrap_or_else(|| subject_did.clone());
+        let audit_log_id = crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at,
+                action: "subject_action_recorded".into(),
+                actor_did: req.actor_did.clone(),
+                target: Some(audit_target),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        // INSERT subject_actions. action_type goes through
+        // ActionType::as_db_str so the SQL CHECK constraint binds
+        // the same set as the Rust enum.
+        let action_type_str = req.action_type.as_db_str();
+        let was_dampened_int: i64 = if was_dampened { 1 } else { 0 };
+        let strikes_at_time_i64 = strikes_at_time_of_action as i64;
+        let strike_base_i64 = strike_base as i64;
+        let strike_applied_i64 = strike_applied as i64;
+        let inserted_id = sqlx::query_scalar!(
+            "INSERT INTO subject_actions (
+                subject_did, subject_uri, actor_did, action_type, reason_codes,
+                duration, effective_at, expires_at, notes, report_ids,
+                strike_value_base, strike_value_applied, was_dampened,
+                strikes_at_time_of_action, audit_log_id, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+             RETURNING id",
+            subject_did,
+            subject_uri,
+            req.actor_did,
+            action_type_str,
+            reason_codes_json,
+            req.duration_iso,
+            effective_at,
+            expires_at,
+            req.notes,
+            report_ids_json,
+            strike_base_i64,
+            strike_applied_i64,
+            was_dampened_int,
+            strikes_at_time_i64,
+            audit_log_id,
+            created_at,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if inserted_id != next_action_id {
+            // Audit row already committed; we'd have to invalidate
+            // it. With BEGIN DEFERRED + the writer task being the
+            // only in-process appender, the predict-vs-insert
+            // race is closed — but if it ever fires, surface as
+            // an internal error rather than a silent mismatch.
+            return Err(Error::Signing(format!(
+                "subject_actions inserted at id {inserted_id} but predicted {next_action_id}; audit chain captured the predicted id (corrupted)"
+            )));
+        }
+
+        // Recompute strike state for the cache. Reload history with
+        // the new row so the cache reflects post-insert reality.
+        let post_history = load_subject_actions_for_calc(&mut tx, &subject_did).await?;
+        let post_state = calculate_strike_state(&post_history, &self.strike_policy, now_systemtime);
+
+        let post_count_i64 = post_state.current_count as i64;
+        sqlx::query!(
+            "INSERT INTO subject_strike_state (subject_did, current_strike_count, last_action_at, last_recompute_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(subject_did) DO UPDATE SET
+                 current_strike_count = excluded.current_strike_count,
+                 last_action_at = excluded.last_action_at,
+                 last_recompute_at = excluded.last_recompute_at",
+            subject_did,
+            post_count_i64,
+            created_at,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(RecordedAction {
+            action_id: inserted_id,
+            strike_value_base: strike_base,
+            strike_value_applied: strike_applied,
+            was_dampened,
+            strikes_at_time_of_action,
+        })
+    }
+
+    /// Atomic revokeAction flow (§F20 / #51). Looks up the row,
+    /// verifies state, sets the revoked_* columns (the schema's
+    /// no-update-except-revoke trigger permits this NULL→non-NULL
+    /// transition), recomputes strike_state for the subject, and
+    /// appends an audit_log row. All in one transaction.
+    async fn handle_revoke_action(&self, req: RevokeActionRequest) -> Result<RevokedAction> {
+        let mut tx = self.pool.begin().await?;
+
+        // Look up the row + check current state.
+        let row = sqlx::query!(
+            "SELECT subject_did, revoked_at FROM subject_actions WHERE id = ?1",
+            req.action_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let row = row.ok_or(Error::ActionNotFound(req.action_id))?;
+        if row.revoked_at.is_some() {
+            return Err(Error::ActionAlreadyRevoked(req.action_id));
+        }
+
+        let revoked_at_ms = epoch_ms_now();
+
+        // UPDATE the revocation columns. The schema trigger permits
+        // NULL→non-NULL on these three columns; any other column
+        // change in this UPDATE would abort.
+        sqlx::query!(
+            "UPDATE subject_actions
+             SET revoked_at = ?1, revoked_by_did = ?2, revoked_reason = ?3
+             WHERE id = ?4",
+            revoked_at_ms,
+            req.revoked_by_did,
+            req.revoked_reason,
+            req.action_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Recompute strike state for the subject. The decay
+        // calculator excludes revoked rows from current_count.
+        let post_history = load_subject_actions_for_calc(&mut tx, &row.subject_did).await?;
+        let now_systemtime = epoch_ms_to_systemtime(revoked_at_ms);
+        let post_state = calculate_strike_state(&post_history, &self.strike_policy, now_systemtime);
+
+        let post_count_i64 = post_state.current_count as i64;
+        sqlx::query!(
+            "INSERT INTO subject_strike_state (subject_did, current_strike_count, last_action_at, last_recompute_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(subject_did) DO UPDATE SET
+                 current_strike_count = excluded.current_strike_count,
+                 last_recompute_at = excluded.last_recompute_at",
+            row.subject_did,
+            post_count_i64,
+            revoked_at_ms,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Audit row. target = subject_actions.id.to_string() so the
+        // audit chain links back to the row being revoked (not the
+        // subject, which is recoverable via the row id).
+        let audit_reason =
+            build_revoke_action_audit_reason(req.action_id, req.revoked_reason.as_deref());
+        crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: revoked_at_ms,
+                action: "subject_action_revoked".into(),
+                actor_did: req.revoked_by_did.clone(),
+                target: Some(req.action_id.to_string()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(RevokedAction {
+            action_id: req.action_id,
+            revoked_at: rfc3339_from_epoch_ms(revoked_at_ms)?,
+        })
+    }
+
     async fn heartbeat(&self) -> Result<()> {
         let now_ms = epoch_ms_now();
         sqlx::query!(
@@ -1418,6 +1892,41 @@ pub(crate) fn build_retention_sweep_audit_reason(result: &SweepResult) -> String
     .to_string()
 }
 
+/// Audit-log `reason` JSON schema for `subject_action_recorded`
+/// (§F20 / #51 graduated-action moderation). Captures the action_id,
+/// action_type, primary reason resolved at record time, the full
+/// list of declared reasons, the strike value applied, and whether
+/// dampening fired — enough for forensic reconstruction without
+/// requiring a join to subject_actions.
+///
+/// ```json
+/// {
+///   "action_id": <i64>,
+///   "action_type": "<warning|note|temp_suspension|indef_suspension|takedown>",
+///   "primary_reason": "<identifier>",
+///   "reason_codes": ["<id1>", "<id2>"],
+///   "strike_value_base": <u32>,
+///   "strike_value_applied": <u32>,
+///   "was_dampened": <bool>
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.subject_action_recorded")]
+pub const AUDIT_REASON_RECORD_ACTION: &str = "subject_action_recorded: { action_id, action_type, primary_reason, reason_codes, strike_value_base, strike_value_applied, was_dampened }";
+
+/// Audit-log `reason` JSON schema for `subject_action_revoked`
+/// (§F20 / #51). Captures the revoked subject_actions row id and
+/// the moderator-supplied rationale.
+///
+/// ```json
+/// {
+///   "action_id": <i64>,
+///   "revoked_reason": "<free text>" | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.subject_action_revoked")]
+pub const AUDIT_REASON_REVOKE_ACTION: &str =
+    "subject_action_revoked: { action_id, revoked_reason }";
+
 /// `reporter_flagged` / `reporter_unflagged` audit reason JSON —
 /// see [`AUDIT_REASON_FLAG_REPORTER`]. Shared with the flagReporter
 /// handler (not the writer — flagReporter is a direct handler txn
@@ -1433,6 +1942,242 @@ pub(crate) fn build_flag_reporter_audit_reason(
         "moderator_reason": moderator_reason,
     })
     .to_string()
+}
+
+/// `subject_action_recorded` audit reason JSON — see
+/// [`AUDIT_REASON_RECORD_ACTION`] for the schema.
+fn build_record_action_audit_reason(
+    action_id: i64,
+    action_type: ActionType,
+    primary_reason: &str,
+    reason_codes: &[String],
+    strike_value_base: u32,
+    strike_value_applied: u32,
+    was_dampened: bool,
+) -> String {
+    serde_json::json!({
+        "action_id": action_id,
+        "action_type": action_type.as_db_str(),
+        "primary_reason": primary_reason,
+        "reason_codes": reason_codes,
+        "strike_value_base": strike_value_base,
+        "strike_value_applied": strike_value_applied,
+        "was_dampened": was_dampened,
+    })
+    .to_string()
+}
+
+/// `subject_action_revoked` audit reason JSON — see
+/// [`AUDIT_REASON_REVOKE_ACTION`] for the schema.
+fn build_revoke_action_audit_reason(action_id: i64, revoked_reason: Option<&str>) -> String {
+    serde_json::json!({
+        "action_id": action_id,
+        "revoked_reason": revoked_reason,
+    })
+    .to_string()
+}
+
+/// Convert epoch-ms (i64) to [`SystemTime`]. The v1.4 calculators
+/// take SystemTime; the schema stores epoch-ms; this is the
+/// boundary helper. Negative values clamp to UNIX_EPOCH (defense:
+/// schema columns are non-negative in practice).
+fn epoch_ms_to_systemtime(ms: i64) -> SystemTime {
+    if ms >= 0 {
+        UNIX_EPOCH + Duration::from_millis(ms as u64)
+    } else {
+        UNIX_EPOCH
+    }
+}
+
+/// Route a subject string into (subject_did, subject_uri) per the
+/// recorder's contract. DIDs go to subject_did with no URI; AT-URIs
+/// extract the repo DID as subject_did and keep the full URI as
+/// subject_uri. Anything else is rejected.
+fn route_subject(subject: &str) -> Result<(String, Option<String>)> {
+    if let Some(rest) = subject.strip_prefix("at://") {
+        let repo = rest.split('/').next().unwrap_or("");
+        if repo.is_empty() || !repo.starts_with("did:") {
+            return Err(Error::Signing(format!(
+                "subject at://-URI must start at://did:.../...; got {subject:?}"
+            )));
+        }
+        Ok((repo.to_string(), Some(subject.to_string())))
+    } else if subject.starts_with("did:") && subject.len() > "did:".len() {
+        Ok((subject.to_string(), None))
+    } else {
+        Err(Error::Signing(format!(
+            "subject must be a DID (`did:...`) or AT-URI (`at://did:...`); got {subject:?}"
+        )))
+    }
+}
+
+/// Parse a narrow ISO-8601 duration subset into a [`Duration`].
+/// Supports `P{n}D` (days), `P{n}W` (weeks), `PT{n}H` (hours),
+/// `PT{n}M` (minutes), `PT{n}S` (seconds), and combinations like
+/// `P1DT12H`. Years and months are NOT supported — moderation
+/// suspensions are bounded enough that day/hour granularity covers
+/// real cases without the calendar-arithmetic complexity of Y/M.
+///
+/// Returns the duration in seconds.
+fn parse_iso8601_duration(s: &str) -> Result<u64> {
+    let body = s.strip_prefix('P').ok_or_else(|| {
+        Error::Signing(format!(
+            "duration {s:?} must start with 'P' (ISO-8601 duration form, e.g. P7D)"
+        ))
+    })?;
+    if body.is_empty() {
+        return Err(Error::Signing(format!(
+            "duration {s:?} has no components after 'P'"
+        )));
+    }
+
+    // Split into date part (before T, if any) and time part.
+    let (date_part, time_part) = match body.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (body, None),
+    };
+
+    let mut total_secs: u64 = 0;
+    let mut buf = String::new();
+    for c in date_part.chars() {
+        if c.is_ascii_digit() {
+            buf.push(c);
+            continue;
+        }
+        let n: u64 = buf
+            .parse()
+            .map_err(|_| Error::Signing(format!("duration {s:?}: malformed numeric run")))?;
+        buf.clear();
+        let mult = match c {
+            'D' => 86_400u64,
+            'W' => 7 * 86_400u64,
+            'Y' | 'M' => {
+                return Err(Error::Signing(format!(
+                    "duration {s:?}: years (Y) and months (M, without T prefix) not supported in v1.4"
+                )));
+            }
+            other => {
+                return Err(Error::Signing(format!(
+                    "duration {s:?}: unknown date-part unit {other:?}"
+                )));
+            }
+        };
+        total_secs = total_secs.saturating_add(n.saturating_mul(mult));
+    }
+    if !buf.is_empty() {
+        return Err(Error::Signing(format!(
+            "duration {s:?}: trailing digits without unit in date part"
+        )));
+    }
+
+    if let Some(time_body) = time_part {
+        if time_body.is_empty() {
+            return Err(Error::Signing(format!(
+                "duration {s:?}: 'T' separator with no time components"
+            )));
+        }
+        for c in time_body.chars() {
+            if c.is_ascii_digit() {
+                buf.push(c);
+                continue;
+            }
+            let n: u64 = buf.parse().map_err(|_| {
+                Error::Signing(format!(
+                    "duration {s:?}: malformed numeric run in time part"
+                ))
+            })?;
+            buf.clear();
+            let mult = match c {
+                'H' => 3600u64,
+                'M' => 60u64,
+                'S' => 1u64,
+                other => {
+                    return Err(Error::Signing(format!(
+                        "duration {s:?}: unknown time-part unit {other:?}"
+                    )));
+                }
+            };
+            total_secs = total_secs.saturating_add(n.saturating_mul(mult));
+        }
+        if !buf.is_empty() {
+            return Err(Error::Signing(format!(
+                "duration {s:?}: trailing digits without unit in time part"
+            )));
+        }
+    }
+
+    if total_secs == 0 {
+        return Err(Error::Signing(format!(
+            "duration {s:?}: parsed to zero — must be at least one second"
+        )));
+    }
+    Ok(total_secs)
+}
+
+/// Predict the next AUTOINCREMENT id for `subject_actions`. SQLite's
+/// AUTOINCREMENT columns are backed by `sqlite_sequence`; the next
+/// value is `max(seq, max(rowid)) + 1`. With BEGIN DEFERRED + the
+/// writer task being the only in-process appender, the predict
+/// step is racy only against external processes — and the ROLLBACK
+/// path catches mismatch via the inserted_id check in
+/// handle_record_action.
+async fn predict_next_subject_action_id(tx: &mut sqlx::Transaction<'_, Sqlite>) -> Result<i64> {
+    // sqlite_sequence.seq has no NOT NULL constraint; the type
+    // override forces a non-nullable i64 because the column is
+    // populated for every AUTOINCREMENT table that has had at
+    // least one row inserted (NULL only happens if the row
+    // doesn't exist, which fetch_optional handles).
+    let row = sqlx::query!(
+        r#"SELECT seq AS "seq!: i64" FROM sqlite_sequence WHERE name = 'subject_actions'"#
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|r| r.seq + 1).unwrap_or(1))
+}
+
+/// Load subject_actions rows for a subject, oldest-first, projecting
+/// to [`ActionRecord`] for the v1.4 calculators (decay #50,
+/// window #51). Filters to the columns the calculators consume —
+/// the rest stay in the DB.
+async fn load_subject_actions_for_calc(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    subject_did: &str,
+) -> Result<Vec<ActionRecord>> {
+    let rows = sqlx::query!(
+        "SELECT action_type, strike_value_applied, was_dampened,
+                effective_at, expires_at, revoked_at
+         FROM subject_actions
+         WHERE subject_did = ?1
+         ORDER BY id ASC",
+        subject_did,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let action_type = ActionType::from_db_str(&r.action_type).ok_or_else(|| {
+            Error::Signing(format!(
+                "subject_actions row has invalid action_type {:?}",
+                r.action_type
+            ))
+        })?;
+        let strike_value_applied = u32::try_from(r.strike_value_applied).map_err(|_| {
+            Error::Signing(format!(
+                "subject_actions row strike_value_applied {} out of u32 range",
+                r.strike_value_applied
+            ))
+        })?;
+        out.push(ActionRecord {
+            strike_value_applied,
+            effective_at: epoch_ms_to_systemtime(r.effective_at),
+            revoked_at: r.revoked_at.map(epoch_ms_to_systemtime),
+            action_type,
+            expires_at: r.expires_at.map(epoch_ms_to_systemtime),
+            was_dampened: r.was_dampened != 0,
+        });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1494,5 +2239,150 @@ mod tests {
         let ms = parse_rfc3339_ms(s).expect("parse");
         let back = rfc3339_from_epoch_ms(ms).expect("format");
         assert_eq!(back, s);
+    }
+
+    // ---------- route_subject (#51) ----------
+
+    #[test]
+    fn route_subject_did_only_returns_did_no_uri() {
+        let (did, uri) = route_subject("did:plc:abc123").unwrap();
+        assert_eq!(did, "did:plc:abc123");
+        assert!(uri.is_none());
+    }
+
+    #[test]
+    fn route_subject_at_uri_extracts_repo_did_and_keeps_full_uri() {
+        let (did, uri) = route_subject("at://did:plc:abc/app.bsky.feed.post/3xx").unwrap();
+        assert_eq!(did, "did:plc:abc");
+        assert_eq!(
+            uri.as_deref(),
+            Some("at://did:plc:abc/app.bsky.feed.post/3xx")
+        );
+    }
+
+    #[test]
+    fn route_subject_rejects_at_uri_with_non_did_repo() {
+        let err = route_subject("at://handle.example/app.bsky.feed.post/3xx").unwrap_err();
+        assert!(matches!(err, Error::Signing(_)));
+    }
+
+    #[test]
+    fn route_subject_rejects_arbitrary_string() {
+        assert!(route_subject("not a subject").is_err());
+        assert!(route_subject("did:").is_err());
+        assert!(route_subject("").is_err());
+    }
+
+    // ---------- parse_iso8601_duration (#51) ----------
+
+    #[test]
+    fn duration_p7d_is_seven_days() {
+        assert_eq!(parse_iso8601_duration("P7D").unwrap(), 7 * 86_400);
+    }
+
+    #[test]
+    fn duration_p1w_is_seven_days() {
+        assert_eq!(parse_iso8601_duration("P1W").unwrap(), 7 * 86_400);
+    }
+
+    #[test]
+    fn duration_pt12h_is_twelve_hours() {
+        assert_eq!(parse_iso8601_duration("PT12H").unwrap(), 12 * 3600);
+    }
+
+    #[test]
+    fn duration_pt30m_is_thirty_minutes() {
+        assert_eq!(parse_iso8601_duration("PT30M").unwrap(), 30 * 60);
+    }
+
+    #[test]
+    fn duration_pt45s_is_forty_five_seconds() {
+        assert_eq!(parse_iso8601_duration("PT45S").unwrap(), 45);
+    }
+
+    #[test]
+    fn duration_p1d_t12h_combines() {
+        assert_eq!(
+            parse_iso8601_duration("P1DT12H").unwrap(),
+            86_400 + 12 * 3600
+        );
+    }
+
+    #[test]
+    fn duration_no_p_prefix_rejected() {
+        assert!(parse_iso8601_duration("7D").is_err());
+        assert!(parse_iso8601_duration("").is_err());
+    }
+
+    #[test]
+    fn duration_p_alone_rejected() {
+        assert!(parse_iso8601_duration("P").is_err());
+    }
+
+    #[test]
+    fn duration_year_rejected_in_v14() {
+        let err = parse_iso8601_duration("P1Y").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not supported"));
+    }
+
+    #[test]
+    fn duration_unknown_unit_rejected() {
+        assert!(parse_iso8601_duration("P5X").is_err());
+        assert!(parse_iso8601_duration("PT5X").is_err());
+    }
+
+    #[test]
+    fn duration_zero_rejected() {
+        assert!(parse_iso8601_duration("P0D").is_err());
+    }
+
+    #[test]
+    fn duration_trailing_digits_without_unit_rejected() {
+        assert!(parse_iso8601_duration("P5").is_err());
+        assert!(parse_iso8601_duration("PT12").is_err());
+    }
+
+    #[test]
+    fn duration_t_separator_with_no_time_rejected() {
+        assert!(parse_iso8601_duration("P1DT").is_err());
+    }
+
+    // ---------- audit reason builders (#51) ----------
+
+    #[test]
+    fn record_action_audit_reason_shape() {
+        let json = build_record_action_audit_reason(
+            42,
+            ActionType::TempSuspension,
+            "spam",
+            &["spam".to_string(), "harassment".to_string()],
+            4,
+            2,
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["action_id"], 42);
+        assert_eq!(v["action_type"], "temp_suspension");
+        assert_eq!(v["primary_reason"], "spam");
+        assert_eq!(v["reason_codes"], serde_json::json!(["spam", "harassment"]));
+        assert_eq!(v["strike_value_base"], 4);
+        assert_eq!(v["strike_value_applied"], 2);
+        assert_eq!(v["was_dampened"], true);
+    }
+
+    #[test]
+    fn revoke_action_audit_reason_with_reason() {
+        let json = build_revoke_action_audit_reason(7, Some("appeal granted"));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["action_id"], 7);
+        assert_eq!(v["revoked_reason"], "appeal granted");
+    }
+
+    #[test]
+    fn revoke_action_audit_reason_without_reason_is_null() {
+        let json = build_revoke_action_audit_reason(7, None);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["revoked_reason"].is_null());
     }
 }

@@ -330,6 +330,9 @@ mod tests {
             revoked_at: None,
             action_type: kind,
             expires_at: None,
+            // Decay tests don't exercise the in-good-standing
+            // predicate; the field is window-calculator-only (#51).
+            was_dampened: false,
         }
     }
 
@@ -345,6 +348,7 @@ mod tests {
             revoked_at: Some(revoked_at),
             action_type: kind,
             expires_at: None,
+            was_dampened: false,
         }
     }
 
@@ -355,6 +359,7 @@ mod tests {
             revoked_at: None,
             action_type: ActionType::TempSuspension,
             expires_at: Some(expires_at),
+            was_dampened: false,
         }
     }
 
@@ -365,6 +370,7 @@ mod tests {
             revoked_at: None,
             action_type: ActionType::IndefSuspension,
             expires_at: None,
+            was_dampened: false,
         }
     }
 

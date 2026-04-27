@@ -11,7 +11,7 @@ use cairn_mod::cli::{
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
-    moderator, operator_login,
+    moderator, moderator_action, operator_login,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
@@ -416,6 +416,114 @@ enum ModeratorSub {
     Remove(ModeratorRemoveArgs),
     /// List moderators, optionally filtered by `--role`.
     List(ModeratorListArgs),
+    /// Record a graduated-action moderation event (warning, note,
+    /// temp_suspension, indef_suspension, takedown). HTTP-routed
+    /// — talks to the running `cairn serve` admin XRPC. Requires
+    /// a moderator session.
+    Action(ModeratorActionArgs),
+    /// Shorthand for `cairn moderator action --type warning`.
+    Warn(ModeratorWarnArgs),
+    /// Shorthand for `cairn moderator action --type note` (no
+    /// reason required; the positional `<text>` becomes the note).
+    Note(ModeratorNoteArgs),
+    /// Revoke a previously-recorded action. Sets revoked_at on the
+    /// row and removes its strikes from the subject's count.
+    Revoke(ModeratorRevokeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorActionArgs {
+    /// Subject — `did:*` for an account, `at://...` for a record.
+    subject: String,
+    /// Graduated-action category.
+    #[arg(long = "type", value_enum)]
+    action_type: ActionTypeArg,
+    /// Reason identifier from the operator's `[moderation_reasons]`
+    /// vocabulary. Repeat for multi-reason actions.
+    #[arg(long = "reason", action = ArgAction::Append, num_args = 1)]
+    reason: Vec<String>,
+    /// ISO-8601 duration (e.g. `P7D`). Required for
+    /// `--type temp_suspension`; rejected for other types.
+    #[arg(long)]
+    duration: Option<String>,
+    /// Optional moderator-facing note.
+    #[arg(long)]
+    note: Option<String>,
+    /// Report row id that motivated this action. Repeat for
+    /// multiple reports.
+    #[arg(long = "report", action = ArgAction::Append, num_args = 1)]
+    report: Vec<i64>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human one-liner.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorWarnArgs {
+    /// Subject DID or AT-URI.
+    subject: String,
+    /// Reason identifier (repeat for multi-reason).
+    #[arg(long = "reason", action = ArgAction::Append, num_args = 1)]
+    reason: Vec<String>,
+    /// Optional moderator-facing note.
+    #[arg(long)]
+    note: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorNoteArgs {
+    /// Subject DID or AT-URI.
+    subject: String,
+    /// Note body. Stored verbatim on the subject_actions row.
+    text: String,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorRevokeArgs {
+    /// subject_actions row id to revoke.
+    action_id: i64,
+    /// Optional moderator-facing rationale.
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Clap-side wrapper over [`cairn_mod::moderation::types::ActionType`].
+/// Same posture as [`RoleArg`]: keeps `clap::ValueEnum` out of the
+/// non-CLI module while staying 1:1 with the runtime enum.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ActionTypeArg {
+    Warning,
+    Note,
+    TempSuspension,
+    IndefSuspension,
+    Takedown,
+}
+
+impl ActionTypeArg {
+    fn as_db_str(self) -> &'static str {
+        match self {
+            ActionTypeArg::Warning => "warning",
+            ActionTypeArg::Note => "note",
+            ActionTypeArg::TempSuspension => "temp_suspension",
+            ActionTypeArg::IndefSuspension => "indef_suspension",
+            ActionTypeArg::Takedown => "takedown",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -597,6 +705,18 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Moderator {
             sub: ModeratorSub::List(args),
         } => run_moderator_list(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Action(args),
+        } => run_moderator_action(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Warn(args),
+        } => run_moderator_warn(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Note(args),
+        } => run_moderator_note(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Revoke(args),
+        } => run_moderator_revoke(args).await,
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
@@ -1014,6 +1134,112 @@ async fn run_moderator_list(args: ModeratorListArgs) -> Result<(), CliError> {
         println!("{}", moderator::format_list_json(&mods));
     } else {
         println!("{}", moderator::format_list_human(&mods));
+    }
+    Ok(())
+}
+
+async fn run_moderator_action(args: ModeratorActionArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_action::record(
+        &mut session,
+        &path,
+        moderator_action::RecordActionInput {
+            subject: args.subject,
+            action_type: args.action_type.as_db_str().to_string(),
+            reasons: args.reason,
+            duration: args.duration,
+            note: args.note,
+            report_ids: args.report,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_record_json(&resp));
+    } else {
+        println!("{}", moderator_action::format_record_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_warn(args: ModeratorWarnArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_action::record(
+        &mut session,
+        &path,
+        moderator_action::RecordActionInput {
+            subject: args.subject,
+            action_type: "warning".to_string(),
+            reasons: args.reason,
+            duration: None,
+            note: args.note,
+            report_ids: vec![],
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_record_json(&resp));
+    } else {
+        println!("{}", moderator_action::format_record_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_note(args: ModeratorNoteArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    // Notes carry no strikes and need no reasons in v1.4 design,
+    // but the recorder validates reason_codes non-empty. Synthesize
+    // a sentinel `note` reason — the operator's vocabulary
+    // typically declares one (`other` is the default fallback).
+    // If the operator removed the default vocabulary, they'll get
+    // an InvalidReason from the server with a clear hint.
+    let resp = moderator_action::record(
+        &mut session,
+        &path,
+        moderator_action::RecordActionInput {
+            subject: args.subject,
+            action_type: "note".to_string(),
+            reasons: vec!["other".to_string()],
+            duration: None,
+            note: Some(args.text),
+            report_ids: vec![],
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_record_json(&resp));
+    } else {
+        println!("{}", moderator_action::format_record_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_revoke(args: ModeratorRevokeArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_action::revoke(
+        &mut session,
+        &path,
+        moderator_action::RevokeActionInput {
+            action_id: args.action_id,
+            reason: args.reason,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_revoke_json(&resp));
+    } else {
+        println!("{}", moderator_action::format_revoke_human(&resp));
     }
     Ok(())
 }

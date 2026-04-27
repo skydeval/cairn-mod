@@ -49,6 +49,8 @@ async fn apply_label_writes_genesis_chained_audit_row() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();
@@ -115,6 +117,8 @@ async fn successive_writer_writes_chain_via_prev_hash() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();
@@ -170,6 +174,8 @@ async fn tampered_row_recomputation_diverges_from_stored_hash() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();
@@ -278,6 +284,8 @@ async fn writer_task_and_pool_direct_paths_produce_identical_row_hash() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();

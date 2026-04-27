@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_type, strike_value_applied, was_dampened,\n                effective_at, expires_at, revoked_at\n         FROM subject_actions\n         WHERE subject_did = ?1\n         ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "strike_value_applied",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "was_dampened",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "effective_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "74d261958995068cb0e1a62e826478f3aefc639551fad05f46011a1f60869f71"
+}

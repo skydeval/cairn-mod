@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subject_strike_state (subject_did, current_strike_count, last_action_at, last_recompute_at)\n             VALUES (?1, ?2, ?3, ?3)\n             ON CONFLICT(subject_did) DO UPDATE SET\n                 current_strike_count = excluded.current_strike_count,\n                 last_recompute_at = excluded.last_recompute_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "aabbee8e676edc4f82bd163cde6cfcdde04568210a25da0fbfcd253b100b0219"
+}

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, subject_did, action_type, strike_value_applied, was_dampened, audit_log_id\n         FROM subject_actions WHERE subject_did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "subject_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "action_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "strike_value_applied",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "was_dampened",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "audit_log_id",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e8b551dec5326a5053e0e32499c22865831dbf251c06950b910317cc2746da59"
+}

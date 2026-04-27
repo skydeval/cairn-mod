@@ -27,9 +27,11 @@ mod list_audit_log;
 mod list_labels;
 mod list_reports;
 mod negate_label;
+mod record_action;
 mod report_view;
 mod resolve_report;
 mod retention_sweep;
+mod revoke_action;
 
 /// Operator configuration for admin endpoints. Kept separate from the
 /// subscribe/query configs so operators can tune label-value policy
@@ -134,6 +136,14 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.getTrustChain",
             get(get_trust_chain::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.recordAction",
+            post(record_action::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.revokeAction",
+            post(revoke_action::handler),
         )
         .layer(Extension(state))
 }

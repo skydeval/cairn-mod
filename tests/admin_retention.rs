@@ -126,6 +126,8 @@ async fn spawn_with_retention(retention_days: Option<u32>) -> Harness {
             sweep_run_at_utc_hour: 4,
             sweep_batch_size: 1000,
         },
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();

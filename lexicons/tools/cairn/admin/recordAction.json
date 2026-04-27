@@ -1,0 +1,119 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.recordAction",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Record a graduated-action moderation event against a subject (account or record). Computes the strike value at action time per the operator's [strike_policy] and [moderation_reasons] config (frozen for forensic history); inserts the subject_actions row, updates the strike_state cache, and writes a hash-chained audit_log row in a single transaction (§F20).",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "subject",
+            "type",
+            "reasons"
+          ],
+          "properties": {
+            "subject": {
+              "type": "string",
+              "description": "DID (`did:plc:…`, `did:web:…`) or `at://`-URI of the subject. URIs auto-route to subject_uri with the parent repo DID as subject_did; bare DIDs route to subject_did with subject_uri = NULL."
+            },
+            "type": {
+              "type": "string",
+              "knownValues": [
+                "warning",
+                "note",
+                "temp_suspension",
+                "indef_suspension",
+                "takedown"
+              ],
+              "description": "Graduated-action category. Warning/note carry zero strikes; temp_suspension requires `duration`; indef_suspension/takedown reject `duration`."
+            },
+            "reasons": {
+              "type": "array",
+              "minLength": 1,
+              "items": {
+                "type": "string"
+              },
+              "description": "One or more reason identifiers from the operator's [moderation_reasons] vocabulary. Multi-reason: severe wins for strike calculation; otherwise highest base_weight wins."
+            },
+            "duration": {
+              "type": "string",
+              "description": "ISO-8601 duration (e.g. `P7D`). Required for `temp_suspension`; rejected for other types."
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Optional moderator-facing rationale stored on the subject_actions row."
+            },
+            "reportIds": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Optional report row ids that motivated this action."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actionId",
+            "strikeValueBase",
+            "strikeValueApplied",
+            "wasDampened",
+            "strikesAtTimeOfAction"
+          ],
+          "properties": {
+            "actionId": {
+              "type": "integer",
+              "description": "Primary key of the inserted subject_actions row."
+            },
+            "strikeValueBase": {
+              "type": "integer",
+              "description": "Reason's base_weight before dampening (highest among declared reasons; 0 for warning/note)."
+            },
+            "strikeValueApplied": {
+              "type": "integer",
+              "description": "Strike weight actually added to the subject's count after dampening."
+            },
+            "wasDampened": {
+              "type": "boolean",
+              "description": "True iff the dampening curve was consulted (in good standing, position covered, non-severe)."
+            },
+            "strikesAtTimeOfAction": {
+              "type": "integer",
+              "description": "Subject's current strike count BEFORE this action — frozen for forensic history."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "InvalidReason",
+          "description": "One or more reason identifiers are not declared in the operator's [moderation_reasons] vocabulary."
+        },
+        {
+          "name": "InvalidActionType",
+          "description": "The `type` value is not one of the five graduated-action categories."
+        },
+        {
+          "name": "DurationRequired",
+          "description": "`type` is `temp_suspension` but `duration` is absent or empty."
+        },
+        {
+          "name": "DurationNotAllowed",
+          "description": "`type` is not `temp_suspension` but `duration` was supplied."
+        },
+        {
+          "name": "SubjectUriMismatch",
+          "description": "`subject` is an at:// URI whose repo DID does not match a separate subject_did context (reserved for future use; v1.4 derives subject_did from the URI directly)."
+        }
+      ]
+    }
+  }
+}

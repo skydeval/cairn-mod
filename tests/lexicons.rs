@@ -82,6 +82,8 @@ fn procedures_have_input_queries_have_parameters() {
         "resolveReport",
         "flagReporter",
         "retentionSweep",
+        "recordAction",
+        "revokeAction",
     ]);
     let queries: HashSet<&str> = HashSet::from([
         "listLabels",
@@ -219,6 +221,14 @@ fn declared_error_names_are_from_known_set() {
         "ReportNotFound",
         "AuditEntryNotFound",
         "InvalidLabelValue",
+        // §F20 / #51 graduated-action moderation errors:
+        "InvalidReason",
+        "InvalidActionType",
+        "DurationRequired",
+        "DurationNotAllowed",
+        "SubjectUriMismatch",
+        "ActionNotFound",
+        "ActionAlreadyRevoked",
         // ModeratorNotFound is reserved but not currently emitted — if
         // an endpoint begins emitting it, add here + to lexicons/README.md.
     ]);
@@ -272,6 +282,8 @@ fn expected_endpoint_files_all_present() {
         "getAuditLog",
         "retentionSweep",
         "getTrustChain",
+        "recordAction",
+        "revokeAction",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

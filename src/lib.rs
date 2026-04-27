@@ -39,6 +39,8 @@ pub use auth::{AuthConfig, AuthContext, AuthError, VerifiedCaller};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use label::Label;
+pub use moderation::policy::StrikePolicy;
+pub use moderation::reasons::ReasonVocabulary;
 pub use server::{
     AdminConfig, CreateReportConfig, RetentionConfig, SubscribeConfig, admin_router,
     create_report_router, current_retention_floor, did_document_router, health_router,
@@ -47,6 +49,7 @@ pub use server::{
 pub use signing::{canonical_bytes, label_to_lex_value_with_sig, sign_label, verify_label};
 pub use signing_key::SigningKey;
 pub use writer::{
-    ApplyLabelRequest, LabelEvent, NegateLabelRequest, SweepBatchResult, SweepRequest, SweepResult,
-    WriterHandle, spawn as spawn_writer,
+    ApplyLabelRequest, LabelEvent, NegateLabelRequest, RecordActionRequest, RecordedAction,
+    RevokeActionRequest, RevokedAction, SweepBatchResult, SweepRequest, SweepResult, WriterHandle,
+    spawn as spawn_writer,
 };

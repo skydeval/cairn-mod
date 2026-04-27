@@ -89,10 +89,14 @@
             "label_negated",
             "report_resolved",
             "reporter_flagged",
+            "reporter_unflagged",
             "moderator_granted",
             "moderator_revoked",
             "signing_key_added",
-            "labeler_service_published"
+            "labeler_service_published",
+            "retention_sweep",
+            "subject_action_recorded",
+            "subject_action_revoked"
           ]
         },
         "actorDid": {
@@ -229,6 +233,117 @@
         "serviceEndpoint": {
           "type": "string",
           "format": "uri"
+        }
+      }
+    },
+    "subjectAction": {
+      "type": "object",
+      "description": "One row from the subject_actions table (§F20 graduated-action moderation). Returned by tools.cairn.admin.recordAction (after insert) and by the read-half history/strikes endpoints (#52, ships in a follow-up commit).",
+      "required": [
+        "id",
+        "subjectDid",
+        "actorDid",
+        "actionType",
+        "reasonCodes",
+        "effectiveAt",
+        "strikeValueBase",
+        "strikeValueApplied",
+        "wasDampened",
+        "strikesAtTimeOfAction",
+        "createdAt"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "subject_actions row primary key."
+        },
+        "subjectDid": {
+          "type": "string",
+          "format": "did",
+          "description": "Account DID the action attributes to. For record-level actions this is the parent repo DID; strike accounting always rolls up here."
+        },
+        "subjectUri": {
+          "type": "string",
+          "description": "AT-URI for record-level actions; absent for account-level."
+        },
+        "actorDid": {
+          "type": "string",
+          "format": "did",
+          "description": "Moderator/admin who recorded the action (JWT iss when via XRPC; CLI caller DID otherwise)."
+        },
+        "actionType": {
+          "type": "string",
+          "knownValues": [
+            "warning",
+            "note",
+            "temp_suspension",
+            "indef_suspension",
+            "takedown"
+          ]
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Reason identifiers from the operator's [moderation_reasons] vocabulary."
+        },
+        "duration": {
+          "type": "string",
+          "description": "Original ISO-8601 duration (e.g. P7D), preserved for display. Only present for temp_suspension."
+        },
+        "effectiveAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "Wall-clock the action ends. Only present for temp_suspension."
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "reportIds": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "strikeValueBase": {
+          "type": "integer",
+          "description": "Reason's base_weight before dampening. 0 for warning/note."
+        },
+        "strikeValueApplied": {
+          "type": "integer",
+          "description": "Strike weight actually applied after dampening."
+        },
+        "wasDampened": {
+          "type": "boolean"
+        },
+        "strikesAtTimeOfAction": {
+          "type": "integer",
+          "description": "Subject's current_strike_count BEFORE this action."
+        },
+        "revokedAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "revokedByDid": {
+          "type": "string",
+          "format": "did"
+        },
+        "revokedReason": {
+          "type": "string"
+        },
+        "auditLogId": {
+          "type": "integer",
+          "description": "audit_log row id this action's intent was attested as."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime"
         }
       }
     }

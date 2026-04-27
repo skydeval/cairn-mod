@@ -61,8 +61,10 @@ pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "listLabels",
     "listReports",
     "negateLabel",
+    "recordAction",
     "resolveReport",
     "retentionSweep",
+    "revokeAction",
 ];
 
 /// Build a router exposing the `.well-known/lexicons/…` read endpoint.

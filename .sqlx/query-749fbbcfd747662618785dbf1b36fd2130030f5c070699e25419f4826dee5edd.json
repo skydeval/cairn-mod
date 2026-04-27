@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subject_actions (\n                subject_did, subject_uri, actor_did, action_type, reason_codes,\n                duration, effective_at, expires_at, notes, report_ids,\n                strike_value_base, strike_value_applied, was_dampened,\n                strikes_at_time_of_action, audit_log_id, created_at\n             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)\n             RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 16
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "749fbbcfd747662618785dbf1b36fd2130030f5c070699e25419f4826dee5edd"
+}

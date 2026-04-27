@@ -78,6 +78,8 @@ async fn apply_writes_label_and_audit_and_sig_verifies() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -138,6 +140,8 @@ async fn concurrent_applies_produce_contiguous_unique_seqs() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -177,6 +181,8 @@ async fn rapid_same_tuple_emissions_have_strictly_increasing_cts() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -213,6 +219,8 @@ async fn negate_flow_and_reapply() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -265,6 +273,8 @@ async fn negate_without_prior_apply_returns_label_not_found() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -290,6 +300,8 @@ async fn second_spawn_against_live_lease_returns_lease_held() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("first spawn");
@@ -302,6 +314,8 @@ async fn second_spawn_against_live_lease_returns_lease_held() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect_err("second spawn must fail");
@@ -338,6 +352,8 @@ async fn stale_lease_is_taken_over_on_next_spawn() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn must succeed against stale lease");
@@ -361,6 +377,8 @@ async fn shutdown_releases_lease_row() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -390,6 +408,8 @@ async fn first_spawn_bootstraps_signing_keys_row() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -413,6 +433,8 @@ async fn second_spawn_with_different_key_errors() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("first spawn");
@@ -426,6 +448,8 @@ async fn second_spawn_with_different_key_errors() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect_err("mismatched key must error");
@@ -447,6 +471,8 @@ async fn broadcast_delivers_events_to_subscribers() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -481,6 +507,8 @@ async fn apply_with_no_broadcast_receiver_still_succeeds() {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn");
@@ -528,6 +556,8 @@ async fn spawn_writer_for_sweep_test(
             sweep_run_at_utc_hour: 4,
             sweep_batch_size,
         },
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .expect("spawn writer for sweep test")

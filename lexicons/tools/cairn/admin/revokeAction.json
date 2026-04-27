@@ -1,0 +1,61 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.revokeAction",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Revoke a previously-recorded subject_actions row. Sets revoked_at / revoked_by_did / revoked_reason on the original row (the no-update-except-revoke trigger from the §F20 schema permits exactly this NULL→non-NULL transition); recomputes subject_strike_state with the revoked action's strikes excluded; writes a hash-chained audit_log row. All in a single transaction.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actionId"
+          ],
+          "properties": {
+            "actionId": {
+              "type": "integer",
+              "description": "Primary key of the subject_actions row to revoke."
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Optional moderator-facing rationale. Stored on the row's revoked_reason column; surfaces in subsequent history fetches."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actionId",
+            "revokedAt"
+          ],
+          "properties": {
+            "actionId": {
+              "type": "integer",
+              "description": "The revoked row's id (echoed for confirmation)."
+            },
+            "revokedAt": {
+              "type": "string",
+              "format": "datetime",
+              "description": "RFC-3339 wall-clock the revocation took effect."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "ActionNotFound",
+          "description": "No subject_actions row with the given actionId exists."
+        },
+        {
+          "name": "ActionAlreadyRevoked",
+          "description": "The row's revoked_at column is already non-NULL. The schema trigger forbids re-revocation; the recorder surfaces it as this error before attempting the UPDATE."
+        }
+      ]
+    }
+  }
+}

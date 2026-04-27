@@ -69,6 +69,8 @@ async fn spawn_router_with_writer() -> (Harness, cairn_mod::WriterHandle) {
         SERVICE_DID.to_string(),
         None,
         cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
     )
     .await
     .unwrap();

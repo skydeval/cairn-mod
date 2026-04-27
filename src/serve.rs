@@ -80,12 +80,23 @@ where
     // Writer's lease also gates the whole write path, so if two
     // `cairn serve` start simultaneously the loser exits here with
     // `LeaseConflict`.
+    // Resolve the v1.4 moderation surface (#47 / #48) before
+    // handing it to the writer task. Both resolvers honor operator
+    // overrides + per-field defaults; ship-defaults if the
+    // [moderation_reasons] / [strike_policy] sections are absent.
+    let reason_vocabulary = crate::moderation::reasons::ReasonVocabulary::from_config(&config)
+        .map_err(|e| CliError::Startup(format!("moderation reasons: {e}")))?;
+    let strike_policy = crate::moderation::policy::StrikePolicy::from_config(&config)
+        .map_err(|e| CliError::Startup(format!("strike policy: {e}")))?;
+
     let writer = spawn_writer(
         pool.clone(),
         key,
         config.service_did.clone(),
         crate::SubscribeConfig::default().retention_days,
         config.retention.clone().into(),
+        reason_vocabulary,
+        strike_policy,
     )
     .await
     .map_err(map_spawn_writer_error)?;

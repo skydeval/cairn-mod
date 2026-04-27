@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT revoked_at, revoked_by_did, revoked_reason\n         FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "revoked_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_by_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_reason",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "22e7fe716d124fa9955d4e7a69dc10e12eaefcf86d629d64adc2678634b0d1d2"
+}

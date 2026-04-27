@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE subject_actions\n             SET revoked_at = ?1, revoked_by_did = ?2, revoked_reason = ?3\n             WHERE id = ?4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "95238b803c0395690083c3006826e6a0da0eaa83035c0fd9dcd14a66228691fe"
+}

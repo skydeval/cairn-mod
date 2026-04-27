@@ -59,8 +59,9 @@
 //! before invoking [`calculate`]. Keeping that out of this module
 //! preserves the no-I/O contract.
 
+use crate::error::{Error, Result};
 use crate::moderation::policy::StrikePolicy;
-use crate::moderation::reasons::ReasonDef;
+use crate::moderation::reasons::{ReasonDef, ReasonVocabulary};
 
 /// Result of one strike calculation. The three fields are stored
 /// verbatim on the new `subject_actions` row (#46) and never
@@ -138,6 +139,68 @@ pub fn calculate(
         was_dampened: false,
         base_weight,
     }
+}
+
+/// Resolve a multi-reason action down to a single dominant reason
+/// for strike calculation. Per the v1.4 design: severe always wins
+/// over non-severe regardless of base_weight; among same-severity
+/// reasons, highest base_weight wins; ties on base_weight resolve
+/// to the first-listed reason (stable for deterministic recording).
+///
+/// Errors:
+/// - [`Error::ReasonNotFound`] when any identifier in `reason_codes`
+///   is not declared in `vocabulary`.
+/// - [`Error::Signing`] generic catch-all when `reason_codes` is
+///   empty (the recorder pre-validates non-empty; this is
+///   defense-in-depth).
+///
+/// Returns a *cloned* [`ReasonDef`] so the caller doesn't borrow
+/// from `vocabulary` for longer than the resolver call. The
+/// vocabulary is small (≤ tens of entries) and ReasonDef is cheap
+/// to clone.
+pub fn resolve_primary_reason(
+    reason_codes: &[String],
+    vocabulary: &ReasonVocabulary,
+) -> Result<ReasonDef> {
+    if reason_codes.is_empty() {
+        return Err(Error::Signing(
+            "recordAction: reason_codes must be non-empty".to_string(),
+        ));
+    }
+
+    // Resolve each identifier to a ReasonDef. Missing → ReasonNotFound.
+    let mut defs: Vec<&ReasonDef> = Vec::with_capacity(reason_codes.len());
+    for code in reason_codes {
+        let def = vocabulary
+            .lookup(code)
+            .ok_or_else(|| Error::ReasonNotFound(code.clone()))?;
+        defs.push(def);
+    }
+
+    // Severe wins: any severe reason promotes the resolution to
+    // "highest-base-weight among severe." Ties on base_weight
+    // resolve to the first severe reason in the input list.
+    if defs.iter().any(|d| d.severe) {
+        let pick = defs
+            .iter()
+            .filter(|d| d.severe)
+            .max_by_key(|d| d.base_weight)
+            .expect("at least one severe by the any() check");
+        return Ok((*pick).clone());
+    }
+
+    // No severe: highest base_weight wins; ties → first-listed
+    // (max_by_key on iter().enumerate() with reversed index keeps
+    // the earliest index on tie because max_by_key picks the LAST
+    // maximum equal element — invert with .rev() so first wins).
+    let pick = defs
+        .iter()
+        .enumerate()
+        .rev()
+        .max_by_key(|(_, d)| d.base_weight)
+        .map(|(_, d)| *d)
+        .expect("non-empty checked above");
+    Ok(pick.clone())
 }
 
 #[cfg(test)]
@@ -342,6 +405,100 @@ mod tests {
         let b = calculate(1, &r, &p, 2);
         assert_eq!(a, b);
     }
+
+    // ---------- multi-reason resolver ----------
+
+    fn vocab_with(entries: &[(&str, u32, bool)]) -> ReasonVocabulary {
+        // Build a vocabulary by serializing through the operator
+        // path: Config → ReasonVocabulary::from_config. Roundtripping
+        // exercises the same parser path the recorder will use.
+        let map: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(id, w, severe)| {
+                (
+                    id.to_string(),
+                    serde_json::json!({
+                        "base_weight": w,
+                        "severe": severe,
+                        "description": "test fixture",
+                    }),
+                )
+            })
+            .collect();
+        let v = serde_json::json!({
+            "service_did": "did:web:labeler.example",
+            "service_endpoint": "https://labeler.example",
+            "db_path": "/var/lib/cairn/cairn.db",
+            "signing_key_path": "/etc/cairn/signing-key.hex",
+            "moderation_reasons": serde_json::Value::Object(map),
+        });
+        let cfg: crate::config::Config = serde_json::from_value(v).expect("config deserializes");
+        ReasonVocabulary::from_config(&cfg).expect("from_config")
+    }
+
+    #[test]
+    fn resolve_single_non_severe_reason_returns_it() {
+        let v = vocab_with(&[("spam", 4, false)]);
+        let pick = resolve_primary_reason(&["spam".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "spam");
+        assert_eq!(pick.base_weight, 4);
+    }
+
+    #[test]
+    fn resolve_two_non_severe_picks_highest_base_weight() {
+        let v = vocab_with(&[("spam", 2, false), ("hate", 4, false)]);
+        let pick = resolve_primary_reason(&["spam".into(), "hate".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "hate");
+    }
+
+    #[test]
+    fn resolve_severe_wins_over_higher_weight_non_severe() {
+        // Severe rule: severe always wins regardless of base_weight.
+        // hate (non-severe, weight 100) vs threats (severe, weight 8)
+        // → threats wins.
+        let v = vocab_with(&[("hate", 100, false), ("threats", 8, true)]);
+        let pick = resolve_primary_reason(&["hate".into(), "threats".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "threats");
+        assert!(pick.severe);
+    }
+
+    #[test]
+    fn resolve_two_severe_picks_highest_base_weight_among_severe() {
+        let v = vocab_with(&[("threats", 12, true), ("csam", 999, true)]);
+        let pick = resolve_primary_reason(&["threats".into(), "csam".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "csam");
+    }
+
+    #[test]
+    fn resolve_tie_on_base_weight_picks_first_listed() {
+        // Two non-severe at the same weight. First-listed wins for
+        // deterministic recording.
+        let v = vocab_with(&[("aaa", 4, false), ("bbb", 4, false)]);
+        let pick = resolve_primary_reason(&["aaa".into(), "bbb".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "aaa");
+
+        let pick = resolve_primary_reason(&["bbb".into(), "aaa".into()], &v).unwrap();
+        assert_eq!(pick.identifier, "bbb");
+    }
+
+    #[test]
+    fn resolve_unknown_reason_returns_reason_not_found() {
+        let v = vocab_with(&[("spam", 2, false)]);
+        let err = resolve_primary_reason(&["nope".into()], &v).expect_err("unknown reason");
+        match err {
+            Error::ReasonNotFound(id) => assert_eq!(id, "nope"),
+            other => panic!("expected ReasonNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_empty_codes_errors() {
+        let v = vocab_with(&[("spam", 2, false)]);
+        let err = resolve_primary_reason(&[], &v).expect_err("empty codes");
+        assert!(matches!(err, Error::Signing(_)));
+    }
+
+    // ---------- shared helpers ----------
 
     #[test]
     fn base_weight_is_copied_through_unchanged() {
