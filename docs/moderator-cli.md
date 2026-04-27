@@ -170,86 +170,53 @@ read access to the full set is reserved for admins to avoid the
 that abort UPDATE and DELETE; the CLI matches by exposing only
 read operations.
 
-## Active label inspection ([§F21](../cairn-design.md#f21-label-emission-against-moderation-state-v15))
+## Active label inspection
 
-Read-only operator view of what ATProto labels cairn-mod is
-currently emitting against a subject. `cairn moderator labels
-<subject>` HTTP-routes through the same admin XRPC envelope as
-`cairn moderator strikes` ([§F21.8](../cairn-design.md#f218-public-introspection-and-operator-cli)),
-but renders only the `activeLabels` field — one row per emitted
-label, with the action context replicated across rows so each
-line is fully self-describing.
+Read-only label-state inspection via `cairn moderator labels
+<subject>`. Surfaces what labels cairn-mod is currently emitting
+against a subject — the action label per non-revoked action plus
+any reason labels emitted alongside.
 
 ```
-# Show all currently-active labels emitted against a subject.
-cairn moderator labels did:plc:offender
+# Inspect active labels for a subject (tabular output).
+cairn moderator labels did:plc:offender --cairn-server https://labeler.example
 
-# Override the session's stored cairn-server URL for a one-off
-# query against a different deployment.
-cairn moderator labels did:plc:offender --cairn-server https://staging.labeler.example
-
-# Emit just the activeLabels array as JSON for piping through jq.
-cairn moderator labels did:plc:offender --json | jq '.[] | .val'
+# JSON output for piping through jq.
+cairn moderator labels did:plc:offender --cairn-server https://labeler.example --json
 ```
 
-**Output shape.** Default human output is a two-pass-rendered
-table with five columns:
+The tabular output groups by action: each row shows the label
+value, the action that emitted it, the action type, the reason
+codes attached to the action, and the label's expiry if any.
+Multiple labels per action (action label + reason labels) all
+share the same action context fields. Ordering: most-recent-action
+first, with reason codes alphabetical within each action's reason
+list.
 
-- `LABEL_VAL` — the label's `val` as emitted on the wire (e.g.,
-  `!takedown`, `reason-spam`).
-- `ACTION_ID` — `subject_actions.id` of the action that emitted
-  this label set. Repeats across every row belonging to the
-  same action.
-- `ACTION_TYPE` — `subject_actions.action_type` (one of
-  `takedown`, `temp_suspension`, `indef_suspension`, `warning`).
-  `note` never appears — notes don't emit labels per
-  [§F21.1](../cairn-design.md#f211-action-to-label-mapping).
-- `REASONS` — comma-joined operator-vocabulary reason codes;
-  `-` when the action emitted with `emit_reason_labels=false`
-  at recording time.
-- `EXPIRES_AT` — RFC-3339 wall-clock for `temp_suspension`
-  emissions; `-` for non-expiring action types.
+```
+Active labels for did:plc:offender
+  LABEL_VAL           ACTION_ID  ACTION_TYPE       REASONS           EXPIRES_AT
+  !takedown           42         takedown          hate-speech,spam  -
+  reason-hate-speech  42         takedown          hate-speech,spam  -
+  reason-spam         42         takedown          hate-speech,spam  -
+  !hide               38         temp_suspension   harassment        2026-05-04T12:00:00.000Z
+  reason-harassment   38         temp_suspension   harassment        2026-05-04T12:00:00.000Z
+```
 
-Each `subject_actions` row that emitted labels expands into one
-action-label row plus one row per `reason_code`, with the action
-context (id, type, reasons, expiry) repeating so a forensic
-reader can trace any individual label without correlating across
-rows. Reason-label rows reconstruct their `val` by prefixing each
-reason code with the default `reason-` prefix; deployments that
-configure a non-default `[label_emission].reason_label_prefix`
-will see drift here (tracked as a future follow-up).
+Empty state: `No active labels for <subject>` when no actions
+are active or all emitted labels have been negated by revocation.
 
-**Empty state.** When the subject has no active emitted labels —
-either because they have no actions, every action was a note,
-every action's emission was suppressed at recording time, or
-every emitted action has been revoked — the human output is a
-single line: `No active labels for <subject>`. The `--json`
-output is `[]`.
+**`--json` output emits only the activeLabels array.** Operators
+wanting the full strike state envelope (current count, decay
+trajectory, suspension state, plus activeLabels) should use
+`cairn moderator strikes --json` instead. This subcommand's job
+is "show me the labels"; the JSON output reflects that scope.
 
-**Ordering.** Most-recent-action-first (descending by
-`subject_actions.id`), inherited from the wire-level ordering
-[§F21.8](../cairn-design.md#f218-public-introspection-and-operator-cli)
-declares for `subjectStrikeState.activeLabels`. Reason-label
-rows within each action are alphabetical by reason code, matching
-the `subject_action_reason_labels` linkage table's stored
-ordering.
+**Authentication.** Wraps the same admin XRPC endpoint as
+`cairn moderator strikes` (single HTTP path internally; output
+diverges at the formatter layer), so it requires a logged-in
+session via `cairn login` and a moderator-or-admin role row in
+the `moderators` table on the target cairn-mod instance.
 
-**`--json` output stance.** Emits just the `activeLabels` array
-from the underlying `tools.cairn.admin.getSubjectStrikes`
-response — not the full `subjectStrikeState` envelope. The
-subcommand's job is "show me labels"; JSON output reflects that.
-Operators wanting the full state (current strike count, decay
-trajectory, active suspension, etc. alongside the labels) use
-`cairn moderator strikes --json`.
-
-**Auth + role.** The subcommand wraps the same admin XRPC call
-as `cairn moderator strikes` — single HTTP path, divergence is
-at the formatter layer only. It requires a logged-in moderator
-session (`cairn login`) and a moderator-or-admin role row in
-the `moderators` table on the target instance, same as the
-report and audit subcommands above.
-
-**Read-only.** Like `strikes` and `audit list`, this subcommand
-is read-only — it does not record audit rows or mutate any
-state. Useful for spot-checking emission outcomes after a
-recordAction or revokeAction without touching the writer task.
+The label emission system this subcommand surfaces is documented
+in [cairn-design.md §F21](../cairn-design.md#f21-label-emission-against-moderation-state-v15).

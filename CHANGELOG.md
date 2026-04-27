@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.5.2] — 2026-04-27
+
+> Closes the v1.5 documentation gap: `cairn moderator labels` is
+> now in the moderator CLI reference.
+
+### Changed
+
+- Added documentation for the `cairn moderator labels` subcommand
+  to docs/moderator-cli.md as a new "Active label inspection"
+  section. The subcommand shipped in v1.5 (#66) but was never
+  added to README.md before v1.5.1's documentation split
+  preserved existing content verbatim. (#69)
+
 ## [1.5.1] — 2026-04-27
 
 > Documentation reorganization for clearer audience separation —
