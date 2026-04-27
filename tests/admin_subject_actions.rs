@@ -1567,3 +1567,354 @@ async fn warning_emitting_audit_log_carries_action_and_reason_labels() {
     assert_eq!(emitted[1]["val"], "reason-spam");
     assert_eq!(emitted[2]["val"], "reason-harassment");
 }
+
+// =================== revocation negation (#62, v1.5) ===================
+//
+// Wire revoking an action to negation labels. Each emitted label
+// gets a fresh neg=true record targeting the same (src, uri, val)
+// tuple; the original record stays in place; the linkage table
+// (subject_action_reason_labels) is preserved as forensic record.
+// Edge contracts pinned here: negations carry exp=None even when
+// the original was a temp_suspension; the val comes from storage
+// (not current policy) so policy edits don't desync the negation;
+// negation is unconditional once a prior emission exists, even if
+// policy.enabled is false at revocation time.
+
+async fn revoke_action(h: &Harness, action_id: i64, reason: Option<&str>) {
+    let mut body = serde_json::json!({"actionId": action_id});
+    if let Some(r) = reason {
+        body["reason"] = serde_json::Value::String(r.to_string());
+    }
+    let resp = http()
+        .post(format!("http://{}/xrpc/{REVOKE_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, REVOKE_LXM))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "revoke status={}",
+        resp.status()
+    );
+}
+
+async fn latest_revoke_action_audit_reason(h: &Harness) -> Value {
+    let audit = sqlx::query!(
+        "SELECT reason FROM audit_log
+         WHERE action = 'subject_action_revoked'
+         ORDER BY id DESC LIMIT 1",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    serde_json::from_str(audit.reason.as_deref().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn revoke_takedown_negates_action_label_and_reason_labels() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["hate-speech", "harassment"]).await;
+
+    // Sanity: 3 original (neg=0) labels + 2 linkage rows landed.
+    let pre_neg0: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels WHERE neg = 0")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(pre_neg0, 3);
+
+    revoke_action(&h, action_id, Some("appeal granted")).await;
+
+    // Originals unchanged; 3 new neg=1 records appended.
+    let neg0_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels WHERE neg = 0")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    let neg1_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels WHERE neg = 1")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(neg0_count, 3);
+    assert_eq!(neg1_count, 3);
+
+    // Negation vals match the originals' vals 1:1.
+    let negs = sqlx::query!("SELECT val, uri, exp FROM labels WHERE neg = 1 ORDER BY seq ASC",)
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(negs[0].val, "!takedown");
+    assert_eq!(negs[1].val, "reason-harassment"); // alphabetical
+    assert_eq!(negs[2].val, "reason-hate-speech");
+    for n in &negs {
+        assert_eq!(n.uri, SUBJECT_DID);
+        assert!(n.exp.is_none(), "negations don't expire");
+    }
+
+    // emitted_label_uri unchanged (no UPDATE on the action's linkage
+    // — revocation appends negations, doesn't rewrite history).
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.emitted_label_uri.as_deref(), Some("!takedown"));
+
+    // Reason linkage rows preserved (forensic record).
+    let linkage_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_action_reason_labels WHERE action_id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(linkage_count, 2, "linkage rows preserved across revoke");
+
+    // Audit row carries negated_labels.
+    let reason = latest_revoke_action_audit_reason(&h).await;
+    let negated = reason["negated_labels"].as_array().unwrap();
+    assert_eq!(negated.len(), 3);
+    assert_eq!(negated[0]["val"], "!takedown");
+    assert_eq!(negated[1]["val"], "reason-harassment");
+    assert_eq!(negated[2]["val"], "reason-hate-speech");
+}
+
+#[tokio::test]
+async fn revoke_temp_suspension_negation_carries_no_exp() {
+    // Pin the "exp = None on negations" rule. Even though the
+    // original temp_suspension labels carried an expiry, the
+    // negation is a permanent statement that supersedes the
+    // original; expiring it would resurrect the original in
+    // consumer caches.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    // Sanity: originals carried exp.
+    let originals = sqlx::query!("SELECT val, exp FROM labels WHERE neg = 0 ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    for o in &originals {
+        assert!(o.exp.is_some(), "{} should have exp on emission", o.val);
+    }
+
+    revoke_action(&h, action_id, None).await;
+
+    let negs = sqlx::query!("SELECT val, exp FROM labels WHERE neg = 1 ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(negs.len(), 2);
+    for n in &negs {
+        assert!(
+            n.exp.is_none(),
+            "negation for {} must not carry exp (got {:?})",
+            n.val,
+            n.exp
+        );
+    }
+}
+
+#[tokio::test]
+async fn revoke_warning_recorded_under_suppression_emits_no_negations() {
+    // Warning recorded with the default suppression gate has no
+    // emitted labels; revocation negates nothing but still
+    // records the audit row + recomputes strikes (existing v1.4
+    // semantics). audit reason JSON's negated_labels = [].
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_warning(&h, &["spam"]).await;
+
+    // Pre-revoke: zero labels rows (suppression).
+    let pre: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(pre, 0);
+
+    revoke_action(&h, action_id, None).await;
+
+    let post: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(post, 0, "no negations to produce when nothing was emitted");
+
+    let row = sqlx::query!(
+        "SELECT revoked_at FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(row.revoked_at.is_some(), "revocation still updates the row");
+
+    let reason = latest_revoke_action_audit_reason(&h).await;
+    assert_eq!(reason["negated_labels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn revoke_note_emits_no_negations() {
+    // Notes never emit, so revoking a note never negates.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_note(&h, &["spam"]).await;
+    revoke_action(&h, action_id, None).await;
+
+    let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    let reason = latest_revoke_action_audit_reason(&h).await;
+    assert_eq!(reason["negated_labels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn revoke_warning_emitted_under_flag_negates_action_and_reasons() {
+    let mut policy = cairn_mod::LabelEmissionPolicy::defaults();
+    policy.warning_emits_label = true;
+    let h = spawn_with_policy(policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_warning(&h, &["spam"]).await;
+    revoke_action(&h, action_id, None).await;
+
+    let negs = sqlx::query!("SELECT val FROM labels WHERE neg = 1 ORDER BY seq ASC",)
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(negs.len(), 2);
+    assert_eq!(negs[0].val, "!warn");
+    assert_eq!(negs[1].val, "reason-spam");
+}
+
+#[tokio::test]
+async fn revoke_uses_stored_val_not_current_policy_after_override_change() {
+    // The val-from-storage rule. If an operator edits the policy
+    // between emission and revocation, the negation must still
+    // target the original val (so it actually negates the wire
+    // record on consumers). Here: emit under default policy
+    // (val=!takedown), then swap the writer for one with an
+    // override that would change the val to !custom-takedown,
+    // then revoke. The negation must say !takedown, not the
+    // override. Practical implementation: a single Harness can't
+    // change policy mid-run, so the test wires the stored val
+    // through inspection — pre-revoke the action's
+    // emitted_label_uri reads "!takedown"; post-revoke we expect
+    // a neg=1 row with val="!takedown" regardless of what the
+    // writer's current policy says.
+    //
+    // The stronger version of this test (rebuild Harness with new
+    // policy after recording) requires writer-handle swap logic
+    // we don't have. The val-from-storage code path is exercised
+    // by reading subject_actions.emitted_label_uri directly — a
+    // future Harness gain could pin the cross-policy-edit case
+    // end-to-end.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["spam"]).await;
+
+    // Confirm storage holds "!takedown" — this is the value the
+    // negation will read regardless of policy state.
+    let row = sqlx::query!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.emitted_label_uri.as_deref(), Some("!takedown"));
+
+    revoke_action(&h, action_id, None).await;
+
+    let neg_val = sqlx::query_scalar!("SELECT val FROM labels WHERE neg = 1 LIMIT 1")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(neg_val, "!takedown");
+}
+
+#[tokio::test]
+async fn revoke_under_policy_disabled_still_negates_prior_emissions() {
+    // The "negation is unconditional" rule. policy.enabled
+    // controls future emissions; it does NOT gate negation of
+    // already-emitted labels. The original labels exist on the
+    // wire and need negating regardless of current policy state,
+    // otherwise consumers would honor a stale takedown forever.
+    //
+    // Same Harness-mid-life-policy-swap caveat as the previous
+    // test — we exercise the code path by recording under default
+    // policy (so labels exist) and revoking; the writer's policy
+    // is unchanged but the path doesn't consult policy at all
+    // during negation. A future end-to-end variant that
+    // hot-swaps the writer would tighten this further.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["spam"]).await;
+    let pre_neg0: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels WHERE neg = 0")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(pre_neg0, 2); // !takedown + reason-spam
+
+    revoke_action(&h, action_id, None).await;
+
+    let post_neg1: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels WHERE neg = 1")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(post_neg1, 2);
+}
+
+#[tokio::test]
+async fn revoke_negation_signature_verifies_against_service_did_key() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown(&h, &["spam"]).await;
+    revoke_action(&h, action_id, None).await;
+
+    let row = sqlx::query!(
+        r#"SELECT ver AS "ver!: i64", src AS "src!: String", uri AS "uri!: String",
+                  cid, val AS "val!: String", neg AS "neg!: i64",
+                  cts AS "cts!: String", exp, sig AS "sig!: Vec<u8>"
+           FROM labels WHERE neg = 1 AND val = '!takedown'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let mut label = cairn_mod::Label {
+        ver: row.ver,
+        src: row.src,
+        uri: row.uri,
+        cid: row.cid,
+        val: row.val,
+        neg: row.neg != 0,
+        cts: row.cts,
+        exp: row.exp,
+        sig: None,
+    };
+    assert!(label.neg, "row should be a negation");
+    let sig: [u8; 64] = row.sig.as_slice().try_into().unwrap();
+    label.sig = Some(sig);
+    let multibase = format_multikey("ES256K", &test_keypair().public_key_compressed());
+    cairn_mod::verify_label(&multibase, &label).expect("negation signature verifies");
+}

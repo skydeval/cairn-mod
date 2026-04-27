@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT val FROM labels WHERE neg = 1 LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "val",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1813690b7bb259ecd28e53345b2a88f75902aa8fb278d9bb615ff36ef22f3524"
+}

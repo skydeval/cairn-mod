@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT val, exp FROM labels WHERE neg = 1 ORDER BY seq ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "val",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "exp",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5e6646afda3f627f09306eed6c47f6743fc53f1a688cb55f53a9c33412a24541"
+}

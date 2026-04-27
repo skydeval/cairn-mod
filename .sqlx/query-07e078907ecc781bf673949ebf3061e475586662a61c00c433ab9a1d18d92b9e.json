@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_did, subject_uri, emitted_label_uri, revoked_at\n             FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_did",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "emitted_label_uri",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "07e078907ecc781bf673949ebf3061e475586662a61c00c433ab9a1d18d92b9e"
+}

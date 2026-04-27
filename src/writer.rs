@@ -1796,9 +1796,12 @@ impl Writer {
     async fn handle_revoke_action(&self, req: RevokeActionRequest) -> Result<RevokedAction> {
         let mut tx = self.pool.begin().await?;
 
-        // Look up the row + check current state.
+        // Look up the row + check current state. Pull the fields
+        // needed for both v1.4 revocation (subject_did, revoked_at)
+        // and v1.5 #62 negation (subject_uri, emitted_label_uri).
         let row = sqlx::query!(
-            "SELECT subject_did, revoked_at FROM subject_actions WHERE id = ?1",
+            "SELECT subject_did, subject_uri, emitted_label_uri, revoked_at
+             FROM subject_actions WHERE id = ?1",
             req.action_id,
         )
         .fetch_optional(&mut *tx)
@@ -1825,6 +1828,123 @@ impl Writer {
         .execute(&mut *tx)
         .await?;
 
+        // ---------- negation (#62, v1.5) ----------
+        //
+        // Read the action's emitted-label linkage from storage
+        // (NOT from current policy — see module docs for the
+        // val-from-storage rule). For each emitted val, sign and
+        // persist a fresh label row with neg=true targeting the
+        // same (src, uri, val) tuple. The original rows stay in
+        // place; ATProto consumers honor the latest record per
+        // tuple and so see the negation. Reason linkage rows
+        // (subject_action_reason_labels) are PRESERVED — they're
+        // forensic record of "at this point these labels were
+        // emitted," not a cache of what's currently in force.
+        //
+        // exp = None on every negation. The original temp_suspension
+        // label may have carried an expiry (its exp said "stop
+        // honoring me at this wall-clock"), but the negation itself
+        // is a permanent statement that supersedes the original;
+        // expiring the negation would resurrect the original label
+        // in consumer caches.
+        //
+        // Action that was never emitted (note, suppressed warning,
+        // emission disabled at recording time) → both the action
+        // label fetch and the reason-label fetch yield zero rows
+        // and the negation step is a no-op. The revocation
+        // audit row still lands with negated_labels = [].
+        let label_uri = row
+            .subject_uri
+            .clone()
+            .unwrap_or_else(|| row.subject_did.clone());
+
+        // Reason-label linkage rows ordered by reason_code for
+        // deterministic audit shape. Original emission order isn't
+        // recoverable (storage doesn't preserve req.reason_codes
+        // ordering), and ATProto consumers don't care about
+        // negation order; alphabetical is the cheapest stable
+        // ordering for forensic readers.
+        let reason_linkage = sqlx::query!(
+            "SELECT reason_code, emitted_label_uri
+             FROM subject_action_reason_labels
+             WHERE action_id = ?1
+             ORDER BY reason_code ASC",
+            req.action_id,
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut negated_for_audit: Vec<serde_json::Value> = Vec::new();
+        if let Some(ref val) = row.emitted_label_uri {
+            negated_for_audit.push(serde_json::json!({
+                "val": val,
+                "uri": label_uri,
+            }));
+        }
+        for r in &reason_linkage {
+            negated_for_audit.push(serde_json::json!({
+                "val": r.emitted_label_uri,
+                "uri": label_uri,
+            }));
+        }
+
+        // Audit row first — captures the negation set in the hash
+        // chain before the label INSERTs land. Mirrors #60's
+        // emission-side ordering: a forensic reader who sees the
+        // audit row knows what labels SHOULD have been written;
+        // the labels table is the witness. tx atomicity guarantees
+        // they agree.
+        let audit_reason = build_revoke_action_audit_reason(
+            req.action_id,
+            req.revoked_reason.as_deref(),
+            &negated_for_audit,
+        );
+        crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: revoked_at_ms,
+                action: "subject_action_revoked".into(),
+                actor_did: req.revoked_by_did.clone(),
+                target: Some(req.action_id.to_string()),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        // Sign + persist each negation label. Action label first so
+        // its seq < reason negations'.
+        let mut negation_events: Vec<LabelEvent> = Vec::with_capacity(1 + reason_linkage.len());
+        if let Some(ref val) = row.emitted_label_uri {
+            let event = self
+                .sign_and_persist_label(
+                    &mut tx,
+                    val,
+                    &label_uri,
+                    None, // cid: not plumbed in v1.5
+                    true, // neg
+                    None, // exp: negations don't expire
+                    revoked_at_ms,
+                )
+                .await?;
+            negation_events.push(event);
+        }
+        for r in &reason_linkage {
+            let event = self
+                .sign_and_persist_label(
+                    &mut tx,
+                    &r.emitted_label_uri,
+                    &label_uri,
+                    None,
+                    true,
+                    None,
+                    revoked_at_ms,
+                )
+                .await?;
+            negation_events.push(event);
+        }
+
         // Recompute strike state for the subject. The decay
         // calculator excludes revoked rows from current_count.
         let post_history = load_subject_actions_for_calc(&mut tx, &row.subject_did).await?;
@@ -1845,26 +1965,14 @@ impl Writer {
         .execute(&mut *tx)
         .await?;
 
-        // Audit row. target = subject_actions.id.to_string() so the
-        // audit chain links back to the row being revoked (not the
-        // subject, which is recoverable via the row id).
-        let audit_reason =
-            build_revoke_action_audit_reason(req.action_id, req.revoked_reason.as_deref());
-        crate::audit::append::append_in_tx(
-            &mut tx,
-            &crate::audit::append::AuditRowForAppend {
-                created_at: revoked_at_ms,
-                action: "subject_action_revoked".into(),
-                actor_did: req.revoked_by_did.clone(),
-                target: Some(req.action_id.to_string()),
-                target_cid: None,
-                outcome: "success".into(),
-                reason: Some(audit_reason),
-            },
-        )
-        .await?;
-
         tx.commit().await?;
+
+        // Broadcast each negation to subscribeLabels consumers
+        // post-commit. Same ordering and no-receivers-is-fine
+        // posture as the emission path (§plan point G).
+        for event in negation_events {
+            let _ = self.broadcast_tx.send(event);
+        }
 
         Ok(RevokedAction {
             action_id: req.action_id,
@@ -2181,10 +2289,22 @@ fn build_record_action_audit_reason(
 
 /// `subject_action_revoked` audit reason JSON — see
 /// [`AUDIT_REASON_REVOKE_ACTION`] for the schema.
-fn build_revoke_action_audit_reason(action_id: i64, revoked_reason: Option<&str>) -> String {
+///
+/// `negated_labels` mirrors the emission-side `emitted_labels`
+/// shape from [`build_record_action_audit_reason`]: an array of
+/// `{val, uri}` entries, action label first followed by reason
+/// labels in alphabetical order. Empty when the revoked action
+/// had no emitted labels (note, suppressed warning, emission
+/// disabled at record time, action recorded pre-v1.5).
+fn build_revoke_action_audit_reason(
+    action_id: i64,
+    revoked_reason: Option<&str>,
+    negated_labels: &[serde_json::Value],
+) -> String {
     serde_json::json!({
         "action_id": action_id,
         "revoked_reason": revoked_reason,
+        "negated_labels": negated_labels,
     })
     .to_string()
 }
@@ -2620,16 +2740,29 @@ mod tests {
 
     #[test]
     fn revoke_action_audit_reason_with_reason() {
-        let json = build_revoke_action_audit_reason(7, Some("appeal granted"));
+        let json = build_revoke_action_audit_reason(7, Some("appeal granted"), &[]);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["action_id"], 7);
         assert_eq!(v["revoked_reason"], "appeal granted");
+        assert_eq!(v["negated_labels"], serde_json::json!([]));
     }
 
     #[test]
     fn revoke_action_audit_reason_without_reason_is_null() {
-        let json = build_revoke_action_audit_reason(7, None);
+        let json = build_revoke_action_audit_reason(7, None, &[]);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v["revoked_reason"].is_null());
+    }
+
+    #[test]
+    fn revoke_action_audit_reason_with_negated_labels() {
+        let labels = vec![
+            serde_json::json!({"val": "!takedown", "uri": "did:plc:subject0000000000000000"}),
+            serde_json::json!({"val": "reason-spam", "uri": "did:plc:subject0000000000000000"}),
+        ];
+        let json = build_revoke_action_audit_reason(11, None, &labels);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["negated_labels"][0]["val"], "!takedown");
+        assert_eq!(v["negated_labels"][1]["val"], "reason-spam");
     }
 }
