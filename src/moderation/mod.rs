@@ -25,6 +25,7 @@
 //!   in-good-standing in-window strike-bearing actions for the
 //!   recorder's strike calculation. (#51)
 
+pub mod cache;
 pub mod decay;
 pub mod policy;
 pub mod reasons;

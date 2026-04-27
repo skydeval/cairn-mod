@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_did, current_strike_count, last_action_at, last_recompute_at\n         FROM subject_strike_state WHERE subject_did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_did",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "current_strike_count",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_action_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "last_recompute_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "05c8195b352d739790efe5aaf47863977e774098bf9c0a0860fcfc1e194e662e"
+}

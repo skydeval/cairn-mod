@@ -226,6 +226,7 @@ mod tests {
             decay: DecayFunction::Linear,
             decay_window_days: 90,
             suspension_freezes_decay: true,
+            cache_freshness_window_seconds: 3600,
         }
     }
 

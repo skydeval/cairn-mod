@@ -125,6 +125,17 @@ pub enum Error {
     /// error surface.
     #[error("recordAction: subject_uri repo DID does not match subject_did")]
     SubjectUriMismatch,
+
+    /// `get_or_recompute_strike_count` (§F20, #55) was called with
+    /// a `subject_did` that has no `subject_strike_state` row —
+    /// i.e., no actions have ever been recorded against this
+    /// subject. Same semantic as the `SubjectNotFound` lexicon
+    /// error from the read endpoints; the typed variant here lets
+    /// v1.5+ consumers branch on "never-actioned" cleanly (e.g.,
+    /// `unwrap_or(0)` for optimistic "never-actioned == 0 strikes"
+    /// semantics, or surface as a domain-specific error otherwise).
+    #[error("no strike-state cache row for subject {0:?}")]
+    StrikeCacheMissing(String),
 }
 
 impl From<figment::Error> for Error {

@@ -168,6 +168,14 @@ pub struct StrikePolicyToml {
     /// `indef_suspension` action. Default `true`.
     #[serde(default = "default_suspension_freezes_decay")]
     pub suspension_freezes_decay: bool,
+    /// How long the `subject_strike_state` cache row remains
+    /// "fresh" before a reader should recompute via the decay
+    /// calculator (#55). Default 3600 (1 hour). Validated `>= 1`.
+    /// Has no effect on v1.4 read endpoints, which always
+    /// recompute from source-of-truth regardless; ships ahead of
+    /// v1.5+ consumers that may read the cache directly.
+    #[serde(default = "default_cache_freshness_window_seconds")]
+    pub cache_freshness_window_seconds: u32,
 }
 
 impl Default for StrikePolicyToml {
@@ -178,6 +186,7 @@ impl Default for StrikePolicyToml {
             decay_function: default_decay_function(),
             decay_window_days: default_decay_window_days(),
             suspension_freezes_decay: default_suspension_freezes_decay(),
+            cache_freshness_window_seconds: default_cache_freshness_window_seconds(),
         }
     }
 }
@@ -196,6 +205,9 @@ fn default_decay_window_days() -> u32 {
 }
 fn default_suspension_freezes_decay() -> bool {
     true
+}
+fn default_cache_freshness_window_seconds() -> u32 {
+    3600
 }
 
 /// TOML projection of [`crate::AdminConfig`]. Separate from the runtime

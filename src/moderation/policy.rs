@@ -88,6 +88,13 @@ pub struct StrikePolicy {
     /// `indef_suspension` action. Revocation is then the only path
     /// back to good standing. Default `true`.
     pub suspension_freezes_decay: bool,
+    /// How long the [`subject_strike_state`](
+    /// crate::moderation::cache) cache row remains "fresh" before a
+    /// reader should recompute via the decay calculator. Used by
+    /// the lazy recompute-on-read helper (#55); has no effect on
+    /// the v1.4 read endpoints, which always recompute from
+    /// source-of-truth regardless. Default 3600 (1 hour).
+    pub cache_freshness_window_seconds: u32,
 }
 
 /// Decay shape applied to an action's strike contribution as time
@@ -126,8 +133,9 @@ impl StrikePolicy {
     }
 
     /// The shipped default policy: threshold 3, curve [1, 2], linear
-    /// decay over 90 days, suspensions freeze decay. Matches the v1.4
-    /// design conversation: "good standing for me would be ≤3 strikes;
+    /// decay over 90 days, suspensions freeze decay,
+    /// cache_freshness_window 1 hour. Matches the v1.4 design
+    /// conversation: "good standing for me would be ≤3 strikes;
     /// 1st offense = 1 strike, 2nd = 2 strikes, 3rd = full base."
     pub fn defaults() -> Self {
         Self {
@@ -136,6 +144,7 @@ impl StrikePolicy {
             decay: DecayFunction::Linear,
             decay_window_days: 90,
             suspension_freezes_decay: true,
+            cache_freshness_window_seconds: 3600,
         }
     }
 
@@ -181,12 +190,20 @@ impl StrikePolicy {
             )));
         }
 
+        if toml.cache_freshness_window_seconds < 1 {
+            return Err(Error::Signing(format!(
+                "config: [strike_policy] cache_freshness_window_seconds = {} must be >= 1",
+                toml.cache_freshness_window_seconds
+            )));
+        }
+
         Ok(Self {
             good_standing_threshold: toml.good_standing_threshold,
             dampening_curve: toml.dampening_curve.clone(),
             decay: toml.decay_function,
             decay_window_days: toml.decay_window_days,
             suspension_freezes_decay: toml.suspension_freezes_decay,
+            cache_freshness_window_seconds: toml.cache_freshness_window_seconds,
         })
     }
 }
@@ -219,6 +236,7 @@ mod tests {
         assert_eq!(p.decay, DecayFunction::Linear);
         assert_eq!(p.decay_window_days, 90);
         assert!(p.suspension_freezes_decay);
+        assert_eq!(p.cache_freshness_window_seconds, 3600);
     }
 
     #[test]
@@ -443,5 +461,25 @@ mod tests {
         }));
         let p = StrikePolicy::from_config(&cfg).expect("from_config");
         assert_eq!(p.decay, DecayFunction::Exponential);
+    }
+
+    // ---------- cache freshness window (#55) ----------
+
+    #[test]
+    fn cache_freshness_window_operator_override_accepted() {
+        let cfg = config_with_policy(serde_json::json!({
+            "cache_freshness_window_seconds": 300,
+        }));
+        let p = StrikePolicy::from_config(&cfg).expect("from_config");
+        assert_eq!(p.cache_freshness_window_seconds, 300);
+    }
+
+    #[test]
+    fn zero_cache_freshness_window_rejected() {
+        let cfg = config_with_policy(serde_json::json!({
+            "cache_freshness_window_seconds": 0,
+        }));
+        let err = StrikePolicy::from_config(&cfg).unwrap_err();
+        assert!(format!("{err}").contains("cache_freshness_window_seconds"));
     }
 }
