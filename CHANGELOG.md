@@ -17,6 +17,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.4.0] - 2026-04-26
+
+> v1.4 "Account moderation state model" turns moderation into
+> first-class records: every action against a subject (warning,
+> note, suspension, takedown) writes a structured row with a
+> strike value resolved at action time and frozen for forensic
+> durability. Strikes accumulate, dampen for first-time offenders,
+> and decay over time per operator-configurable rules. Read
+> endpoints — admin and a new user-facing `tools.cairn.public.*`
+> namespace — recompute strike state through a pure decay
+> calculator on every fetch, so cached values can never produce a
+> misleading answer. Operators declare reason vocabularies and
+> strike policy in `[moderation_reasons]` and `[strike_policy]`
+> config blocks; the new §4.2 disclosure 4 makes the trade-off
+> explicit: cairn-mod's contribution is making policy declarable
+> and observable, not adjudicating what the policy should be.
+
+### Added
+- Account moderation state model: `subject_actions` table records every moderation action (warning, note, temp_suspension, indef_suspension, takedown) with structured reason metadata, duration, notes, and links to source reports. `subject_strike_state` cache table tracks current strike counts per subject_did. Append-only schema; revocation transitions are the only allowed UPDATE per the trigger contract from [§F20.6](cairn-design.md#f20-account-moderation-state-model-v14) (#46)
+- Reason vocabulary system: operators declare moderation reasons in `[moderation_reasons]` config block with `base_weight`, `severe` flag, and `description`. Cairn-mod ships eight default reasons aligned with ATProto's `reasonType` (hate-speech, harassment, threats-of-violence, csam, spam, misinformation, nsfw, other). Operator-declared blocks replace defaults entirely (no merging) per [§F20.2](cairn-design.md#f20-account-moderation-state-model-v14) (#47)
+- Strike policy system: `[strike_policy]` config block declares `good_standing_threshold` (default 3), `dampening_curve` (default `[1, 2]`), `decay_function` (linear or exponential), `decay_window_days` (default 90), `suspension_freezes_decay` (default `true`), and `cache_freshness_window_seconds` (default 3600). Per-field defaults let operators declare partial blocks per [§F20.3](cairn-design.md#f20-account-moderation-state-model-v14) (#48, #55)
+- Strike calculator: pure function applies dampening at action time. Users in good standing get curve-position values; users out of good standing get full `base_weight`; severe reasons bypass dampening. The `was_dampened` flag and `strikes_at_time_of_action` are frozen on the row for forensic auditability per [§F20.3](cairn-design.md#f20-account-moderation-state-model-v14) (#49)
+- Decay calculator: time-based decay computed on read, not stored. Linear decay reaches 0 at `decay_window_days`; exponential decay reaches ~1% at the same boundary (half-life = window / log₂(100)). Suspension freezes decay (v1.4 simplification: only the most recent unrevoked suspension affects calculation) per [§F20.4](cairn-design.md#f20-account-moderation-state-model-v14) (#50)
+- Recorder + revoker: `WriteCommand::RecordAction` and `WriteCommand::RevokeAction` route action writes through the writer task. Single-transaction atomicity across `subject_actions` row, `subject_strike_state` cache update, and hash-chained `audit_log` row via #39's pathway. Predict-then-verify pattern on the `subject_actions.id` ensures `audit_log_id` linkage stays correct even under sequence-allocation edge cases (#51)
+- Position-in-window calculator: pure function counts in-good-standing offenses within the current decay window. Uses each prior action's `was_dampened` flag as the "in good standing at its time" predicate so position counting is stable across policy edits (#51)
+- Multi-reason resolver: when an action carries multiple reason codes, the strike calculation uses the dominant reason — severe wins regardless of `base_weight`; ties on `base_weight` resolve to first-listed deterministically (#51)
+- Admin XRPC: `tools.cairn.admin.recordAction`, `tools.cairn.admin.revokeAction` (writes); `tools.cairn.admin.getSubjectHistory`, `tools.cairn.admin.getSubjectStrikes` (reads). All Mod-or-Admin authorization. The shared [`src/server/strike_state.rs`](src/server/strike_state.rs) module factors the projection logic used by both admin and public read endpoints (#51, #52, #53)
+- Public XRPC: `tools.cairn.public.getMyStrikeState`. First endpoint in the `tools.cairn.public.*` namespace. Service-auth gated; the verified `iss` must equal the subject_did. CORS allows browser-side callers (the namespace is designed for downstream consumers like future accessory bots or Web UIs). Cross-references admin's `subjectStrikeState` type to avoid type drift (#54)
+- Operator CLIs: `cairn moderator action` / `warn` / `note` / `revoke` / `history` / `strikes` — moderator-tier, HTTP-routed via admin XRPC, cursor-paginated history, structured strikes display with decay trajectory. The `decayWindowRemainingDays` field is omitted at zero strikes since trajectory is meaningless without strikes to project (#51, #52)
+- Subject-strike-state cache management: `cache_is_fresh` predicate and `get_or_recompute_strike_count` entry point. Cache bypass is the v1.4 read-endpoint invariant; the cache exists for v1.5+ consumers needing O(1) "is this user in good standing?" reads. Best-effort cache writes during recompute (write failure logs but doesn't fail the read) per [§F20.9](cairn-design.md#f20-account-moderation-state-model-v14) (#55)
+
+### Changed
+- [`cairn-design.md`](cairn-design.md) gains [§F20](cairn-design.md#f20-account-moderation-state-model-v14) (account moderation state model), ten subsections covering action types, reasons, strike calculation, decay, revocation, schema, XRPC surface, operator CLIs, cache management, and deferred future work. [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience) trust-chain disclosure 4 documents that operators set their own moderation policy and that policy declarability is cairn-mod's contribution rather than a fixed moderation philosophy. [§18](cairn-design.md#18-future-roadmap) roadmap updated to mark v1.4 as shipped and surface the deferred-to-future-releases items from §F20.10 (#56)
+- [`cairn-design.md`](cairn-design.md#f10-audit-log) §F10 audit-log action vocabulary gained `subject_action_recorded` and `subject_action_revoked` entries (lexicon `defs.json` `knownValues` + `AUDIT_ACTION_VALUES` + design-doc prose). Update landed with #51's commit since the recorder writes those actions (#51)
+
+### Fixed
+
+### Removed
+
+### Security
+
 ## [1.3.0] - 2026-04-26
 
 > v1.3 "Audit integrity" makes audit-log tampering cryptographically

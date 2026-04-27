@@ -11,7 +11,7 @@ community moderation.
 [![MSRV: 1.88](https://img.shields.io/badge/MSRV-1.88-informational.svg)](Cargo.toml)
 [![Contributor Covenant](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-> **Latest stable release:** [v1.3.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.3.0) · install with `cargo install cairn-mod`
+> **Latest stable release:** [v1.4.0](https://github.com/skydeval/cairn-mod/releases/tag/v1.4.0) · install with `cargo install cairn-mod`
 >
 > The `main` branch contains active development toward the next release. For production deployments, pin to a released version.
 
@@ -30,9 +30,9 @@ than Skyware; it does not try to be either.
 
 ## Status
 
-**v1.3.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.3.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.3.0). v1.3's "audit integrity" theme adds the hash-chained audit log: every audit_log row now carries `prev_hash` and `row_hash` columns (SHA-256 over DAG-CBOR canonical encoding), and operators can verify chain integrity via `cairn audit verify`, backfill pre-v1.3 rows via `cairn audit-rebuild`, and inspect individual hashes via the extended `cairn audit show` output. v1.3 also reconciles the design doc against four releases of drift (§11/§14/§16.1/§18/§19). Items deferred to v1.4 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
+**v1.4.0 is the current stable release.** Install with `cargo install cairn-mod` or pin to the [v1.4.0 tag](https://github.com/skydeval/cairn-mod/releases/tag/v1.4.0). v1.4's "account moderation state model" theme turns moderation into first-class records: every action against a subject (warning, note, suspension, takedown) writes a structured row with a strike value resolved at action time and frozen for forensic durability. Strikes accumulate, dampen for first-time offenders via an operator-configurable curve, and decay over time per linear or exponential schedules. The new `tools.cairn.admin.recordAction` / `revokeAction` / `getSubjectHistory` / `getSubjectStrikes` admin endpoints (with `cairn moderator action` / `revoke` / `history` / `strikes` CLIs) and the user-facing `tools.cairn.public.getMyStrikeState` cover both moderator workflows and subject self-service reads. Operators declare reason vocabularies in `[moderation_reasons]` and tunables in `[strike_policy]`; the model is documented in cairn-design.md [§F20](cairn-design.md#f20-account-moderation-state-model-v14) with a new [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience) trust-chain disclosure on operator-set policy. Items deferred to v1.5 and beyond are tracked in the [issue tracker](https://github.com/skydeval/cairn-mod/issues).
 
-**v1.4 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-future-roadmap) include signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions).
+**v1.5 is in active development on `main`.** Roadmap items in the design doc's [§18](cairn-design.md#18-future-roadmap) include policy automation (auto-action recording when subjects cross strike thresholds), label emission against moderation state (bridging `subject_actions` to `applyLabel`), signing-key rotation, label-expiry enforcement, and the observability surface (Prometheus `/metrics`, structured-log conventions).
 
 Production deployments should pin to the stable release, not the `main` branch.
 
