@@ -103,9 +103,10 @@ the `cairn` user has the right ownership for the check to pass.
 ## Cross-references
 
 - Broader operator story (production checklist covering TLS +
-  rate limits + key rotation + backup + monitoring + trust-chain
-  disclosures) lives in the root README under "Production
-  Checklist." See tracker issues #20 / #21.
+  rate limits + key rotation + backup + monitoring) lives in
+  [`../OPERATIONS.md`](../OPERATIONS.md). Trust-chain disclosures
+  live in the root [`../README.md`](../README.md). See tracker
+  issues #20 / #21.
 - Security disclosure: [`../SECURITY.md`](../SECURITY.md).
 - Upstream threat model: [`../cairn-design.md`](../cairn-design.md)
   §4 and §12.
