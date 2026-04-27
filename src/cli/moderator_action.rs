@@ -604,6 +604,38 @@ pub struct StrikesResponse {
         default
     )]
     pub last_action_at: Option<String>,
+    /// ATProto labels cairn-mod is currently emitting against the
+    /// subject (#65, v1.5). One entry per non-revoked, non-negated
+    /// action that emitted labels, ordered most-recent-first.
+    /// Always present; empty array when nothing is active. Surfaced
+    /// here so `cairn moderator strikes --json` carries the same
+    /// envelope as the wire response, and so `cairn moderator
+    /// labels` can render the same field as its primary output.
+    #[serde(rename = "activeLabels", default)]
+    pub active_labels: Vec<ActiveLabelView>,
+}
+
+/// Per-action active-label entry returned on
+/// [`StrikesResponse::active_labels`]. Mirrors
+/// `tools.cairn.admin.defs#activeLabel`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ActiveLabelView {
+    /// Action label `val` (e.g., `!takedown`).
+    pub val: String,
+    /// `subject_actions.id` of the source action.
+    #[serde(rename = "actionId")]
+    pub action_id: i64,
+    /// `subject_actions.action_type` for the source row.
+    #[serde(rename = "actionType")]
+    pub action_type: String,
+    /// Reason codes whose reason-labels were emitted alongside the
+    /// action label. Always present (may be empty).
+    #[serde(rename = "reasonCodes")]
+    pub reason_codes: Vec<String>,
+    /// RFC-3339 expiry of the action's emitted labels; absent for
+    /// non-temp_suspension actions.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none", default)]
+    pub expires_at: Option<String>,
 }
 
 /// Active-suspension sub-object surfaced on a [`StrikesResponse`].
@@ -698,6 +730,161 @@ pub fn format_strikes_human(resp: &StrikesResponse, subject: &str) -> String {
 /// JSON renderer for `cairn moderator strikes`.
 pub fn format_strikes_json(resp: &StrikesResponse) -> String {
     serde_json::to_string_pretty(resp).expect("StrikesResponse serializes")
+}
+
+// ============================================================
+// `cairn moderator labels <subject>` (#66, v1.5).
+//
+// Reads the same `tools.cairn.admin.getSubjectStrikes` envelope
+// as `cairn moderator strikes`, but renders only the `active_labels`
+// field. The fetch path is shared with `strikes` (single source of
+// HTTP code); divergence is at the formatting layer.
+// ============================================================
+
+/// Input for [`labels`]. Mirrors [`StrikesInput`] one-to-one — the
+/// CLI surfaces them as separate subcommands for UX clarity even
+/// though the underlying XRPC request is identical.
+#[derive(Debug, Clone)]
+pub struct LabelsInput {
+    /// Subject DID. Pre-validated for the `did:` prefix; the
+    /// endpoint also enforces this.
+    pub subject: String,
+    /// Per-invocation override of the session's stored Cairn URL.
+    pub cairn_server_override: Option<String>,
+}
+
+/// Fetch the subject's active-label state. Internally calls the
+/// same getSubjectStrikes XRPC as [`strikes`]; renderers below
+/// pull the `active_labels` field off the envelope.
+pub async fn labels(
+    session: &mut SessionFile,
+    session_path: &Path,
+    input: LabelsInput,
+) -> Result<StrikesResponse, CliError> {
+    strikes(
+        session,
+        session_path,
+        StrikesInput {
+            subject: input.subject,
+            cairn_server_override: input.cairn_server_override,
+        },
+    )
+    .await
+}
+
+/// Tabular human renderer for `cairn moderator labels`.
+///
+/// One row per emitted label: each [`ActiveLabelView`] expands to
+/// the action label's row plus one row per reason code. The action
+/// context (id, type, reasons, expiry) repeats across every row
+/// belonging to the same action so an operator scanning the table
+/// can see every label's provenance in one line.
+///
+/// Reason-label `val`s are reconstructed by prefixing each
+/// `reason_code` with the default `reason-` prefix. The wire shape
+/// doesn't carry the operator's configured prefix, so a custom
+/// `[label_emission].reason_label_prefix` in operator config will
+/// drift here. Tracked for follow-up if a real deployment surfaces
+/// a non-default prefix.
+pub fn format_labels_human(resp: &StrikesResponse, subject: &str) -> String {
+    use std::fmt::Write;
+    if resp.active_labels.is_empty() {
+        return format!("No active labels for {subject}");
+    }
+
+    let mut s = String::new();
+    let _ = writeln!(s, "Active labels for {subject}");
+
+    // Two-pass render: pass 1 collects rows so column widths come
+    // from real content; pass 2 prints with consistent spacing.
+    let mut rows: Vec<[String; 5]> = Vec::new();
+    for entry in &resp.active_labels {
+        let reasons_joined = if entry.reason_codes.is_empty() {
+            "-".to_string()
+        } else {
+            entry.reason_codes.join(",")
+        };
+        let expires = entry.expires_at.as_deref().unwrap_or("-").to_string();
+        // Action label first.
+        rows.push([
+            entry.val.clone(),
+            entry.action_id.to_string(),
+            entry.action_type.clone(),
+            reasons_joined.clone(),
+            expires.clone(),
+        ]);
+        // Then one row per reason code, val=`reason-<code>`.
+        for code in &entry.reason_codes {
+            rows.push([
+                format!("reason-{code}"),
+                entry.action_id.to_string(),
+                entry.action_type.clone(),
+                reasons_joined.clone(),
+                expires.clone(),
+            ]);
+        }
+    }
+
+    let headers = [
+        "LABEL_VAL",
+        "ACTION_ID",
+        "ACTION_TYPE",
+        "REASONS",
+        "EXPIRES_AT",
+    ];
+    let mut widths = [0usize; 5];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.len();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            if cell.len() > widths[i] {
+                widths[i] = cell.len();
+            }
+        }
+    }
+    let _ = writeln!(
+        s,
+        "  {h0:<w0$}  {h1:<w1$}  {h2:<w2$}  {h3:<w3$}  {h4:<w4$}",
+        h0 = headers[0],
+        h1 = headers[1],
+        h2 = headers[2],
+        h3 = headers[3],
+        h4 = headers[4],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+        w4 = widths[4],
+    );
+    for row in &rows {
+        let _ = writeln!(
+            s,
+            "  {c0:<w0$}  {c1:<w1$}  {c2:<w2$}  {c3:<w3$}  {c4:<w4$}",
+            c0 = row[0],
+            c1 = row[1],
+            c2 = row[2],
+            c3 = row[3],
+            c4 = row[4],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+            w4 = widths[4],
+        );
+    }
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
+/// JSON renderer for `cairn moderator labels`. Returns just the
+/// `activeLabels` array — the subcommand's job is "show me labels,"
+/// so the JSON output mirrors that. Operators wanting the full
+/// envelope use `cairn moderator strikes --json`.
+pub fn format_labels_json(resp: &StrikesResponse) -> String {
+    serde_json::to_string_pretty(&resp.active_labels).expect("Vec<ActiveLabelView> serializes")
 }
 
 // ============================================================
@@ -839,5 +1026,181 @@ mod tests {
         let s = format_revoke_human(&r);
         assert!(s.contains("7"));
         assert!(s.contains("2026-04-26"));
+    }
+
+    // ---------- labels (#66) ----------
+
+    fn empty_strikes_response() -> StrikesResponse {
+        StrikesResponse {
+            current_strike_count: 0,
+            raw_total: 0,
+            decayed_count: 0,
+            revoked_count: 0,
+            good_standing: true,
+            active_suspension: None,
+            decay_window_remaining_days: None,
+            last_action_at: None,
+            active_labels: vec![],
+        }
+    }
+
+    #[test]
+    fn format_labels_human_empty_says_no_active_labels() {
+        let resp = empty_strikes_response();
+        let s = format_labels_human(&resp, "did:plc:abc");
+        assert_eq!(s, "No active labels for did:plc:abc");
+    }
+
+    #[test]
+    fn format_labels_human_takedown_no_reasons_emits_one_row() {
+        // emit_reason_labels=false at recording time → emitted action
+        // label only, reason_codes empty.
+        let mut resp = empty_strikes_response();
+        resp.active_labels.push(ActiveLabelView {
+            val: "!takedown".into(),
+            action_id: 42,
+            action_type: "takedown".into(),
+            reason_codes: vec![],
+            expires_at: None,
+        });
+        let s = format_labels_human(&resp, "did:plc:abc");
+        assert!(s.contains("Active labels for did:plc:abc"));
+        assert!(s.contains("LABEL_VAL"));
+        assert!(s.contains("!takedown"));
+        assert!(s.contains("42"));
+        assert!(s.contains("takedown"));
+        // No reason-* rows when reason_codes is empty.
+        assert!(!s.contains("reason-"));
+        // REASONS column carries `-` placeholder.
+        let row_count = s.lines().filter(|l| l.contains("!takedown")).count();
+        assert_eq!(row_count, 1);
+    }
+
+    #[test]
+    fn format_labels_human_takedown_with_two_reasons_emits_three_rows() {
+        let mut resp = empty_strikes_response();
+        resp.active_labels.push(ActiveLabelView {
+            val: "!takedown".into(),
+            action_id: 42,
+            action_type: "takedown".into(),
+            reason_codes: vec!["harassment".into(), "hate-speech".into()],
+            expires_at: None,
+        });
+        let s = format_labels_human(&resp, "did:plc:abc");
+        assert!(s.contains("!takedown"));
+        assert!(s.contains("reason-harassment"));
+        assert!(s.contains("reason-hate-speech"));
+        // REASONS column: comma-joined.
+        assert!(s.contains("harassment,hate-speech"));
+    }
+
+    #[test]
+    fn format_labels_human_temp_suspension_shows_expires_at_column() {
+        let mut resp = empty_strikes_response();
+        resp.active_labels.push(ActiveLabelView {
+            val: "!hide".into(),
+            action_id: 38,
+            action_type: "temp_suspension".into(),
+            reason_codes: vec!["spam".into()],
+            expires_at: Some("2026-05-04T12:00:00.000Z".into()),
+        });
+        let s = format_labels_human(&resp, "did:plc:abc");
+        assert!(s.contains("temp_suspension"));
+        assert!(s.contains("2026-05-04T12:00:00.000Z"));
+        // Both the action-label row and the reason-label row carry
+        // the same expiry (each row is fully self-describing).
+        let with_exp = s
+            .lines()
+            .filter(|l| l.contains("2026-05-04T12:00:00.000Z"))
+            .count();
+        assert_eq!(with_exp, 2, "action row + reason row both carry expiry");
+    }
+
+    #[test]
+    fn format_labels_human_indef_suspension_shows_dash_in_expires_at() {
+        let mut resp = empty_strikes_response();
+        resp.active_labels.push(ActiveLabelView {
+            val: "!hide".into(),
+            action_id: 38,
+            action_type: "indef_suspension".into(),
+            reason_codes: vec![],
+            expires_at: None,
+        });
+        let s = format_labels_human(&resp, "did:plc:abc");
+        assert!(s.contains("indef_suspension"));
+        // The action-label data row's trailing column is `-`.
+        let action_row = s
+            .lines()
+            .find(|l| l.contains("!hide") && l.contains("38"))
+            .expect("action row present");
+        assert!(action_row.trim_end().ends_with('-'));
+    }
+
+    #[test]
+    fn format_labels_human_multiple_actions_renders_all() {
+        let mut resp = empty_strikes_response();
+        // Most-recent first per #65's ordering.
+        resp.active_labels.push(ActiveLabelView {
+            val: "!hide".into(),
+            action_id: 50,
+            action_type: "temp_suspension".into(),
+            reason_codes: vec!["spam".into()],
+            expires_at: Some("2026-05-04T12:00:00.000Z".into()),
+        });
+        resp.active_labels.push(ActiveLabelView {
+            val: "!takedown".into(),
+            action_id: 42,
+            action_type: "takedown".into(),
+            reason_codes: vec!["hate-speech".into()],
+            expires_at: None,
+        });
+        let s = format_labels_human(&resp, "did:plc:abc");
+        // Both actions present.
+        assert!(s.contains("!hide"));
+        assert!(s.contains("!takedown"));
+        assert!(s.contains("reason-spam"));
+        assert!(s.contains("reason-hate-speech"));
+        // Order: action_id 50 (newer) appears before 42 (older) in
+        // the rendered output.
+        let pos_50 = s.find("50").expect("action 50 row present");
+        let pos_42 = s.find(" 42 ").expect("action 42 row present");
+        assert!(pos_50 < pos_42, "most-recent action renders first");
+    }
+
+    #[test]
+    fn format_labels_json_returns_only_active_labels_array() {
+        // The JSON output is the activeLabels array, not the full
+        // strikes envelope. Operators wanting the full state use
+        // `cairn moderator strikes --json`.
+        let mut resp = empty_strikes_response();
+        resp.current_strike_count = 7; // would-be-noisy field in full envelope
+        resp.active_labels.push(ActiveLabelView {
+            val: "!takedown".into(),
+            action_id: 42,
+            action_type: "takedown".into(),
+            reason_codes: vec!["spam".into()],
+            expires_at: None,
+        });
+        let json = format_labels_json(&resp);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.is_array(), "labels JSON is the array, not the envelope");
+        assert_eq!(v[0]["val"], "!takedown");
+        assert_eq!(v[0]["actionId"], 42);
+        assert_eq!(v[0]["actionType"], "takedown");
+        assert_eq!(v[0]["reasonCodes"], serde_json::json!(["spam"]));
+        // currentStrikeCount must NOT appear in the labels JSON.
+        let s = json.as_str();
+        assert!(
+            !s.contains("currentStrikeCount"),
+            "labels --json drops the strikes envelope fields"
+        );
+    }
+
+    #[test]
+    fn format_labels_json_empty_active_labels_is_empty_array() {
+        let resp = empty_strikes_response();
+        let json = format_labels_json(&resp);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, serde_json::json!([]));
     }
 }

@@ -78,6 +78,12 @@ pub(crate) struct ActiveLabelOut {
     /// `subject_actions.id` of the source action.
     #[serde(rename = "actionId")]
     pub action_id: i64,
+    /// `subject_actions.action_type` for the source row. Surfaced
+    /// so the operator CLI (#66) and other clients can render the
+    /// label set without a second lookup. `note` never appears —
+    /// notes don't emit labels.
+    #[serde(rename = "actionType")]
+    pub action_type: String,
     /// Reason codes whose reason-labels were emitted alongside the
     /// action label. Always present (may be empty).
     #[serde(rename = "reasonCodes")]
@@ -268,6 +274,7 @@ pub(crate) async fn load_active_labels(
         r#"SELECT
              id              AS "id!: i64",
              subject_uri,
+             action_type     AS "action_type!: String",
              expires_at,
              reason_codes    AS "reason_codes!: String",
              emitted_label_uri AS "emitted_label_uri!: String"
@@ -340,6 +347,7 @@ pub(crate) async fn load_active_labels(
         out.push(ActiveLabelOut {
             val: a.emitted_label_uri,
             action_id: a.id,
+            action_type: a.action_type,
             reason_codes,
             expires_at,
         });

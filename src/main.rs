@@ -438,6 +438,12 @@ enum ModeratorSub {
     /// decay-trajectory hint. HTTP-routed via
     /// `tools.cairn.admin.getSubjectStrikes`.
     Strikes(ModeratorStrikesArgs),
+    /// Show the ATProto labels cairn-mod is currently emitting
+    /// against a subject — one row per emitted label (the action
+    /// label plus one per reason code). HTTP-routed via the same
+    /// `tools.cairn.admin.getSubjectStrikes` envelope used by
+    /// `strikes`, but renders only the `activeLabels` field.
+    Labels(ModeratorLabelsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -468,6 +474,16 @@ struct ModeratorHistoryArgs {
 
 #[derive(Debug, Args)]
 struct ModeratorStrikesArgs {
+    /// Subject DID.
+    subject: String,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorLabelsArgs {
     /// Subject DID.
     subject: String,
     #[arg(long = "cairn-server")]
@@ -768,6 +784,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Moderator {
             sub: ModeratorSub::Strikes(args),
         } => run_moderator_strikes(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Labels(args),
+        } => run_moderator_labels(args).await,
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
@@ -1345,6 +1364,31 @@ async fn run_moderator_strikes(args: ModeratorStrikesArgs) -> Result<(), CliErro
         println!(
             "{}",
             moderator_action::format_strikes_human(&resp, &subject_for_msg)
+        );
+    }
+    Ok(())
+}
+
+async fn run_moderator_labels(args: ModeratorLabelsArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let subject_for_msg = args.subject.clone();
+    let resp = moderator_action::labels(
+        &mut session,
+        &path,
+        moderator_action::LabelsInput {
+            subject: args.subject,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_action::format_labels_json(&resp));
+    } else {
+        println!(
+            "{}",
+            moderator_action::format_labels_human(&resp, &subject_for_msg)
         );
     }
     Ok(())

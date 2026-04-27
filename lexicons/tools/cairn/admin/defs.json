@@ -297,6 +297,7 @@
       "required": [
         "val",
         "actionId",
+        "actionType",
         "reasonCodes"
       ],
       "properties": {
@@ -307,6 +308,16 @@
         "actionId": {
           "type": "integer",
           "description": "subject_actions.id of the action that emitted this label set. Lets clients correlate active labels with subjectAction history rows."
+        },
+        "actionType": {
+          "type": "string",
+          "description": "subject_actions.action_type for the source row (one of `takedown`, `temp_suspension`, `indef_suspension`, `warning`). Surfaced so clients can render the label set in operator-meaningful terms without a second lookup. `note` never appears here — notes don't emit labels.",
+          "knownValues": [
+            "warning",
+            "temp_suspension",
+            "indef_suspension",
+            "takedown"
+          ]
         },
         "reasonCodes": {
           "type": "array",
