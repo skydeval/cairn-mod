@@ -36,35 +36,23 @@ than Skyware; it does not try to be either.
 
 Production deployments should pin to the stable release, not the `main` branch.
 
-## Install
+## Quickstart
+
+Install:
 
 ```
 cargo install cairn-mod
 ```
 
-Produces a binary named `cairn`. For full first-deployment instructions
-(generating a signing key, configuring, bootstrapping, running, and
-the startup-time service-record verify gate), see
-[SETUP.md](SETUP.md).
+This produces a binary named `cairn`. For full deployment guidance
+(signing key generation, configuration, service-record publishing,
+service verify on startup), see [SETUP.md](SETUP.md).
 
-## Documentation
+For day-2 operational concerns (production checklist, monitoring,
+security hygiene), see [OPERATIONS.md](OPERATIONS.md).
 
-cairn-mod's docs are split by audience:
-
-- **[SETUP.md](SETUP.md)** — first-deployment guide. Prerequisites,
-  install, signing-key generation, configuration, bootstrap, run,
-  verify, and the service-record verify-on-startup gate.
-- **[OPERATIONS.md](OPERATIONS.md)** — day-2 operator content.
-  Production checklist (transport, rate limits, secrets, key
-  lifecycle, backup, monitoring, health probes, dependency
-  scanning, single-instance enforcement).
-- **[docs/moderator-cli.md](docs/moderator-cli.md)** — CLI reference.
-  Moderator membership management, session-auth flow, report
-  management workflow, and audit log queries.
-- **[cairn-design.md](cairn-design.md)** — the full design doc.
-  Threats, cryptographic details, schema, XRPC surface, audit log
-  hash chain, account moderation state model (§F20), label emission
-  system (§F21), v1.x roadmap.
+For the moderator CLI reference, see
+[docs/moderator-cli.md](docs/moderator-cli.md).
 
 ## Trust-chain disclosures
 

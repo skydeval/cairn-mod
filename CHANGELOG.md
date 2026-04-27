@@ -17,6 +17,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+## [1.5.1] — 2026-04-27
+
+> Documentation reorganization for clearer audience separation —
+> no behavior changes.
+
+### Changed
+
+- Split README.md into focused documents covering distinct
+  audiences. README.md retains discovery-tier content (project
+  pitch, status, trust-chain disclosures, architecture summary)
+  and slims to ~150 lines. New SETUP.md covers first-deployment
+  setup (install, signing key, configuration, bootstrap, service-
+  record verify). New OPERATIONS.md covers day-2 operator content
+  (production checklist, monitoring, dependency security scanning,
+  single-instance enforcement). New docs/moderator-cli.md is the
+  moderator CLI reference (membership management, login, report
+  workflow, audit log queries). Existing files (CHANGELOG,
+  CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, MAINTAINERS, LICENSE-*,
+  cairn-design.md) stay at root per their conventions. (#68)
+
 ## [1.5.0] - 2026-04-27
 
 > v1.5 "Label emission" closes the v1.4 loop: every recorded

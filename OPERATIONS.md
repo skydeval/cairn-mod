@@ -1,16 +1,12 @@
-# Operations
+# Operating cairn-mod in production
 
-Day-2 operator content for cairn-mod: production checklist, secrets
-hygiene, monitoring, health probes, dependency scanning. Walk through
-this before pointing real subscribers at the instance.
+This document covers day-2 operational concerns for a deployed
+cairn-mod instance: production-readiness checklist, monitoring, and
+security hygiene. For initial deployment, see [SETUP.md](SETUP.md).
+For the moderator CLI reference, see
+[docs/moderator-cli.md](docs/moderator-cli.md).
 
-For first-deployment setup (install, configure, bootstrap), see
-[SETUP.md](SETUP.md). For moderator-CLI workflows (managing
-moderators, reports, audit log queries), see
-[docs/moderator-cli.md](docs/moderator-cli.md). For trust-chain
-disclosures and architecture overview, see [README.md](README.md).
-
-## Production Checklist
+## Production checklist
 
 Walk through this before pointing real subscribers at the instance.
 Each item links the relevant design-doc section for deeper context.

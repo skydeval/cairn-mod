@@ -1,20 +1,15 @@
-# Setup
+# Setting up cairn-mod
 
-First-deployment guide for cairn-mod. Walks through prerequisites,
-install, signing-key generation, configuration, one-time bootstrap,
-and the startup-time service-record verify gate.
-
-For day-2 operations (production checklist, monitoring, secrets
-hygiene), see [OPERATIONS.md](OPERATIONS.md). For moderator-CLI
-workflows (managing moderators, reports, audit log queries), see
-[docs/moderator-cli.md](docs/moderator-cli.md).
-
-## Quickstart
+This guide walks through deploying a fresh cairn-mod instance from
+`cargo install` to verified service-record publishing. For day-2
+operational concerns once you're running, see
+[OPERATIONS.md](OPERATIONS.md). For the moderator CLI reference,
+see [docs/moderator-cli.md](docs/moderator-cli.md).
 
 Target: a running `cairn serve` behind a reverse proxy, published
 service record, responding to `GET /.well-known/did.json`.
 
-### Prerequisites
+## Prerequisites
 
 - **Rust 1.88+** — install via [rustup](https://rustup.rs).
 - **A DID for the labeler** — either `did:web:your.host` or
@@ -26,7 +21,7 @@ service record, responding to `GET /.well-known/did.json`.
 - **A TLS-terminating reverse proxy** — nginx or Caddy, see
   [`contrib/`](contrib/) for templates.
 
-### 1. Install
+## 1. Install
 
 ```
 cargo install cairn-mod
@@ -37,7 +32,7 @@ that ends up at `~/.cargo/bin/cairn`; operators typically copy it to
 `/usr/local/bin/cairn` for systemd deployment (see
 [`contrib/README.md`](contrib/README.md)).
 
-### 2. Generate a signing key
+## 2. Generate a signing key
 
 cairn-mod expects a 64-hex-char file containing a secp256k1 private key.
 Either of these produces one:
@@ -66,7 +61,7 @@ Publish the matching public key in the labeler's DID document at
 verification method `#atproto_label`. Consumers verifying cairn-mod's
 labels resolve the DID and extract this key.
 
-### 3. Configure
+## 3. Configure
 
 Minimal `cairn.toml`:
 
@@ -111,7 +106,7 @@ session_path = "/var/lib/cairn/operator-session.json"
 See [`contrib/`](contrib/) for the systemd + Caddy + nginx templates
 that plug into these paths.
 
-### 4. Bootstrap (one-time per deployment)
+## 4. Bootstrap (one-time per deployment)
 
 Authenticate to the operator's PDS and publish the service record:
 
@@ -134,7 +129,7 @@ Idempotent — running it when nothing is published is also a no-op.
 The next `cairn serve` after an unpublish will fail-start with exit
 13 SERVICE_RECORD_ABSENT until you republish.
 
-### 5. Run
+## 5. Run
 
 ```
 # Foreground:
@@ -144,7 +139,7 @@ cairn serve --config /etc/cairn/cairn.toml
 sudo systemctl enable --now cairn
 ```
 
-### 6. Verify
+## 6. Verify
 
 ```
 curl -sSL https://labeler.example/.well-known/did.json | jq '.verificationMethod[].id'

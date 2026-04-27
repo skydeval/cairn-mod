@@ -1,15 +1,11 @@
-# Moderator CLI Reference
+# Moderator CLI reference
 
-CLI workflows for moderators and admins running against a live
-cairn-mod instance. Covers moderator membership management, the
-session-auth flow, the report management workflow, and audit log
-queries.
-
-For first-deployment setup (install, configure, bootstrap), see
-[../SETUP.md](../SETUP.md). For day-2 operations (production
-checklist, monitoring, secrets hygiene), see
-[../OPERATIONS.md](../OPERATIONS.md). For trust-chain disclosures
-and architecture overview, see [../README.md](../README.md).
+This document is the operator-facing CLI reference for cairn-mod's
+moderator workflow: managing moderator membership, logging in,
+working with reports, and querying the audit log. For initial
+deployment, see [../SETUP.md](../SETUP.md) (at the repo root). For
+day-2 operational concerns, see [../OPERATIONS.md](../OPERATIONS.md)
+(at the repo root).
 
 ## Moderator management
 
