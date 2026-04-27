@@ -7,10 +7,10 @@
 //!   (`[label_emission]` config block, action-type → label
 //!   mapping, reason-label prefix, severity overrides). Used by
 //!   the emission core and the recorder integration. (#58)
-//!
-//! Future submodules:
-//! - `emission` — pure functions translating
-//!   [`crate::moderation::types::ActionRecord`] into
-//!   `LabelDraft`s the recorder signs and persists. (#59)
+//! - [`emission`] — pure functions translating an
+//!   [`emission::ActionForEmission`] (purpose-specific projection
+//!   of a `subject_actions` row) into [`emission::LabelDraft`]s
+//!   the recorder signs and persists. (#59)
 
+pub mod emission;
 pub mod policy;

@@ -40,6 +40,7 @@ pub use auth::{AuthConfig, AuthContext, AuthError, VerifiedCaller};
 pub use config::Config;
 pub use error::{Error, Result};
 pub use label::Label;
+pub use labels::emission::{ActionForEmission, LabelDraft};
 pub use labels::policy::{LabelEmissionPolicy, LabelSpec};
 pub use moderation::policy::StrikePolicy;
 pub use moderation::reasons::ReasonVocabulary;
