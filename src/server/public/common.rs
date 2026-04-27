@@ -31,6 +31,10 @@ pub(super) struct PublicState {
     /// for `decay_window_days` etc. Same instance the writer task
     /// + admin router hold.
     pub strike_policy: Arc<StrikePolicy>,
+    /// Cairn-mod's labeler DID. Mirrors `Config::service_did` and
+    /// `AdminConfig::service_did`. Used by the strikes endpoint
+    /// (#65) to scope `labels.src` when computing active_labels.
+    pub service_did: String,
 }
 
 /// Error taxonomy for `tools.cairn.public.*` handlers. The

@@ -169,6 +169,7 @@ where
         pool.clone(),
         auth.clone(),
         strike_policy.clone(),
+        config.service_did.clone(),
     ))
     .merge(wellknown_router())
     .merge(did_document_router(pool.clone(), config.clone()))

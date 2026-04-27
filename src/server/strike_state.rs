@@ -58,6 +58,34 @@ pub(crate) struct SubjectStrikeStateOut {
     /// unrevoked action; absent if none.
     #[serde(rename = "lastActionAt", skip_serializing_if = "Option::is_none")]
     pub last_action_at: Option<String>,
+    /// ATProto labels cairn-mod is currently emitting against this
+    /// subject. One entry per non-revoked action that emitted
+    /// labels and whose action label's most recent record is
+    /// non-negated. Empty array when nothing is active.
+    #[serde(rename = "activeLabels")]
+    pub active_labels: Vec<ActiveLabelOut>,
+}
+
+/// Per-action active-label entry. Action-centric grouping: one
+/// entry per active action carrying the action label's `val` plus
+/// the reason codes that produced its reason labels. See
+/// `lexicons/tools/cairn/admin/defs.json#activeLabel` for the
+/// wire schema.
+#[derive(Debug, Serialize)]
+pub(crate) struct ActiveLabelOut {
+    /// Action label `val` (e.g., `!takedown`).
+    pub val: String,
+    /// `subject_actions.id` of the source action.
+    #[serde(rename = "actionId")]
+    pub action_id: i64,
+    /// Reason codes whose reason-labels were emitted alongside the
+    /// action label. Always present (may be empty).
+    #[serde(rename = "reasonCodes")]
+    pub reason_codes: Vec<String>,
+    /// RFC-3339 expiry of the action's emitted labels; absent for
+    /// non-temp_suspension actions.
+    #[serde(rename = "expiresAt", skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 /// Wire shape declared in
@@ -150,10 +178,19 @@ pub(crate) async fn load_action_history(
 /// **Cache bypass invariant**: this function reads only
 /// `subject_actions` and re-runs the decay calculator (#50). The
 /// `subject_strike_state` cache table is NOT consulted, so a stale
-/// cache row can never produce a misleading read.
+/// cache row can never produce a misleading read. The `labels`
+/// table consulted by [`load_active_labels`] is the authoritative
+/// source for emitted-label state — no cache lives in front of it
+/// either.
+///
+/// `service_did` is cairn-mod's labeler DID; used to scope the
+/// `labels.src` filter when computing `active_labels` (each
+/// labeler may have signed its own records against the same
+/// subject).
 pub(crate) async fn build_strike_state_view(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     subject_did: &str,
+    service_did: &str,
     policy: &StrikePolicy,
     now: SystemTime,
 ) -> Result<SubjectStrikeStateOut> {
@@ -190,6 +227,8 @@ pub(crate) async fn build_strike_state_view(
         .map(project_active_suspension)
         .transpose()?;
 
+    let active_labels = load_active_labels(pool, subject_did, service_did).await?;
+
     Ok(SubjectStrikeStateOut {
         current_strike_count: st.current_count,
         raw_total: st.raw_total,
@@ -199,7 +238,113 @@ pub(crate) async fn build_strike_state_view(
         active_suspension,
         decay_window_remaining_days,
         last_action_at: last_action_at_rfc,
+        active_labels,
     })
+}
+
+/// Compute the subject's currently-active labels (#65, v1.5).
+/// Walks `subject_actions` for non-revoked rows that emitted an
+/// action label, then for each one verifies the most recent
+/// `labels` record for `(src=service_did, uri=subject, val=...)`
+/// is non-negated. A negation supersedes the original on the
+/// wire; cairn-mod's read endpoints reflect that supersession.
+///
+/// `expiresAt`-passed labels are still INCLUDED in the result —
+/// exp-based visibility is the consumer AppView's responsibility,
+/// and cairn-mod surfaces what it has emitted regardless. Clients
+/// that want a strictly-honored-now view filter on `expiresAt` <
+/// `now` themselves.
+///
+/// Order: most-recent-action first (descending by
+/// `subject_actions.id`). Stable for clients that want the
+/// "what's affecting me now" UX without their own sort.
+pub(crate) async fn load_active_labels(
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    subject_did: &str,
+    service_did: &str,
+) -> Result<Vec<ActiveLabelOut>> {
+    // Candidate actions: non-revoked, emitted an action label.
+    let actions = sqlx::query!(
+        r#"SELECT
+             id              AS "id!: i64",
+             subject_uri,
+             expires_at,
+             reason_codes    AS "reason_codes!: String",
+             emitted_label_uri AS "emitted_label_uri!: String"
+           FROM subject_actions
+           WHERE subject_did = ?1
+             AND revoked_at IS NULL
+             AND emitted_label_uri IS NOT NULL
+           ORDER BY id DESC"#,
+        subject_did,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::with_capacity(actions.len());
+    for a in actions {
+        let label_uri = a
+            .subject_uri
+            .clone()
+            .unwrap_or_else(|| subject_did.to_string());
+
+        // Most recent labels-table record for the (src, uri, val)
+        // tuple. If neg=true, the negation supersedes (per ATProto
+        // and per #62's revocation flow); skip the action.
+        let latest = sqlx::query_scalar!(
+            r#"SELECT neg AS "neg!: i64"
+               FROM labels
+               WHERE src = ?1 AND uri = ?2 AND val = ?3
+               ORDER BY seq DESC
+               LIMIT 1"#,
+            service_did,
+            label_uri,
+            a.emitted_label_uri,
+        )
+        .fetch_optional(pool)
+        .await?;
+        match latest {
+            Some(neg) if neg != 0 => continue, // negated → not active
+            None => continue, // no label record at all (defensive — shouldn't happen if emitted_label_uri is set)
+            _ => {}
+        }
+
+        // reason_codes column stores the input JSON array
+        // (preserving the moderator's original ordering); reuse
+        // it directly so the surface mirrors what was recorded.
+        // subject_action_reason_labels is the linkage source of
+        // truth for what was *emitted*, but in v1.5 the two are
+        // identical when emit_reason_labels = true at recording
+        // time. When false, we want the linkage rows (which will
+        // be empty) — query that table to be precise.
+        let reason_codes: Vec<String> = sqlx::query_scalar!(
+            "SELECT reason_code FROM subject_action_reason_labels
+             WHERE action_id = ?1
+             ORDER BY reason_code ASC",
+            a.id,
+        )
+        .fetch_all(pool)
+        .await?;
+
+        // a.reason_codes is also captured for forensic display;
+        // unused in this projection (we surface the linkage rows
+        // since they reflect actual emission state). Suppress
+        // the unused-binding warning explicitly.
+        let _ = a.reason_codes;
+
+        let expires_at = match a.expires_at {
+            Some(ms) => Some(rfc3339_from_epoch_ms(ms)?),
+            None => None,
+        };
+
+        out.push(ActiveLabelOut {
+            val: a.emitted_label_uri,
+            action_id: a.id,
+            reason_codes,
+            expires_at,
+        });
+    }
+    Ok(out)
 }
 
 /// Project an [`ActiveSuspension`] (decay-calculator output) into

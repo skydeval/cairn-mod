@@ -46,15 +46,21 @@ use common::PublicState;
 /// window when projecting the wire envelope. Pass the same instance
 /// the writer task and admin router hold — `serve::run` resolves
 /// once at startup and clones to each router.
+///
+/// `service_did` is cairn-mod's labeler DID. The strikes endpoint
+/// (#65) uses it to scope `labels.src` when computing
+/// `activeLabels`. Mirrors `AdminConfig::service_did`.
 pub fn public_router(
     pool: Pool<Sqlite>,
     auth: Arc<AuthContext>,
     strike_policy: crate::moderation::policy::StrikePolicy,
+    service_did: String,
 ) -> Router {
     let state = PublicState {
         pool,
         auth,
         strike_policy: Arc::new(strike_policy),
+        service_did,
     };
     // §F3-style CORS: allow any origin for browser-side callers.
     // Public endpoints are intended for AppView / web-client use;

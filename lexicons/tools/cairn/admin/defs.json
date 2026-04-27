@@ -280,6 +280,45 @@
           "type": "string",
           "format": "datetime",
           "description": "effective_at of the most recent strike-bearing unrevoked action; absent if none."
+        },
+        "activeLabels": {
+          "type": "array",
+          "description": "ATProto labels cairn-mod is currently emitting against this subject — one entry per non-revoked, non-negated action that emitted labels (#65, v1.5). Empty array when the subject has no emitted labels OR every emitted action has been revoked. Includes labels whose `expiresAt` is in the past — exp-based visibility is the consumer AppView's responsibility, and cairn-mod surfaces what it has emitted regardless. Order is most-recent-action first.",
+          "items": {
+            "type": "ref",
+            "ref": "#activeLabel"
+          }
+        }
+      }
+    },
+    "activeLabel": {
+      "type": "object",
+      "description": "Per-action active-label entry returned on subjectStrikeState.activeLabels (#65, v1.5). Action-centric: the action label's `val` plus the reason codes that produced reason-labels alongside it. To recover a reason label's `val`, prefix each `reasonCodes` entry with the operator's [label_emission].reason_label_prefix (default `reason-`).",
+      "required": [
+        "val",
+        "actionId",
+        "reasonCodes"
+      ],
+      "properties": {
+        "val": {
+          "type": "string",
+          "description": "Action label value as emitted on the wire (e.g., `!takedown`, `!hide`, `!warn`). Matches the labels table's val column for the (src, uri, val) tuple cairn-mod has signed."
+        },
+        "actionId": {
+          "type": "integer",
+          "description": "subject_actions.id of the action that emitted this label set. Lets clients correlate active labels with subjectAction history rows."
+        },
+        "reasonCodes": {
+          "type": "array",
+          "description": "Operator-vocabulary reason identifiers from [moderation_reasons] (#47) that produced reason-labels alongside the action label. Empty array when the action emitted with emit_reason_labels=false at recording time.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "RFC-3339 wall-clock the action's emitted labels stop being honored by consumer AppViews (mirrors subject_actions.expires_at). Set for temp_suspension; absent for takedown / indef_suspension. May be in the past — cairn-mod surfaces emitted state regardless of consumer-side exp filtering."
         }
       }
     },

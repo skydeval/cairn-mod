@@ -138,17 +138,22 @@ async fn spawn() -> Harness {
     .unwrap();
 
     let auth = auth_ctx();
+    let admin_cfg = AdminConfig {
+        service_did: SERVICE_DID.to_string(),
+        ..AdminConfig::default()
+    };
     let admin = admin_router(
         pool.clone(),
         writer.clone(),
         auth.clone(),
-        AdminConfig::default(),
+        admin_cfg,
         cairn_mod::StrikePolicy::defaults(),
     );
     let public = public_router(
         pool.clone(),
         auth.clone(),
         cairn_mod::StrikePolicy::defaults(),
+        SERVICE_DID.to_string(),
     );
     let router = admin.merge(public);
 
@@ -363,4 +368,191 @@ async fn public_response_matches_admin_response_for_same_subject() {
             public_resp[field], admin_resp[field]
         );
     }
+    // Cross-endpoint parity for #65's activeLabels surface.
+    assert_eq!(
+        public_resp["activeLabels"], admin_resp["activeLabels"],
+        "activeLabels diverged between public and admin endpoints"
+    );
+}
+
+// =================== activeLabels (#65, v1.5) ===================
+//
+// The user-facing surface for "what labels does cairn-mod
+// currently emit against me." Action-centric: one entry per
+// non-revoked, non-negated action that emitted labels, carrying
+// the action label's val + the reason codes whose reason-labels
+// were emitted alongside it.
+
+async fn record_warning_against_subject(h: &Harness) -> i64 {
+    let r = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "warning",
+            "reasons": ["spam"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    r.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap()
+}
+
+async fn revoke(h: &Harness, action_id: i64) {
+    let r = http()
+        .post(format!("http://{}/xrpc/{REVOKE_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, REVOKE_LXM))
+        .json(&serde_json::json!({"actionId": action_id}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "revoke status={}", r.status());
+}
+
+async fn fetch_state(h: &Harness) -> Value {
+    let resp = http()
+        .get(format!("http://{}/xrpc/{PUBLIC_LXM}", h.addr))
+        .bearer_auth(build_jwt(SUBJECT_DID, PUBLIC_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    resp.json().await.unwrap()
+}
+
+#[tokio::test]
+async fn active_labels_for_warning_recorded_under_default_suppression_is_empty() {
+    // Warning under default policy emits no labels — emitted_label_uri
+    // stays NULL, so the action is filtered out of activeLabels.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_warning_against_subject(&h).await;
+    let state = fetch_state(&h).await;
+    assert_eq!(state["activeLabels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn active_labels_for_takedown_with_two_reasons_groups_per_action() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let r = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "takedown",
+            "reasons": ["hate-speech", "harassment"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let action_id = r.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let state = fetch_state(&h).await;
+    let active = state["activeLabels"].as_array().unwrap();
+    assert_eq!(active.len(), 1, "one entry per action, reasons grouped");
+    let entry = &active[0];
+    assert_eq!(entry["val"], "!takedown");
+    assert_eq!(entry["actionId"], action_id);
+    let reasons: Vec<&str> = entry["reasonCodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["harassment", "hate-speech"],
+        "alphabetical, matching the linkage table's stored ordering"
+    );
+    // No expiresAt for non-temp_suspension.
+    assert!(entry.get("expiresAt").is_none());
+}
+
+#[tokio::test]
+async fn active_labels_for_revoked_takedown_is_empty() {
+    // Revocation negates every emitted label per #62; the latest
+    // labels record for (src, uri, val) is the negation, so the
+    // action is filtered out of activeLabels.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let action_id = record_takedown_against_subject(&h).await;
+    revoke(&h, action_id).await;
+    let state = fetch_state(&h).await;
+    assert_eq!(state["activeLabels"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn active_labels_for_temp_suspension_carries_expires_at() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let r = http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+
+    let state = fetch_state(&h).await;
+    let active = state["activeLabels"].as_array().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0]["val"], "!hide");
+    assert!(
+        active[0]["expiresAt"].as_str().is_some(),
+        "temp_suspension carries expiresAt"
+    );
+}
+
+#[tokio::test]
+async fn active_labels_orders_most_recent_action_first() {
+    // Two unrevoked takedowns at distinct subject_actions ids;
+    // the more-recent (higher id) appears first.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let first = record_takedown_against_subject(&h).await;
+    let second = record_takedown_against_subject(&h).await;
+    assert!(second > first);
+
+    let state = fetch_state(&h).await;
+    let active = state["activeLabels"].as_array().unwrap();
+    assert_eq!(active.len(), 2);
+    assert_eq!(active[0]["actionId"], second);
+    assert_eq!(active[1]["actionId"], first);
+}
+
+#[tokio::test]
+async fn active_labels_omitted_field_serialization() {
+    // expiresAt absent (skip_serializing_if) on takedown entries —
+    // pin the camelCase field name + omission shape so a future
+    // serde refactor breaks here if either is touched.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_takedown_against_subject(&h).await;
+    let state = fetch_state(&h).await;
+    let entry = &state["activeLabels"][0];
+
+    let map = entry.as_object().unwrap();
+    assert!(map.contains_key("val"));
+    assert!(map.contains_key("actionId"));
+    assert!(map.contains_key("reasonCodes"));
+    assert!(
+        !map.contains_key("expiresAt"),
+        "expiresAt is omitted on non-temp_suspension entries"
+    );
+    // Defense against accidental snake_case leak.
+    assert!(!map.contains_key("action_id"));
+    assert!(!map.contains_key("reason_codes"));
+    assert!(!map.contains_key("expires_at"));
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason_code FROM subject_action_reason_labels\n             WHERE action_id = ?1\n             ORDER BY reason_code ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason_code",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7db013d9969ad78fb3328b874b1f17aa29ca9ef3648ce4d1f06c2db28bea06a1"
+}

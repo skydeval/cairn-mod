@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT neg AS \"neg!: i64\"\n               FROM labels\n               WHERE src = ?1 AND uri = ?2 AND val = ?3\n               ORDER BY seq DESC\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "neg!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5957cf66624e4974895740f419e404a87d4bec059c59132cf59690cbf007a44a"
+}

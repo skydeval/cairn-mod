@@ -47,6 +47,7 @@ pub(super) async fn handler(
     let view = match build_strike_state_view(
         &state.pool,
         &caller_did,
+        &state.service_did,
         &state.strike_policy,
         SystemTime::now(),
     )

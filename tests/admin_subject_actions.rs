@@ -148,11 +148,18 @@ async fn spawn_with_policy(policy: cairn_mod::LabelEmissionPolicy) -> Harness {
     .await
     .unwrap();
 
+    // service_did wired into AdminConfig so #65's active_labels
+    // computation in getSubjectStrikes can scope `labels.src` to
+    // the same DID the writer signed under.
+    let admin_cfg = AdminConfig {
+        service_did: SERVICE_DID.to_string(),
+        ..AdminConfig::default()
+    };
     let router = admin_router(
         pool.clone(),
         writer.clone(),
         auth_ctx(),
-        AdminConfig::default(),
+        admin_cfg,
         cairn_mod::StrikePolicy::defaults(),
     );
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

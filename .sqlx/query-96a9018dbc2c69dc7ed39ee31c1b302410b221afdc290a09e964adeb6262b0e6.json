@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id              AS \"id!: i64\",\n             subject_uri,\n             expires_at,\n             reason_codes    AS \"reason_codes!: String\",\n             emitted_label_uri AS \"emitted_label_uri!: String\"\n           FROM subject_actions\n           WHERE subject_did = ?1\n             AND revoked_at IS NULL\n             AND emitted_label_uri IS NOT NULL\n           ORDER BY id DESC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "subject_uri",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "reason_codes!: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "emitted_label_uri!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "96a9018dbc2c69dc7ed39ee31c1b302410b221afdc290a09e964adeb6262b0e6"
+}
