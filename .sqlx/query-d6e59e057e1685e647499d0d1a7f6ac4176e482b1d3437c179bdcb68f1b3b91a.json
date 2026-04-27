@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT expires_at FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "expires_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "d6e59e057e1685e647499d0d1a7f6ac4176e482b1d3437c179bdcb68f1b3b91a"
+}

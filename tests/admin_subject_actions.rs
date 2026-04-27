@@ -1918,3 +1918,278 @@ async fn revoke_negation_signature_verifies_against_service_did_key() {
     let multibase = format_multikey("ES256K", &test_keypair().public_key_compressed());
     cairn_mod::verify_label(&multibase, &label).expect("negation signature verifies");
 }
+
+// =================== temp_suspension exp semantics (#63, v1.5) ===================
+//
+// Validation around action_type ↔ duration is shipped from v1.4
+// #51 in handle_record_action; the label's exp = expires_at
+// rule is shipped from #59/#60. This section is the explicit
+// end-to-end pinning across the full stack — recorder validation
+// errors at the input boundary, exp propagation at the wire-
+// label boundary, and the "no automatic exp on non-temp action
+// types" contract.
+//
+// Existing tests above already cover:
+//   - record_action_temp_without_duration_returns_400 (TempSuspension + None)
+//   - record_action_takedown_with_duration_returns_400 (Takedown + Some)
+//   - record_action_temp_suspension_with_duration_succeeds
+//     (action row's expires_at = effective_at + 7d, numerically)
+//   - emission_temp_suspension_carries_exp_on_all_labels
+//     (action label and reason labels share the same exp)
+// Tests below close the remaining gaps.
+
+/// Parse a Cairn-format RFC-3339 Z string (millisecond
+/// precision, UTC) back to epoch-ms. Mirrors `parse_rfc3339_ms`
+/// in src/writer.rs (which is `pub(crate)`-only) so integration
+/// tests can roundtrip without depending on internals.
+fn parse_label_exp_ms(s: &str) -> i64 {
+    use time::PrimitiveDateTime;
+    use time::format_description::FormatItem;
+    use time::macros::format_description;
+    const CTS_FORMAT: &[FormatItem<'_>] =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]");
+    let stripped = s.strip_suffix('Z').expect("trailing Z");
+    let pdt = PrimitiveDateTime::parse(stripped, &CTS_FORMAT).expect("parse cts");
+    (pdt.assume_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+async fn post_record_action(h: &Harness, body: serde_json::Value) -> reqwest::Response {
+    http()
+        .post(format!("http://{}/xrpc/{RECORD_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, RECORD_LXM))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn warning_with_duration_returns_duration_not_allowed() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "warning",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "DurationNotAllowed");
+
+    // Defense-in-depth: nothing persisted — no row, no audit, no
+    // labels.
+    let action_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM subject_actions")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(action_count, 0);
+}
+
+#[tokio::test]
+async fn note_with_duration_returns_duration_not_allowed() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "note",
+            "reasons": ["spam"],
+            "duration": "PT24H",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "DurationNotAllowed");
+}
+
+#[tokio::test]
+async fn indef_suspension_with_duration_returns_duration_not_allowed() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "indef_suspension",
+            "reasons": ["spam"],
+            "duration": "P30D",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "DurationNotAllowed");
+}
+
+#[tokio::test]
+async fn temp_suspension_accepts_hours_format_iso_duration() {
+    // Pins that v1.4's parser supports `PT{n}H` end-to-end, not
+    // just `P{n}D`. The parser unit test covers this in isolation;
+    // this test pins the integration path.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "PT24H",
+        }),
+    )
+    .await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let row = sqlx::query!(
+        "SELECT effective_at, expires_at FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row.expires_at.unwrap() - row.effective_at,
+        24 * 3600 * 1000,
+        "PT24H must produce a 24-hour expires_at delta"
+    );
+}
+
+#[tokio::test]
+async fn temp_suspension_rejects_unsupported_iso_duration() {
+    // P1Y (years) is rejected by v1.4's parser scope —
+    // suspensions are bounded; year/month granularity isn't a
+    // real moderation use case and adds calendar arithmetic
+    // complexity. Pinned end-to-end so a future relaxation has
+    // to deliberately remove this test.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P1Y",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn temp_suspension_label_exp_matches_action_expires_at_to_the_ms() {
+    // The recorder, the resolver (#59), the wire-format
+    // serializer, and the label INSERT all agree on the same
+    // wall-clock for exp. Roundtrip the label's RFC-3339 string
+    // back through the same format the writer uses and compare
+    // ms-for-ms with subject_actions.expires_at.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "temp_suspension",
+            "reasons": ["spam"],
+            "duration": "P7D",
+        }),
+    )
+    .await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let action = sqlx::query!(
+        "SELECT expires_at FROM subject_actions WHERE id = ?1",
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let expires_at_ms = action.expires_at.expect("temp_suspension has expires_at");
+
+    let labels = sqlx::query!("SELECT val, exp FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(labels.len(), 2);
+    for label in &labels {
+        let exp_str = label
+            .exp
+            .as_deref()
+            .expect("temp_suspension labels carry exp");
+        let label_exp_ms = parse_label_exp_ms(exp_str);
+        assert_eq!(
+            label_exp_ms, expires_at_ms,
+            "label {} exp ({:?}) must roundtrip to action.expires_at ({})",
+            label.val, exp_str, expires_at_ms
+        );
+    }
+}
+
+#[tokio::test]
+async fn takedown_emitted_label_has_no_exp() {
+    // Takedowns are permanent (revocation is the only path to
+    // remove them); the wire label MUST NOT carry an exp,
+    // otherwise consumer AppViews would automatically forget the
+    // takedown after that wall-clock — silent permission grant.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_takedown(&h, &["spam"]).await;
+
+    let labels = sqlx::query!("SELECT val, exp FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    for label in &labels {
+        assert!(
+            label.exp.is_none(),
+            "takedown-emitted label {} must not carry exp (got {:?})",
+            label.val,
+            label.exp
+        );
+    }
+}
+
+#[tokio::test]
+async fn indef_suspension_emitted_label_has_no_exp() {
+    // Indefinite suspensions also have no automatic expiry;
+    // revocation is the only path to remove them. Wire label
+    // MUST NOT carry exp, same reasoning as takedown.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_record_action(
+        &h,
+        serde_json::json!({
+            "subject": SUBJECT_DID,
+            "type": "indef_suspension",
+            "reasons": ["spam"],
+        }),
+    )
+    .await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+
+    let labels = sqlx::query!("SELECT val, exp FROM labels ORDER BY seq ASC")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert!(!labels.is_empty(), "indef_suspension does emit labels");
+    for label in &labels {
+        assert!(
+            label.exp.is_none(),
+            "indef_suspension-emitted label {} must not carry exp",
+            label.val
+        );
+    }
+}
