@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason FROM audit_log\n               WHERE action = 'pending_policy_action_confirmed'\n               ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6cfab42c12d0b76c87dda0db4ae093c625ac323ac8857f815c6410e500ac50b9"
+}

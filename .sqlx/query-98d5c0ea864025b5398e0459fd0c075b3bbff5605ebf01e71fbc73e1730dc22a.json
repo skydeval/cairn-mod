@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT current_strike_count AS \"c!: i64\" FROM subject_strike_state WHERE subject_did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "c!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "98d5c0ea864025b5398e0459fd0c075b3bbff5605ebf01e71fbc73e1730dc22a"
+}

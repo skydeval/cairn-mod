@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             action_type AS \"action_type!: String\",\n             effective_at AS \"effective_at!: i64\",\n             expires_at,\n             duration\n           FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "effective_at!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "expires_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "duration",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "67a2c53ed11ada2d2757f140fd5d192c64a885778d207ad2153b30cb350ee50e"
+}

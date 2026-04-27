@@ -90,6 +90,12 @@ pub(super) enum AdminError {
     ActionNotFound,
     /// Declared in lexicons/tools/cairn/admin/revokeAction.json (#51).
     ActionAlreadyRevoked,
+    /// Declared in lexicons/tools/cairn/admin/confirmPendingAction.json (#74).
+    PendingActionNotFound,
+    /// Declared in lexicons/tools/cairn/admin/confirmPendingAction.json (#74).
+    PendingAlreadyResolved,
+    /// Declared in lexicons/tools/cairn/admin/confirmPendingAction.json (#74).
+    SubjectTakendown,
     /// Declared in lexicons/tools/cairn/admin/getSubjectHistory.json
     /// + getSubjectStrikes.json (#52 / read-half of #53).
     SubjectNotFound,
@@ -226,6 +232,27 @@ impl IntoResponse for AdminError {
                 ErrorBody {
                     error: "ActionAlreadyRevoked",
                     message: "subject action is already revoked",
+                },
+            ),
+            AdminError::PendingActionNotFound => (
+                StatusCode::NOT_FOUND,
+                ErrorBody {
+                    error: "PendingActionNotFound",
+                    message: "pending policy action not found",
+                },
+            ),
+            AdminError::PendingAlreadyResolved => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "PendingAlreadyResolved",
+                    message: "pending policy action is already resolved",
+                },
+            ),
+            AdminError::SubjectTakendown => (
+                StatusCode::BAD_REQUEST,
+                ErrorBody {
+                    error: "SubjectTakendown",
+                    message: "subject is already taken down; confirm not permitted",
                 },
             ),
             AdminError::SubjectNotFound => (

@@ -136,6 +136,32 @@ pub enum Error {
     /// semantics, or surface as a domain-specific error otherwise).
     #[error("no strike-state cache row for subject {0:?}")]
     StrikeCacheMissing(String),
+
+    /// `confirmPendingAction` (§F22, #74) targeted a
+    /// `pending_policy_actions.id` that doesn't exist. Handler
+    /// surfaces this as `PendingActionNotFound` (404).
+    #[error("pending_policy_actions row not found: id={0}")]
+    PendingActionNotFound(i64),
+
+    /// `confirmPendingAction` / `dismissPendingAction` (§F22, #74)
+    /// targeted a row whose `resolution` is already non-NULL.
+    /// Handler surfaces this as `PendingAlreadyResolved` (400).
+    /// The schema trigger forbids a second NULL → non-NULL
+    /// transition; the recorder catches it before the UPDATE for a
+    /// clean lexicon error.
+    #[error("pending_policy_actions row already resolved: id={0}")]
+    PendingAlreadyResolved(i64),
+
+    /// `confirmPendingAction` (§F22, #74) was called for a subject
+    /// that already carries an unrevoked Takedown — the action
+    /// would be redundant and conceptually undefined under the
+    /// terminal-action posture. v1.6's auto-dismissal-on-takedown
+    /// (#76) should resolve all pendings on a takedown, so this
+    /// state is unreachable in steady state; the variant exists to
+    /// close the race between a takedown landing and an in-flight
+    /// confirm.
+    #[error("subject {0:?} is already taken down; confirm is not permitted")]
+    SubjectTakendown(String),
 }
 
 impl From<figment::Error> for Error {

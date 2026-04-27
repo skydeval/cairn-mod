@@ -167,6 +167,7 @@ pub const AUDIT_REASON_RETENTION_SWEEP: &str =
 pub const AUDIT_ACTION_VALUES: &[&str] = &[
     "label_applied",
     "label_negated",
+    "pending_policy_action_confirmed",
     "report_resolved",
     "reporter_flagged",
     "reporter_unflagged",
@@ -277,6 +278,17 @@ enum WriteCommand {
     /// revoked_at UPDATE, strike_state recompute, audit_log
     /// hash-chain append.
     RevokeAction(RevokeActionRequest, oneshot::Sender<Result<RevokedAction>>),
+    /// Confirm a pending policy action (§F22 / #74). Promotes the
+    /// pending row's proposed action to a real `subject_actions`
+    /// row (actor_kind='moderator', triggered_by_policy_rule
+    /// preserves the rule name as forensic provenance), emits
+    /// labels, UPDATEs the pending row's resolution columns, and
+    /// recomputes strike state — all hash-chained under one
+    /// `pending_policy_action_confirmed` audit row.
+    ConfirmPendingAction(
+        ConfirmPendingActionRequest,
+        oneshot::Sender<Result<ConfirmedPendingAction>>,
+    ),
     Shutdown(oneshot::Sender<Result<()>>),
 }
 
@@ -477,6 +489,44 @@ pub struct RevokedAction {
     pub revoked_at: String,
 }
 
+/// Request to confirm a pending policy action (§F22 / #74). The
+/// pending row's proposed action is "promoted" to a real
+/// `subject_actions` row (actor_kind='moderator'; the moderator
+/// takes responsibility by confirming) with `triggered_by_policy_rule`
+/// preserved as forensic provenance. Single-transaction: pending
+/// load + state-check, subject_actions INSERT, label emission,
+/// pending UPDATE (resolution='confirmed'), strike-state recompute,
+/// audit_log hash-chain append.
+#[derive(Debug, Clone)]
+pub struct ConfirmPendingActionRequest {
+    /// `pending_policy_actions.id` to confirm. Errors with
+    /// [`Error::PendingActionNotFound`] when the row doesn't
+    /// exist; [`Error::PendingAlreadyResolved`] when the
+    /// resolution column is already non-NULL.
+    pub pending_id: i64,
+    /// DID of the moderator confirming the pending. Becomes the
+    /// new subject_actions row's `actor_did` and the audit row's
+    /// `actor_did`, and lands on `pending_policy_actions.resolved_by_did`.
+    pub moderator_did: String,
+    /// Optional moderator-facing rationale. Stored on the new
+    /// subject_actions row's `notes` column and echoed in the audit
+    /// row's reason JSON as `moderator_note` for forensic
+    /// reconstruction.
+    pub note: Option<String>,
+}
+
+/// Result of a successful [`WriterHandle::confirm_pending_action`].
+#[derive(Debug, Clone)]
+pub struct ConfirmedPendingAction {
+    /// Inserted subject_actions row id (the materialized action).
+    pub action_id: i64,
+    /// The pending row that was just resolved (echoed for
+    /// confirmation).
+    pub pending_id: i64,
+    /// Wall-clock the confirmation took effect, as RFC-3339 Z.
+    pub resolved_at: String,
+}
+
 /// Aggregate result of a full sweep run (returned by
 /// [`WriterHandle::sweep`] after looping over batches).
 #[derive(Debug, Clone)]
@@ -635,6 +685,37 @@ impl WriterHandle {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(WriteCommand::RevokeAction(req, reply_tx))
+            .await
+            .map_err(|_| Error::Signing("writer task is shut down".into()))?;
+        reply_rx
+            .await
+            .map_err(|_| Error::Signing("writer dropped reply channel".into()))?
+    }
+
+    /// Confirm a pending policy action (§F22 / #74). The proposed
+    /// action carried on the pending row is materialized as a real
+    /// `subject_actions` row (actor_kind='moderator',
+    /// triggered_by_policy_rule preserves the rule that proposed
+    /// it), labels emit per [`crate::labels::policy::LabelEmissionPolicy`],
+    /// the pending row's resolution columns transition NULL →
+    /// 'confirmed', and the strike-state cache is recomputed — all
+    /// in one transaction under a single
+    /// `pending_policy_action_confirmed` audit row. Errors:
+    ///
+    /// - [`Error::PendingActionNotFound`] when no row matches
+    ///   `pending_id`.
+    /// - [`Error::PendingAlreadyResolved`] when the row's
+    ///   resolution column is already non-NULL.
+    /// - [`Error::SubjectTakendown`] when the subject already
+    ///   carries an unrevoked Takedown — defensive guard against
+    ///   the auto-dismissal-on-takedown race (#76).
+    pub async fn confirm_pending_action(
+        &self,
+        req: ConfirmPendingActionRequest,
+    ) -> Result<ConfirmedPendingAction> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::ConfirmPendingAction(req, reply_tx))
             .await
             .map_err(|_| Error::Signing("writer task is shut down".into()))?;
         reply_rx
@@ -913,6 +994,10 @@ impl Writer {
                         }
                         Some(WriteCommand::RevokeAction(req, reply)) => {
                             let res = self.handle_revoke_action(req).await;
+                            let _ = reply.send(res);
+                        }
+                        Some(WriteCommand::ConfirmPendingAction(req, reply)) => {
+                            let res = self.handle_confirm_pending_action(req).await;
                             let _ = reply.send(res);
                         }
                         Some(WriteCommand::Shutdown(reply)) => {
@@ -2482,6 +2567,339 @@ impl Writer {
         })
     }
 
+    /// Atomic confirmPendingAction flow (§F22 / #74). Loads the
+    /// pending row, validates state, materializes the proposed
+    /// action as a real `subject_actions` row (actor_kind =
+    /// 'moderator', triggered_by_policy_rule preserved as
+    /// provenance), emits labels, UPDATEs the pending row's
+    /// resolution columns, recomputes strike state, and writes a
+    /// hash-chained `pending_policy_action_confirmed` audit row —
+    /// all in one transaction.
+    ///
+    /// Strike values are computed at confirmation time, not at
+    /// proposal time: the moderator is the one taking
+    /// responsibility, and the subject's strike state may have
+    /// shifted since the rule fired (e.g., decay, intervening
+    /// revocations). The resulting subject_actions row's
+    /// `effective_at` and `expires_at` (for temp_suspension)
+    /// likewise anchor on `now`, not on the original triggered_at.
+    ///
+    /// No policy-evaluation re-runs against the new row: the
+    /// originating rule is already-fired (per #72's idempotency,
+    /// which gates on triggered_by_policy_rule), and rule-fan-out
+    /// from a confirmation would compound moderator-tier
+    /// authority. The single audit row reflects this single
+    /// decision.
+    async fn handle_confirm_pending_action(
+        &self,
+        req: ConfirmPendingActionRequest,
+    ) -> Result<ConfirmedPendingAction> {
+        let mut tx = self.pool.begin().await?;
+
+        // ---------- load + validate pending ----------
+        let pending = sqlx::query!(
+            r#"SELECT
+                 subject_did             AS "subject_did!: String",
+                 subject_uri,
+                 action_type             AS "action_type!: String",
+                 duration_ms,
+                 reason_codes            AS "reason_codes!: String",
+                 triggered_by_policy_rule AS "triggered_by_policy_rule!: String",
+                 resolution
+               FROM pending_policy_actions
+               WHERE id = ?1"#,
+            req.pending_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let pending = pending.ok_or(Error::PendingActionNotFound(req.pending_id))?;
+        if pending.resolution.is_some() {
+            return Err(Error::PendingAlreadyResolved(req.pending_id));
+        }
+
+        let action_type = ActionType::from_db_str(&pending.action_type).ok_or_else(|| {
+            Error::Signing(format!(
+                "pending_policy_actions row has invalid action_type {:?}",
+                pending.action_type
+            ))
+        })?;
+
+        // ---------- defensive: subject_takendown ----------
+        //
+        // #76 (auto-dismissal-on-takedown) is meant to resolve all
+        // pendings the moment a takedown lands — so reaching this
+        // path with an active takedown means a race the auto-dismiss
+        // hasn't closed yet. Reject defensively rather than
+        // materialize a redundant action under terminal-severity
+        // semantics.
+        let history = load_subject_actions_for_calc(&mut tx, &pending.subject_did).await?;
+        let subject_is_takendown = history
+            .iter()
+            .any(|a| a.action_type == ActionType::Takedown && a.revoked_at.is_none());
+        if subject_is_takendown {
+            return Err(Error::SubjectTakendown(pending.subject_did.clone()));
+        }
+
+        // ---------- decode pending fields ----------
+        let reason_codes: Vec<String> = serde_json::from_str(&pending.reason_codes)
+            .map_err(|e| Error::Signing(format!("parse pending reason_codes: {e}")))?;
+        if reason_codes.is_empty() {
+            return Err(Error::Signing(
+                "confirmPendingAction: pending row has empty reason_codes".into(),
+            ));
+        }
+
+        // Vocabulary lookup. The pending was originally created
+        // with rule.reason_codes (config-validated against
+        // [moderation_reasons] at startup per #71), so this should
+        // always resolve — but the vocabulary may have shifted
+        // since the pending was queued, so route the failure
+        // through the same ReasonNotFound surface the moderator
+        // path uses.
+        let primary = resolve_primary_reason(&reason_codes, &self.reason_vocabulary)?;
+
+        // ---------- strike calc at confirmation time ----------
+        let now_ms = epoch_ms_now();
+        let now_systemtime = epoch_ms_to_systemtime(now_ms);
+        let pre_state = calculate_strike_state(&history, &self.strike_policy, now_systemtime);
+        let strikes_at_time_of_action = pre_state.current_count;
+        let position = compute_position_in_window(&history, &self.strike_policy, now_systemtime);
+        let calc: StrikeApplication = strike_calculate(
+            strikes_at_time_of_action,
+            &primary,
+            &self.strike_policy,
+            position,
+        );
+        let (strike_base, strike_applied, was_dampened) = match action_type {
+            ActionType::Note | ActionType::Warning => (0u32, 0u32, false),
+            _ => (calc.base_weight, calc.applied, calc.was_dampened),
+        };
+
+        // ---------- effective_at / expires_at ----------
+        //
+        // Confirmation is when the action takes effect, so
+        // expires_at re-anchors on `now`. duration_ms was frozen
+        // on the pending row at proposal time (rule.duration via
+        // #71 / #73); the canonical wire shape is `PT<seconds>S`
+        // matching the policy auto-action path.
+        let effective_at = now_ms;
+        let expires_at: Option<i64> = pending.duration_ms.map(|d| effective_at + d);
+        let duration_iso: Option<String> = pending.duration_ms.map(|d| format!("PT{}S", d / 1000));
+
+        // ---------- emission drafts ----------
+        let action_for_emission = ActionForEmission {
+            action_type,
+            expires_at: expires_at.map(epoch_ms_to_systemtime),
+            subject_did: pending.subject_did.clone(),
+            subject_uri: pending.subject_uri.clone(),
+            reason_codes: reason_codes.clone(),
+            cid: None,
+        };
+        let action_drafts = resolve_action_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let reason_drafts = resolve_reason_labels(
+            &action_for_emission,
+            &self.label_emission_policy,
+            now_systemtime,
+        );
+        let emitted_labels_for_audit: Vec<serde_json::Value> = action_drafts
+            .iter()
+            .chain(reason_drafts.iter())
+            .map(|d| serde_json::json!({"val": d.val, "uri": d.uri}))
+            .collect();
+
+        // ---------- predict + audit ----------
+        let next_action_id = predict_next_subject_action_id(&mut tx).await?;
+
+        let audit_reason = build_pending_confirmed_audit_reason(
+            req.pending_id,
+            &pending.triggered_by_policy_rule,
+            next_action_id,
+            action_type,
+            &primary.identifier,
+            &reason_codes,
+            strike_base,
+            strike_applied,
+            was_dampened,
+            &emitted_labels_for_audit,
+            req.note.as_deref(),
+        );
+        let audit_target = pending
+            .subject_uri
+            .clone()
+            .unwrap_or_else(|| pending.subject_did.clone());
+        let audit_log_id = crate::audit::append::append_in_tx(
+            &mut tx,
+            &crate::audit::append::AuditRowForAppend {
+                created_at: now_ms,
+                action: "pending_policy_action_confirmed".into(),
+                actor_did: req.moderator_did.clone(),
+                target: Some(audit_target),
+                target_cid: None,
+                outcome: "success".into(),
+                reason: Some(audit_reason),
+            },
+        )
+        .await?;
+
+        // ---------- INSERT subject_actions ----------
+        //
+        // actor_kind = 'moderator' (the moderator takes
+        // responsibility by confirming); triggered_by_policy_rule
+        // preserves the rule that proposed the action — forensic
+        // provenance plus the idempotency-gate input for #72's
+        // already-fired check.
+        let action_type_str = action_type.as_db_str();
+        let was_dampened_int: i64 = if was_dampened { 1 } else { 0 };
+        let strikes_at_time_i64 = strikes_at_time_of_action as i64;
+        let strike_base_i64 = strike_base as i64;
+        let strike_applied_i64 = strike_applied as i64;
+        let reason_codes_json = serde_json::to_string(&reason_codes)
+            .map_err(|e| Error::Signing(format!("serialize reason_codes for confirm: {e}")))?;
+        let actor_kind_moderator = "moderator";
+        let inserted_id = sqlx::query_scalar!(
+            "INSERT INTO subject_actions (
+                subject_did, subject_uri, actor_did, action_type, reason_codes,
+                duration, effective_at, expires_at, notes, report_ids,
+                strike_value_base, strike_value_applied, was_dampened,
+                strikes_at_time_of_action, audit_log_id, created_at,
+                actor_kind, triggered_by_policy_rule
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+             RETURNING id",
+            pending.subject_did,
+            pending.subject_uri,
+            req.moderator_did,
+            action_type_str,
+            reason_codes_json,
+            duration_iso,
+            effective_at,
+            expires_at,
+            req.note,
+            strike_base_i64,
+            strike_applied_i64,
+            was_dampened_int,
+            strikes_at_time_i64,
+            audit_log_id,
+            now_ms,
+            actor_kind_moderator,
+            pending.triggered_by_policy_rule,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if inserted_id != next_action_id {
+            return Err(Error::Signing(format!(
+                "confirm subject_actions inserted at id {inserted_id} but predicted \
+                 {next_action_id}; audit chain captured the predicted id (corrupted)"
+            )));
+        }
+
+        // ---------- emit labels ----------
+        //
+        // Same pattern as handle_record_action and
+        // insert_policy_auto_action: action label first (its seq
+        // < reason labels'), then per-(action, reason) linkage
+        // rows. Fresh INSERT so the #64 idempotency guard is a
+        // no-op; skipped here for clarity.
+        let mut label_events: Vec<LabelEvent> =
+            Vec::with_capacity(action_drafts.len() + reason_drafts.len());
+        let mut action_label_val: Option<String> = None;
+        for draft in &action_drafts {
+            let event = self
+                .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
+                .await?;
+            if action_label_val.is_none() {
+                action_label_val = Some(draft.val.clone());
+            }
+            label_events.push(event);
+        }
+        if let Some(ref val) = action_label_val {
+            sqlx::query!(
+                "UPDATE subject_actions SET emitted_label_uri = ?1 WHERE id = ?2",
+                val,
+                inserted_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        for (draft, reason_code) in reason_drafts.iter().zip(reason_codes.iter()) {
+            let event = self
+                .sign_and_persist_label_from_draft(&mut tx, draft, effective_at)
+                .await?;
+            sqlx::query!(
+                "INSERT INTO subject_action_reason_labels
+                   (action_id, reason_code, emitted_label_uri, emitted_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                inserted_id,
+                reason_code,
+                draft.val,
+                effective_at,
+            )
+            .execute(&mut *tx)
+            .await?;
+            label_events.push(event);
+        }
+
+        // ---------- UPDATE pending: NULL → 'confirmed' ----------
+        //
+        // The schema trigger (migration 0005) permits this single
+        // NULL → non-NULL transition on resolution / resolved_at /
+        // resolved_by_did / confirmed_action_id; any other change
+        // to the row would abort. Setting all four columns
+        // together so the row's invariant
+        // ("confirmed implies confirmed_action_id non-NULL")
+        // holds at every queryable instant.
+        let confirmed_resolution = "confirmed";
+        sqlx::query!(
+            "UPDATE pending_policy_actions
+             SET resolution = ?1,
+                 resolved_at = ?2,
+                 resolved_by_did = ?3,
+                 confirmed_action_id = ?4
+             WHERE id = ?5",
+            confirmed_resolution,
+            now_ms,
+            req.moderator_did,
+            inserted_id,
+            req.pending_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // ---------- recompute strike state ----------
+        let post_history = load_subject_actions_for_calc(&mut tx, &pending.subject_did).await?;
+        let post_state = calculate_strike_state(&post_history, &self.strike_policy, now_systemtime);
+        let post_count_i64 = post_state.current_count as i64;
+        sqlx::query!(
+            "INSERT INTO subject_strike_state (subject_did, current_strike_count, last_action_at, last_recompute_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(subject_did) DO UPDATE SET
+                 current_strike_count = excluded.current_strike_count,
+                 last_action_at = excluded.last_action_at,
+                 last_recompute_at = excluded.last_recompute_at",
+            pending.subject_did,
+            post_count_i64,
+            now_ms,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+
+        // ---------- broadcast ----------
+        for event in label_events {
+            let _ = self.broadcast_tx.send(event);
+        }
+
+        Ok(ConfirmedPendingAction {
+            action_id: inserted_id,
+            pending_id: req.pending_id,
+            resolved_at: rfc3339_from_epoch_ms(now_ms)?,
+        })
+    }
+
     async fn heartbeat(&self) -> Result<()> {
         let now_ms = epoch_ms_now();
         sqlx::query!(
@@ -2739,6 +3157,30 @@ pub const AUDIT_REASON_RECORD_ACTION: &str = "subject_action_recorded: { action_
 pub const AUDIT_REASON_REVOKE_ACTION: &str =
     "subject_action_revoked: { action_id, revoked_reason }";
 
+/// Audit-log `reason` JSON schema for `pending_policy_action_confirmed`
+/// (§F22 / #74). Single audit row commits with the
+/// pending → confirmed transition: the new subject_actions INSERT,
+/// label emission, the `pending_policy_actions` resolution UPDATE,
+/// and the strike-state cache UPSERT all hash-chain together.
+///
+/// ```json
+/// {
+///   "pending_id": <i64>,
+///   "action_id": <i64>,
+///   "triggered_by_policy_rule": "<rule name>",
+///   "action_type": "<warning|note|temp_suspension|indef_suspension|takedown>",
+///   "primary_reason": "<identifier>",
+///   "reason_codes": ["<id1>", "<id2>"],
+///   "strike_value_base": <u32>,
+///   "strike_value_applied": <u32>,
+///   "was_dampened": <bool>,
+///   "emitted_labels": [{"val": "<v>", "uri": "<u>"}, ...],
+///   "moderator_note": "<free text>" | null
+/// }
+/// ```
+#[doc(alias = "audit_log.reason.pending_policy_action_confirmed")]
+pub const AUDIT_REASON_CONFIRM_PENDING_ACTION: &str = "pending_policy_action_confirmed: { pending_id, action_id, triggered_by_policy_rule, action_type, primary_reason, reason_codes, strike_value_base, strike_value_applied, was_dampened, emitted_labels, moderator_note }";
+
 /// `reporter_flagged` / `reporter_unflagged` audit reason JSON —
 /// see [`AUDIT_REASON_FLAG_REPORTER`]. Shared with the flagReporter
 /// handler (not the writer — flagReporter is a direct handler txn
@@ -2855,6 +3297,43 @@ fn build_revoke_action_audit_reason(
         "action_id": action_id,
         "revoked_reason": revoked_reason,
         "negated_labels": negated_labels,
+    })
+    .to_string()
+}
+
+/// `pending_policy_action_confirmed` audit reason JSON — see
+/// [`AUDIT_REASON_CONFIRM_PENDING_ACTION`] for the schema. Cross-
+/// references the originating pending row (`pending_id`,
+/// `triggered_by_policy_rule`) and the materialized action
+/// (`action_id`); echoes the moderator's optional `note` so
+/// forensic readers can reconstruct the rationale without joining
+/// to subject_actions.notes.
+#[allow(clippy::too_many_arguments)]
+fn build_pending_confirmed_audit_reason(
+    pending_id: i64,
+    triggered_by_policy_rule: &str,
+    action_id: i64,
+    action_type: ActionType,
+    primary_reason: &str,
+    reason_codes: &[String],
+    strike_value_base: u32,
+    strike_value_applied: u32,
+    was_dampened: bool,
+    emitted_labels: &[serde_json::Value],
+    moderator_note: Option<&str>,
+) -> String {
+    serde_json::json!({
+        "pending_id": pending_id,
+        "action_id": action_id,
+        "triggered_by_policy_rule": triggered_by_policy_rule,
+        "action_type": action_type.as_db_str(),
+        "primary_reason": primary_reason,
+        "reason_codes": reason_codes,
+        "strike_value_base": strike_value_base,
+        "strike_value_applied": strike_value_applied,
+        "was_dampened": was_dampened,
+        "emitted_labels": emitted_labels,
+        "moderator_note": moderator_note,
     })
     .to_string()
 }

@@ -1,0 +1,74 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.confirmPendingAction",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Confirm a pending policy action (§F22). The pending row's proposed action is materialized as a real `subject_actions` row (actor_kind='moderator'; the moderator takes responsibility by confirming) with the originating rule preserved on `triggered_by_policy_rule` for forensic provenance. Strike values are computed at confirmation time, label emission fires per `[label_emission]`, the pending row's resolution columns transition NULL → 'confirmed', and a single hash-chained `pending_policy_action_confirmed` audit row commits with the subject_actions INSERT, label INSERTs, pending UPDATE, and strike-state UPSERT in one transaction.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "pendingId"
+          ],
+          "properties": {
+            "pendingId": {
+              "type": "integer",
+              "description": "`pending_policy_actions.id` of the pending row to confirm."
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "Optional moderator-facing rationale for the confirmation. Stored on the resulting `subject_actions.notes` column and echoed in the audit row's `moderator_note` field."
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actionId",
+            "pendingId",
+            "resolvedAt"
+          ],
+          "properties": {
+            "actionId": {
+              "type": "integer",
+              "description": "Primary key of the inserted `subject_actions` row."
+            },
+            "pendingId": {
+              "type": "integer",
+              "description": "Echoed `pending_policy_actions.id` (now `resolution = 'confirmed'`)."
+            },
+            "resolvedAt": {
+              "type": "string",
+              "format": "datetime",
+              "description": "Wall-clock the confirmation took effect, RFC-3339 Z."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "PendingActionNotFound",
+          "description": "No `pending_policy_actions` row matches `pendingId`."
+        },
+        {
+          "name": "PendingAlreadyResolved",
+          "description": "The pending row's `resolution` column is already non-NULL (confirmed or dismissed)."
+        },
+        {
+          "name": "SubjectTakendown",
+          "description": "The subject already carries an unrevoked Takedown — confirmation is not permitted under terminal-severity semantics. Defensive against the race between a takedown landing and an in-flight confirm; auto-dismissal-on-takedown should normally have resolved this pending already."
+        },
+        {
+          "name": "InvalidReason",
+          "description": "The pending's `reason_codes` no longer resolve against the operator's `[moderation_reasons]` vocabulary (config-shifted between proposal and confirmation)."
+        }
+      ]
+    }
+  }
+}

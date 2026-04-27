@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             action_type AS \"action_type!: String\",\n             actor_kind AS \"actor_kind!: String\",\n             triggered_by_policy_rule,\n             emitted_label_uri\n           FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_kind!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "triggered_by_policy_rule",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "emitted_label_uri",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "af644be4070fc57fd80fbddd8670c01c3c84a20320c454c2dd39c79010068c7c"
+}

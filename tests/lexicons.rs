@@ -84,6 +84,7 @@ fn procedures_have_input_queries_have_parameters() {
         "retentionSweep",
         "recordAction",
         "revokeAction",
+        "confirmPendingAction",
     ]);
     let queries: HashSet<&str> = HashSet::from([
         "listLabels",
@@ -232,6 +233,10 @@ fn declared_error_names_are_from_known_set() {
         "ActionNotFound",
         "ActionAlreadyRevoked",
         "SubjectNotFound",
+        // §F22 / #74 pending-action resolution errors:
+        "PendingActionNotFound",
+        "PendingAlreadyResolved",
+        "SubjectTakendown",
         // ModeratorNotFound is reserved but not currently emitted — if
         // an endpoint begins emitting it, add here + to lexicons/README.md.
     ]);
@@ -289,6 +294,7 @@ fn expected_endpoint_files_all_present() {
         "revokeAction",
         "getSubjectHistory",
         "getSubjectStrikes",
+        "confirmPendingAction",
     ]);
     let present: HashSet<String> = all_files()
         .iter()

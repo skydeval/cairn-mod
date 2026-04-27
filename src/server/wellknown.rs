@@ -73,6 +73,7 @@ pub const LEXICON_NSID_PREFIX_PUBLIC: &str = "tools.cairn.public";
 /// accidental file addition or removal surfaces immediately.
 pub const EXPECTED_LEXICON_STEMS: &[&str] = &[
     "applyLabel",
+    "confirmPendingAction",
     "defs",
     "flagReporter",
     "getAuditLog",

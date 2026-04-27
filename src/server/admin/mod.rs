@@ -19,6 +19,7 @@ use crate::writer::WriterHandle;
 mod apply_label;
 mod audit_view;
 mod common;
+mod confirm_pending_action;
 mod flag_reporter;
 mod get_audit_log;
 mod get_report;
@@ -163,6 +164,10 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.getSubjectStrikes",
             get(get_subject_strikes::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.confirmPendingAction",
+            post(confirm_pending_action::handler),
         )
         .layer(Extension(state))
 }

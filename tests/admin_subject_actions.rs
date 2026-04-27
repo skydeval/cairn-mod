@@ -2535,3 +2535,397 @@ async fn rule_does_not_re_fire_while_window_closed() {
             .unwrap();
     assert_eq!(auto_count, 1, "rule fired once, no re-fire");
 }
+
+// =================== confirmPendingAction (#74, v1.6) ===================
+//
+// Moderator-tier flow that promotes a `pending_policy_actions` row
+// (created by a mode=flag rule firing) to a real `subject_actions`
+// row. Tests pin the cross-stack contract: validation → audit log
+// (single hash-chained `pending_policy_action_confirmed` row) →
+// labels → strike-state cache → pending UPDATE.
+
+const CONFIRM_PENDING_LXM: &str = "tools.cairn.admin.confirmPendingAction";
+
+fn flag_temp_suspension_rule(name: &str, threshold: i64, duration: Duration) -> PolicyRule {
+    PolicyRule {
+        name: name.to_string(),
+        threshold_strikes: threshold,
+        action_type: cairn_mod::moderation::types::ActionType::TempSuspension,
+        mode: PolicyMode::Flag,
+        duration: Some(duration),
+        reason_codes: vec!["spam".to_string()],
+    }
+}
+
+fn flag_takedown_rule(name: &str, threshold: i64) -> PolicyRule {
+    PolicyRule {
+        name: name.to_string(),
+        threshold_strikes: threshold,
+        action_type: cairn_mod::moderation::types::ActionType::Takedown,
+        mode: PolicyMode::Flag,
+        duration: None,
+        reason_codes: vec!["spam".to_string()],
+    }
+}
+
+/// Spin up a harness with a single flag-mode rule, run one
+/// precipitating temp_suspension to materialize a pending row,
+/// and return (harness, pending_id).
+async fn spawn_with_flag_rule_and_trigger(rule: PolicyRule) -> (Harness, i64) {
+    let policy = policy_with_rules(vec![rule]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let pending_id = sqlx::query_scalar!(r#"SELECT id AS "id!: i64" FROM pending_policy_actions"#)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    (h, pending_id)
+}
+
+async fn post_confirm_pending(
+    h: &Harness,
+    actor_did: &str,
+    body: serde_json::Value,
+) -> reqwest::Response {
+    http()
+        .post(format!("http://{}/xrpc/{CONFIRM_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(actor_did, CONFIRM_PENDING_LXM))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn confirm_pending_action_no_auth_returns_401() {
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{CONFIRM_PENDING_LXM}", h.addr))
+        .json(&serde_json::json!({"pendingId": pending_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn confirm_pending_action_with_origin_header_returns_403() {
+    // Admin endpoints reject any request bearing an Origin header
+    // (browser CORS posture), regardless of auth state.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = http()
+        .post(format!("http://{}/xrpc/{CONFIRM_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, CONFIRM_PENDING_LXM))
+        .header("Origin", "https://example.com")
+        .json(&serde_json::json!({"pendingId": pending_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn confirm_pending_action_unknown_pending_returns_404() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": 99_999})).await;
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "PendingActionNotFound");
+}
+
+#[tokio::test]
+async fn confirm_pending_action_already_resolved_returns_400() {
+    // First confirm succeeds; second confirm on the same pending
+    // row hits the resolution-already-set check.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let first =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(
+        first.status().is_success(),
+        "first confirm: {}",
+        first.status()
+    );
+    let second =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert_eq!(second.status(), 400);
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"], "PendingAlreadyResolved");
+}
+
+#[tokio::test]
+async fn confirm_pending_action_subject_takendown_returns_400() {
+    // Race-closing defensive check: pending exists, then a takedown
+    // lands (auto-dismissal-on-takedown #76 isn't shipped yet, so
+    // the pending stays pending), and the confirm refuses because
+    // the subject is now terminal.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    record_takedown(&h, &["hate-speech"]).await;
+
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "SubjectTakendown");
+
+    // Pending row stays unresolved — failure rolls back nothing
+    // because nothing was written.
+    let resolution: Option<String> = sqlx::query_scalar!(
+        "SELECT resolution FROM pending_policy_actions WHERE id = ?1",
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(resolution.is_none());
+}
+
+#[tokio::test]
+async fn confirm_pending_action_happy_path_materializes_subject_action() {
+    // Happy path: an indef_suspension pending → confirm produces a
+    // moderator-attributed subject_actions row carrying the
+    // originating rule's name on triggered_by_policy_rule (forensic
+    // provenance), and the pending row's resolution columns
+    // transition to confirmed with confirmed_action_id linkage.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    let action_id = body["actionId"].as_i64().unwrap();
+    assert_eq!(body["pendingId"].as_i64().unwrap(), pending_id);
+    assert!(body["resolvedAt"].as_str().unwrap().ends_with('Z'));
+
+    // subject_actions: precipitating temp_suspension + the new
+    // confirmed indef_suspension. The new row is moderator-
+    // attributed but carries the rule name on
+    // triggered_by_policy_rule.
+    let rows = sqlx::query!(
+        r#"SELECT
+             id AS "id!: i64",
+             action_type AS "action_type!: String",
+             actor_kind AS "actor_kind!: String",
+             actor_did AS "actor_did!: String",
+             triggered_by_policy_rule
+           FROM subject_actions ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].id, action_id);
+    assert_eq!(rows[1].action_type, "indef_suspension");
+    assert_eq!(rows[1].actor_kind, "moderator");
+    assert_eq!(rows[1].actor_did, ADMIN_DID);
+    assert_eq!(
+        rows[1].triggered_by_policy_rule.as_deref(),
+        Some("flag_at_1"),
+        "rule name preserved as forensic provenance through pending → confirmed"
+    );
+
+    // pending: resolution='confirmed', linkage set.
+    let pending = sqlx::query!(
+        r#"SELECT
+             resolution,
+             resolved_at,
+             resolved_by_did,
+             confirmed_action_id
+           FROM pending_policy_actions WHERE id = ?1"#,
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending.resolution.as_deref(), Some("confirmed"));
+    assert!(pending.resolved_at.is_some());
+    assert_eq!(pending.resolved_by_did.as_deref(), Some(ADMIN_DID));
+    assert_eq!(pending.confirmed_action_id, Some(action_id));
+}
+
+#[tokio::test]
+async fn confirm_pending_action_recomputes_strike_state() {
+    // Confirming a strike-bearing action (indef_suspension on
+    // 'spam' base_weight=2) increases the cached strike count.
+    // Pre-confirm the cache reflects only the precipitating
+    // temp_suspension's contribution.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let pre: i64 = sqlx::query_scalar!(
+        r#"SELECT current_strike_count AS "c!: i64" FROM subject_strike_state WHERE subject_did = ?1"#,
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+
+    let post: i64 = sqlx::query_scalar!(
+        r#"SELECT current_strike_count AS "c!: i64" FROM subject_strike_state WHERE subject_did = ?1"#,
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(
+        post > pre,
+        "confirm of strike-bearing action raised count: pre={pre} post={post}"
+    );
+}
+
+#[tokio::test]
+async fn confirm_pending_action_temp_suspension_anchors_expires_at_to_now() {
+    // Pending-side duration_ms (frozen at proposal time) re-anchors
+    // on confirmation: expires_at = effective_at + duration_ms,
+    // not triggered_at + duration_ms. The materialized
+    // subject_actions row's effective_at == created_at == now;
+    // expires_at is exactly that plus the rule's duration.
+    let rule = flag_temp_suspension_rule("flag_temp", 1, Duration::from_secs(86_400));
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(rule).await;
+
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let row = sqlx::query!(
+        r#"SELECT
+             action_type AS "action_type!: String",
+             effective_at AS "effective_at!: i64",
+             expires_at,
+             duration
+           FROM subject_actions WHERE id = ?1"#,
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.action_type, "temp_suspension");
+    let expires_at = row.expires_at.expect("temp_suspension has expires_at");
+    let delta_ms = expires_at - row.effective_at;
+    assert_eq!(
+        delta_ms, 86_400_000,
+        "expires_at - effective_at == duration_ms (1 day)"
+    );
+    assert_eq!(row.duration.as_deref(), Some("PT86400S"));
+}
+
+#[tokio::test]
+async fn confirm_pending_action_writes_audit_with_pending_xref() {
+    // Single hash-chained audit row of action =
+    // 'pending_policy_action_confirmed'. Cross-references
+    // pending_id, action_id, the originating rule, and replicates
+    // the action shape (type, primary_reason, strike values,
+    // emitted_labels) for forensic reconstruction.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let audit_row = sqlx::query!(
+        r#"SELECT actor_did AS "actor_did!: String", reason
+           FROM audit_log
+           WHERE action = 'pending_policy_action_confirmed'
+           ORDER BY id DESC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_row.actor_did, ADMIN_DID);
+    let reason: Value = serde_json::from_str(audit_row.reason.as_deref().unwrap()).unwrap();
+    assert_eq!(reason["pending_id"].as_i64().unwrap(), pending_id);
+    assert_eq!(reason["action_id"].as_i64().unwrap(), action_id);
+    assert_eq!(reason["triggered_by_policy_rule"], "flag_at_1");
+    assert_eq!(reason["action_type"], "indef_suspension");
+    assert_eq!(reason["primary_reason"], "spam");
+    assert!(reason["emitted_labels"].is_array());
+}
+
+#[tokio::test]
+async fn confirm_pending_action_note_echoed_to_action_and_audit() {
+    // Optional moderator note lands on subject_actions.notes AND
+    // is echoed into the audit row's reason JSON as
+    // moderator_note for forensic reconstruction.
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(flag_indef_rule("flag_at_1", 1)).await;
+    let resp = post_confirm_pending(
+        &h,
+        ADMIN_DID,
+        serde_json::json!({"pendingId": pending_id, "note": "spam confirmed by mod"}),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let notes: Option<String> =
+        sqlx::query_scalar!("SELECT notes FROM subject_actions WHERE id = ?1", action_id,)
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(notes.as_deref(), Some("spam confirmed by mod"));
+
+    let reason: Value = serde_json::from_str(
+        sqlx::query_scalar!(
+            r#"SELECT reason FROM audit_log
+               WHERE action = 'pending_policy_action_confirmed'
+               ORDER BY id DESC LIMIT 1"#,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+        .as_deref()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(reason["moderator_note"], "spam confirmed by mod");
+}
+
+#[tokio::test]
+async fn confirm_pending_action_takedown_emits_hide_label() {
+    // Confirming a takedown pending materializes a takedown row
+    // and emits the !hide action label per the default
+    // [label_emission] mapping. The resulting subject_actions row
+    // carries actor_kind='moderator' (the moderator confirmed)
+    // and triggered_by_policy_rule preserves the rule.
+    let rule = flag_takedown_rule("flag_takedown", 1);
+    let (h, pending_id) = spawn_with_flag_rule_and_trigger(rule).await;
+
+    let resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(resp.status().is_success());
+    let action_id = resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    let row = sqlx::query!(
+        r#"SELECT
+             action_type AS "action_type!: String",
+             actor_kind AS "actor_kind!: String",
+             triggered_by_policy_rule,
+             emitted_label_uri
+           FROM subject_actions WHERE id = ?1"#,
+        action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.action_type, "takedown");
+    assert_eq!(row.actor_kind, "moderator");
+    assert_eq!(
+        row.triggered_by_policy_rule.as_deref(),
+        Some("flag_takedown"),
+    );
+    assert_eq!(
+        row.emitted_label_uri.as_deref(),
+        Some("!takedown"),
+        "takedown emits the !takedown action label by default",
+    );
+}
