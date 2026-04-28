@@ -2667,8 +2667,7 @@ async fn confirm_pending_action_subject_takendown_returns_400() {
     let h = spawn().await;
     grant_role(&h.pool, ADMIN_DID, "admin").await;
     let takedown_id = record_takedown(&h, &["hate-speech"]).await;
-    let pending_id =
-        insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
+    let pending_id = insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
 
     let resp =
         post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
@@ -3168,8 +3167,7 @@ async fn dismiss_pending_action_against_takendown_subject_succeeds() {
     let h = spawn().await;
     grant_role(&h.pool, ADMIN_DID, "admin").await;
     let takedown_id = record_takedown(&h, &["hate-speech"]).await;
-    let pending_id =
-        insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
+    let pending_id = insert_pending_row(&h, "rule_race", "indef_suspension", takedown_id).await;
 
     let resp =
         post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
