@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM pending_policy_actions WHERE subject_did = ?1) AS \"exists!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "exists!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8d58f41db28b7d1862265f697fd52dd2b0b6d8ada5d5f43efcbeb62817549f3f"
+}

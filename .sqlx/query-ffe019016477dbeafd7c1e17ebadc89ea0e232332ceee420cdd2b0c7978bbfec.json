@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pending_policy_actions (\n            subject_did, action_type, reason_codes,\n            triggered_by_policy_rule, triggered_at, triggering_action_id,\n            resolution, resolved_at, resolved_by_did, confirmed_action_id\n         ) VALUES (?1, ?2, '[\"spam\"]', ?3, 0, ?4, ?5, ?6, ?7, ?8)\n         RETURNING id AS \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "ffe019016477dbeafd7c1e17ebadc89ea0e232332ceee420cdd2b0c7978bbfec"
+}

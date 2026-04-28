@@ -1,0 +1,35 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.getPendingAction",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Fetch a single pending policy action by id (§F22). Returns the full row including resolution state and any cross-references (`triggeringActionId` to the precipitating subject_actions row; `confirmedActionId` to the materialized action when resolution is 'confirmed'). Mod or Admin role.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "pendingId"
+        ],
+        "properties": {
+          "pendingId": {
+            "type": "integer",
+            "description": "pending_policy_actions row primary key."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "ref",
+          "ref": "tools.cairn.admin.defs#pendingAction"
+        }
+      },
+      "errors": [
+        {
+          "name": "PendingActionNotFound",
+          "description": "No pending_policy_actions row matches `pendingId`."
+        }
+      ]
+    }
+  }
+}

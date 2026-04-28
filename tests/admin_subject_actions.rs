@@ -3654,3 +3654,602 @@ async fn cascade_does_not_perturb_strike_state_for_dismissed_pendings() {
         "takedown contributes a strike; pendings do not"
     );
 }
+
+// =================== listPendingActions / getPendingAction (#77, v1.6) ===================
+//
+// Read surface for `pending_policy_actions`. listPendingActions
+// is a paginated list (Mod-or-Admin) with optional `subject` and
+// `resolution` filters; getPendingAction fetches a single row by
+// id. Both run as direct sqlx queries against the pool — no
+// writer task involvement.
+
+const LIST_PENDING_LXM: &str = "tools.cairn.admin.listPendingActions";
+const GET_PENDING_LXM: &str = "tools.cairn.admin.getPendingAction";
+
+/// Insert a pending row with arbitrary subject + resolution
+/// fields. The schema's BEFORE-UPDATE trigger doesn't fire on
+/// INSERT, so any combination of resolution columns is allowed
+/// here — useful for setting up confirmed/dismissed test
+/// fixtures without weaving through the write paths.
+#[allow(clippy::too_many_arguments)]
+async fn insert_pending_full(
+    h: &Harness,
+    subject_did: &str,
+    rule_name: &str,
+    action_type: &str,
+    triggering_action_id: i64,
+    resolution: Option<&str>,
+    resolved_at: Option<i64>,
+    resolved_by_did: Option<&str>,
+    confirmed_action_id: Option<i64>,
+) -> i64 {
+    sqlx::query_scalar!(
+        r#"INSERT INTO pending_policy_actions (
+            subject_did, action_type, reason_codes,
+            triggered_by_policy_rule, triggered_at, triggering_action_id,
+            resolution, resolved_at, resolved_by_did, confirmed_action_id
+         ) VALUES (?1, ?2, '["spam"]', ?3, 0, ?4, ?5, ?6, ?7, ?8)
+         RETURNING id AS "id!: i64""#,
+        subject_did,
+        action_type,
+        rule_name,
+        triggering_action_id,
+        resolution,
+        resolved_at,
+        resolved_by_did,
+        confirmed_action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap()
+}
+
+// ---- listPendingActions ----
+
+#[tokio::test]
+async fn list_pending_actions_no_auth_returns_401() {
+    let h = spawn().await;
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn list_pending_actions_with_origin_header_returns_403() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .header("Origin", "https://example.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn list_pending_actions_mod_role_authorized() {
+    // listPendingActions is Mod-or-Admin (not admin-only); any
+    // signed-in moderator can review the queue.
+    let h = spawn().await;
+    grant_role(&h.pool, MOD_DID, "mod").await;
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(MOD_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "mod role must be authorized: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn list_pending_actions_empty_returns_empty_list_no_cursor() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["actions"].as_array().unwrap().len(), 0);
+    assert!(body.get("cursor").is_none() || body["cursor"].is_null());
+}
+
+#[tokio::test]
+async fn list_pending_actions_default_resolution_returns_unresolved_only() {
+    // Default `resolution` is 'pending' → only NULL-resolution
+    // rows surface; confirmed/dismissed rows are filtered out.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    insert_pending_row(&h, "rule_open", "indef_suspension", warn_action_id).await;
+    insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_confirmed",
+        "warning",
+        warn_action_id,
+        Some("confirmed"),
+        Some(1_000),
+        Some(ADMIN_DID),
+        Some(warn_action_id),
+    )
+    .await;
+    insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_dismissed",
+        "temp_suspension",
+        warn_action_id,
+        Some("dismissed"),
+        Some(2_000),
+        Some(ADMIN_DID),
+        None,
+    )
+    .await;
+
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "default filter is resolution=pending");
+    assert_eq!(actions[0]["resolution"], "pending");
+    assert_eq!(actions[0]["triggeredByPolicyRule"], "rule_open");
+}
+
+#[tokio::test]
+async fn list_pending_actions_orders_by_id_desc() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let p1 = insert_pending_row(&h, "rule_a", "warning", warn_action_id).await;
+    let p2 = insert_pending_row(&h, "rule_b", "warning", warn_action_id).await;
+    let p3 = insert_pending_row(&h, "rule_c", "warning", warn_action_id).await;
+
+    let resp = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let ids: Vec<i64> = body["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids, vec![p3, p2, p1], "newest-first ordering");
+}
+
+#[tokio::test]
+async fn list_pending_actions_subject_filter_returns_only_matching() {
+    let other_subject = "did:plc:other00000000000000000000";
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    insert_pending_row(&h, "rule_a", "warning", warn_action_id).await;
+    insert_pending_full(
+        &h,
+        other_subject,
+        "rule_b",
+        "warning",
+        warn_action_id,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["subjectDid"], SUBJECT_DID);
+}
+
+#[tokio::test]
+async fn list_pending_actions_subject_filter_no_rows_returns_404() {
+    // SubjectNotFound when the `subject` filter is set and the
+    // subject has never had a pending row — distinct from "the
+    // resolution filter excluded them all".
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "SubjectNotFound");
+}
+
+#[tokio::test]
+async fn list_pending_actions_resolution_confirmed_returns_only_confirmed() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    insert_pending_row(&h, "rule_open", "warning", warn_action_id).await;
+    let confirmed_id = insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_confirmed",
+        "indef_suspension",
+        warn_action_id,
+        Some("confirmed"),
+        Some(1_000),
+        Some(ADMIN_DID),
+        Some(warn_action_id),
+    )
+    .await;
+    insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_dismissed",
+        "warning",
+        warn_action_id,
+        Some("dismissed"),
+        Some(2_000),
+        Some(ADMIN_DID),
+        None,
+    )
+    .await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?resolution=confirmed",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["id"].as_i64().unwrap(), confirmed_id);
+    assert_eq!(actions[0]["resolution"], "confirmed");
+    assert_eq!(
+        actions[0]["confirmedActionId"].as_i64().unwrap(),
+        warn_action_id
+    );
+}
+
+#[tokio::test]
+async fn list_pending_actions_resolution_dismissed_returns_only_dismissed() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    insert_pending_row(&h, "rule_open", "warning", warn_action_id).await;
+    let dismissed_id = insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_dismissed",
+        "indef_suspension",
+        warn_action_id,
+        Some("dismissed"),
+        Some(2_000),
+        Some(ADMIN_DID),
+        None,
+    )
+    .await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?resolution=dismissed",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["id"].as_i64().unwrap(), dismissed_id);
+    assert_eq!(actions[0]["resolution"], "dismissed");
+    // Dismissed rows never link forward to a materialized action.
+    assert!(actions[0].get("confirmedActionId").is_none());
+}
+
+#[tokio::test]
+async fn list_pending_actions_invalid_resolution_returns_400() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?resolution=all",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "InvalidRequest");
+}
+
+#[tokio::test]
+async fn list_pending_actions_pagination_yields_disjoint_pages() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let mut all_ids = Vec::new();
+    for i in 0..5 {
+        let id = insert_pending_row(&h, &format!("rule_{i}"), "warning", warn_action_id).await;
+        all_ids.push(id);
+    }
+    all_ids.reverse(); // newest-first to match the wire ordering
+
+    // Page 1: limit=2 → 2 rows + cursor.
+    let r1 = http()
+        .get(format!("http://{}/xrpc/{LIST_PENDING_LXM}?limit=2", h.addr))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let b1: Value = r1.json().await.unwrap();
+    let cursor1 = b1["cursor"].as_str().expect("cursor present").to_string();
+    let ids1: Vec<i64> = b1["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids1, all_ids[0..2].to_vec());
+
+    // Page 2 with cursor.
+    let r2 = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?limit=2&cursor={cursor1}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let b2: Value = r2.json().await.unwrap();
+    let cursor2 = b2["cursor"].as_str().expect("cursor present").to_string();
+    let ids2: Vec<i64> = b2["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids2, all_ids[2..4].to_vec());
+
+    // Page 3: 1 row, no cursor (last page).
+    let r3 = http()
+        .get(format!(
+            "http://{}/xrpc/{LIST_PENDING_LXM}?limit=2&cursor={cursor2}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, LIST_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let b3: Value = r3.json().await.unwrap();
+    let ids3: Vec<i64> = b3["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(ids3, all_ids[4..5].to_vec());
+    assert!(b3.get("cursor").is_none() || b3["cursor"].is_null());
+}
+
+// ---- getPendingAction ----
+
+#[tokio::test]
+async fn get_pending_action_no_auth_returns_401() {
+    let h = spawn().await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId=1",
+            h.addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn get_pending_action_unknown_pending_returns_404() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId=99999",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, GET_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "PendingActionNotFound");
+}
+
+#[tokio::test]
+async fn get_pending_action_returns_unresolved_pending_full_shape() {
+    // Happy path: an unresolved pending renders with every
+    // required field, durationIso when applicable, and resolution
+    // = "pending" with absent resolvedAt / resolvedByDid /
+    // confirmedActionId.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let pending_id =
+        insert_pending_row(&h, "rule_target", "indef_suspension", warn_action_id).await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId={pending_id}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, GET_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["id"].as_i64().unwrap(), pending_id);
+    assert_eq!(body["subjectDid"], SUBJECT_DID);
+    assert_eq!(body["actionType"], "indef_suspension");
+    assert_eq!(body["triggeredByPolicyRule"], "rule_target");
+    assert_eq!(body["triggeringActionId"].as_i64().unwrap(), warn_action_id);
+    assert_eq!(body["reasonCodes"][0], "spam");
+    assert_eq!(body["resolution"], "pending");
+    assert!(body["triggeredAt"].as_str().unwrap().ends_with('Z'));
+    // indef_suspension carries no duration.
+    assert!(body.get("durationIso").is_none());
+    // Unresolved → no resolution-side fields.
+    assert!(body.get("resolvedAt").is_none());
+    assert!(body.get("resolvedByDid").is_none());
+    assert!(body.get("confirmedActionId").is_none());
+}
+
+#[tokio::test]
+async fn get_pending_action_returns_confirmed_pending_with_action_id() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let pending_id = insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_target",
+        "indef_suspension",
+        warn_action_id,
+        Some("confirmed"),
+        Some(123_456),
+        Some(ADMIN_DID),
+        Some(warn_action_id),
+    )
+    .await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId={pending_id}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, GET_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["resolution"], "confirmed");
+    assert_eq!(body["resolvedByDid"], ADMIN_DID);
+    assert_eq!(
+        body["confirmedActionId"].as_i64().unwrap(),
+        warn_action_id,
+        "confirmed pendings link forward to the materialized action"
+    );
+    assert!(body["resolvedAt"].as_str().unwrap().ends_with('Z'));
+}
+
+#[tokio::test]
+async fn get_pending_action_returns_dismissed_pending_no_confirmed_action_id() {
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let pending_id = insert_pending_full(
+        &h,
+        SUBJECT_DID,
+        "rule_target",
+        "warning",
+        warn_action_id,
+        Some("dismissed"),
+        Some(123_456),
+        Some(ADMIN_DID),
+        None,
+    )
+    .await;
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId={pending_id}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, GET_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["resolution"], "dismissed");
+    assert_eq!(body["resolvedByDid"], ADMIN_DID);
+    assert!(
+        body.get("confirmedActionId").is_none(),
+        "dismissed pendings never link to a materialized action"
+    );
+}
+
+#[tokio::test]
+async fn get_pending_action_temp_suspension_renders_duration_iso() {
+    // Pendings whose proposed action is temp_suspension carry a
+    // duration_ms in storage; the wire shape projects it to an
+    // ISO-8601 string under `durationIso`.
+    let h = spawn().await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+    let warn_action_id = record_warning(&h, &["spam"]).await;
+    let pending_id = sqlx::query_scalar!(
+        r#"INSERT INTO pending_policy_actions (
+            subject_did, action_type, duration_ms, reason_codes,
+            triggered_by_policy_rule, triggered_at, triggering_action_id
+         ) VALUES (?1, 'temp_suspension', 86400000, '["spam"]', 'rule_temp', 0, ?2)
+         RETURNING id AS "id!: i64""#,
+        SUBJECT_DID,
+        warn_action_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{GET_PENDING_LXM}?pendingId={pending_id}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, GET_PENDING_LXM))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["actionType"], "temp_suspension");
+    assert_eq!(
+        body["durationIso"], "PT86400S",
+        "1 day in canonical PT<seconds>S form"
+    );
+}

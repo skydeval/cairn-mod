@@ -23,14 +23,17 @@ mod confirm_pending_action;
 mod dismiss_pending_action;
 mod flag_reporter;
 mod get_audit_log;
+mod get_pending_action;
 mod get_report;
 mod get_subject_history;
 mod get_subject_strikes;
 mod get_trust_chain;
 mod list_audit_log;
 mod list_labels;
+mod list_pending_actions;
 mod list_reports;
 mod negate_label;
+mod pending_action_view;
 mod record_action;
 mod report_view;
 mod resolve_report;
@@ -173,6 +176,14 @@ pub fn admin_router(
         .route(
             "/xrpc/tools.cairn.admin.dismissPendingAction",
             post(dismiss_pending_action::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.listPendingActions",
+            get(list_pending_actions::handler),
+        )
+        .route(
+            "/xrpc/tools.cairn.admin.getPendingAction",
+            get(get_pending_action::handler),
         )
         .layer(Extension(state))
 }

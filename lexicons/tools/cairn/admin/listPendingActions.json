@@ -1,0 +1,68 @@
+{
+  "lexicon": 1,
+  "id": "tools.cairn.admin.listPendingActions",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "List pending policy actions queued for moderator review (§F22). Newest-first by id, with opaque cursor pagination. Optional filters narrow to one subject and/or one resolution state. Mod or Admin role.",
+      "parameters": {
+        "type": "params",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "Account DID. When set, only pendings against this subject are returned. Returns SubjectNotFound (404) when the subject has no pending_policy_actions row at all (distinct from 'has rows but filter excluded them')."
+          },
+          "resolution": {
+            "type": "string",
+            "knownValues": [
+              "pending",
+              "confirmed",
+              "dismissed"
+            ],
+            "default": "pending",
+            "description": "Resolution-state filter. Defaults to 'pending' (only unresolved rows — the moderator review queue). 'confirmed' / 'dismissed' surface historical resolutions."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 250,
+            "default": 50
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination cursor from a prior response."
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "actions"
+          ],
+          "properties": {
+            "actions": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "tools.cairn.admin.defs#pendingAction"
+              }
+            },
+            "cursor": {
+              "type": "string",
+              "description": "Opaque pagination cursor for the next page; absent when this is the last page."
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "SubjectNotFound",
+          "description": "The `subject` filter was provided but no pending_policy_actions row has ever been recorded for that DID."
+        }
+      ]
+    }
+  }
+}

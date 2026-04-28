@@ -359,6 +359,93 @@
         }
       }
     },
+    "pendingAction": {
+      "type": "object",
+      "description": "One row from the pending_policy_actions table (§F22, #70). Returned by tools.cairn.admin.listPendingActions and tools.cairn.admin.getPendingAction (#77). A pending row holds a proposed action that a mode=flag rule firing queued for moderator review (#73); resolution columns transition NULL → 'confirmed' (#74) or 'dismissed' (#75 / #76 cascade) once acted on.",
+      "required": [
+        "id",
+        "subjectDid",
+        "actionType",
+        "reasonCodes",
+        "triggeredByPolicyRule",
+        "triggeredAt",
+        "triggeringActionId",
+        "resolution"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "description": "pending_policy_actions row primary key."
+        },
+        "subjectDid": {
+          "type": "string",
+          "format": "did",
+          "description": "Account DID the proposed action would target."
+        },
+        "subjectUri": {
+          "type": "string",
+          "description": "AT-URI for record-level proposed actions; absent for account-level."
+        },
+        "actionType": {
+          "type": "string",
+          "knownValues": [
+            "warning",
+            "note",
+            "temp_suspension",
+            "indef_suspension",
+            "takedown"
+          ],
+          "description": "Proposed graduated-action category."
+        },
+        "durationIso": {
+          "type": "string",
+          "description": "ISO-8601 duration (canonical PT<seconds>S form). Only present when actionType is temp_suspension."
+        },
+        "reasonCodes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Reason identifiers from the operator's [moderation_reasons] vocabulary, frozen at proposal time."
+        },
+        "triggeredByPolicyRule": {
+          "type": "string",
+          "description": "Name of the [policy_automation.<rule>] sub-block that fired and queued this pending."
+        },
+        "triggeredAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "RFC-3339 wall-clock the rule fired (== the triggering recordAction's effective_at)."
+        },
+        "triggeringActionId": {
+          "type": "integer",
+          "description": "subject_actions.id of the precipitating action whose strike contribution caused the rule's threshold to be crossed."
+        },
+        "resolution": {
+          "type": "string",
+          "knownValues": [
+            "pending",
+            "confirmed",
+            "dismissed"
+          ],
+          "description": "Resolution state. 'pending' (wire) corresponds to a NULL resolution column in storage — i.e., still awaiting moderator action."
+        },
+        "resolvedAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "RFC-3339 wall-clock the pending was resolved. Absent while resolution is 'pending'."
+        },
+        "resolvedByDid": {
+          "type": "string",
+          "format": "did",
+          "description": "DID of the moderator (or synthetic policy DID for cascade auto-dismissals per #76) that resolved the pending. Absent while resolution is 'pending'."
+        },
+        "confirmedActionId": {
+          "type": "integer",
+          "description": "subject_actions.id of the materialized action created when this pending was confirmed (#74). Only present when resolution is 'confirmed'."
+        }
+      }
+    },
     "subjectAction": {
       "type": "object",
       "description": "One row from the subject_actions table (§F20 graduated-action moderation). Returned by tools.cairn.admin.recordAction (after insert) and by the read-half history/strikes endpoints (#52, ships in a follow-up commit).",

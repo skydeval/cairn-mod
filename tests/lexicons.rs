@@ -96,6 +96,8 @@ fn procedures_have_input_queries_have_parameters() {
         "getTrustChain",
         "getSubjectHistory",
         "getSubjectStrikes",
+        "listPendingActions",
+        "getPendingAction",
     ]);
 
     for path in all_files() {
@@ -297,6 +299,8 @@ fn expected_endpoint_files_all_present() {
         "getSubjectStrikes",
         "confirmPendingAction",
         "dismissPendingAction",
+        "listPendingActions",
+        "getPendingAction",
     ]);
     let present: HashSet<String> = all_files()
         .iter()
