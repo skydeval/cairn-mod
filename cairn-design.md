@@ -1130,7 +1130,7 @@ reason_codes = ["policy-threshold"]
 threshold_strikes = 15
 action_type = "indef_suspension"
 mode = "flag"
-reason_codes = ["repeated_violation"]
+reason_codes = ["repeated-violation"]
 
 [policy_automation.rules.temp_at_10]
 threshold_strikes = 10
