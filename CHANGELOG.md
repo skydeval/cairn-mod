@@ -12,10 +12,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 ### Fixed
+- `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).
+- `DEFAULT_POLICY_REASON_CODE` renamed from `policy_threshold` to
+  `policy-threshold` so the default substitution path produces a
+  valid reason identifier under the `[a-z0-9-]` reason-id validator
+  (b51a940; caught during Phase B verification).
+- §F22.1 TOML example used `repeated_violation` (underscore);
+  renamed to `repeated-violation` so the documented operator
+  example produces a valid reason identifier (78edd9b).
+- `getSubjectHistory` wire shape was missing `actorKind` and
+  `triggeredByPolicyRule` fields. v1.6 added these columns to
+  `subject_actions` (writer persists correctly per #73), but the
+  read-side projection, SELECT, lexicon def, and CLI formatter were
+  never extended — so the API returned `null` for both, defeating
+  forensic traceability of policy-recorded vs moderator-recorded
+  actions. Fixed across all four layers + `cairn moderator history`
+  tabular output gains an ACTOR column (a1c71cb; caught during Phase
+  B verification).
 
 ### Removed
 
 ### Security
+
+## [1.6.0] - 2026-04-27
+
+> v1.6 "Policy automation" closes the v1.5 loop: operators
+> declare strike-threshold rules in `[policy_automation]`, and
+> the recorder evaluates those rules inside every recordAction
+> transaction. Auto-mode rules record consequent actions in the
+> same transaction; flag-mode rules queue pending rows for
+> moderator review. Conservative idempotency, severity-ordered
+> rule selection, takedown-cascade auto-dismissal of pendings,
+> and a forensic audit chain that extends across all policy
+> events. Pending state is moderator-tier visibility only — the
+> public surface still shows what cairn-mod has *done*, not what
+> it *might* do.
+
+### Added
+
+- Policy automation engine: `[policy_automation]` config block,
+  `PolicyAutomationPolicy` config loader, pure-function policy
+  evaluator with crossing detection + idempotency + severity
+  ordering, recorder integration evaluating rules inside the
+  recordAction transaction. (#70, #71, #72, #73)
+- Pending action confirm flow: `tools.cairn.admin.confirmPendingAction`
+  XRPC + `WriteCommand::ConfirmPendingAction` writer command.
+  Confirmed pendings materialize as `subject_actions` rows with
+  `actor_kind='moderator'` (the moderator takes responsibility)
+  and `triggered_by_policy_rule` preserved as forensic
+  provenance; full label emission via the v1.5 path. (#74)
+- Pending action dismiss flow: `tools.cairn.admin.dismissPendingAction`
+  XRPC + `WriteCommand::DismissPendingAction` writer command.
+  Audit-only rationale storage (the pending table itself has no
+  `resolved_reason` column; rationale lives in the audit row's
+  `moderator_reason` field). (#75)
+- Takedown-cascade auto-dismissal: every unresolved pending for
+  a subject auto-dismisses inside the same transaction as a
+  takedown row INSERT, regardless of takedown path (moderator-
+  recorded, policy-auto-recorded, or confirmed-pending-promoted).
+  Cascade audit rows reuse the `pending_policy_action_dismissed`
+  audit_log.action and discriminate via reason JSON's
+  `triggered_by` field (`takedown_terminal` vs `moderator_dismissed`),
+  cross-referencing the triggering takedown via `takedown_action_id`.
+  (#76)
+- Pending action read XRPC: `tools.cairn.admin.listPendingActions`
+  (paginated, `subject` + `resolution` filters, opaque id-cursor)
+  and `tools.cairn.admin.getPendingAction` (single row). Mod-or-
+  Admin role; direct sqlx queries against the pool (no writer
+  task involvement). (#77)
+- Operator CLI: `cairn moderator pending {list, view, confirm,
+  dismiss}`, HTTP-routed via the admin XRPC, tabular human output
+  by default, `--json` for tooling. (#78)
+- New error variants: `PendingActionNotFound`,
+  `PendingAlreadyResolved`, `SubjectTakendown` (defensive race-
+  closer on confirm).
+- New audit_log.action vocabulary: `pending_policy_action_confirmed`,
+  `pending_policy_action_dismissed`. Pending creation rides the
+  precipitating action's `subject_action_recorded` audit row's
+  `policy_consequence` field (no separate `pending_policy_action_created`
+  audit kind).
+- Migration `0005_policy_automation.sql`: extends `subject_actions`
+  with `actor_kind` (CHECK in 'moderator' | 'policy', defaulting
+  to 'moderator' for backfill) and `triggered_by_policy_rule`
+  (NULL for moderator-recorded actions); new `pending_policy_actions`
+  table with write-once-on-resolution trigger; partial indexes
+  on the active subset for the moderator review queue.
+- Comprehensive integration test coverage: idempotency contracts
+  through the writer task (#80) and end-to-end lifecycle
+  scenarios composing all v1.6 surfaces (#81).
+- Design doc §F22 (policy automation; 11 subsections covering
+  rule shape, threshold-crossing semantics, severity ordering,
+  auto-vs-flag mode, pending resolution, takedown cascade, schema
+  + audit linkage, synthetic policy actor DID, public-tier non-
+  visibility, operator surfaces, deferred capabilities). New §4.2
+  disclosure 6 (pending visibility is moderator-tier only). §F21.9
+  + §18 roadmap updates. (#82)
+
+### Changed
+
+- Pending policy actions are moderator-tier visibility only — not
+  exposed via public XRPC (`tools.cairn.public.getMyStrikeState`
+  is unchanged from v1.5). Subscribers see what cairn-mod has
+  *done*, not what cairn-mod *might* do. See §4.2 disclosure 6.
+- `subject_actions` audit row's reason JSON gains an `actor_kind`
+  discriminator (`'moderator'` vs `'policy'`) and an optional
+  `triggered_by_policy_rule` field. The precipitating action's
+  audit row also gains an optional `policy_consequence` field
+  (`{rule_fired, mode, auto_action_id | pending_action_id}`)
+  cross-referencing the consequence when a rule fires.
+- `pending_policy_action_dismissed` audit reason JSON carries a
+  `triggered_by` discriminator (`'moderator_dismissed'` for #75,
+  `'takedown_terminal'` for #76) so audit consumers can filter
+  the two shapes via `json_extract`.
+- `MAINTAINERS.md` adds a "Development pattern" section disclosing
+  the AI-assisted development approach used to ship cairn-mod.
+
+### Fixed
+
+- rustfmt drift in `tests/admin_subject_actions.rs` from #76's
+  test rewrites — two `let` bindings that were left in unwrapped
+  two-line form. Pure formatting fix; no logic change. (7a7628f)
+
+### Internal
+
+- chainlink #79 closed as duplicate of #73; the
+  `PolicyAutomationPolicy` plumbing through writer-state landed
+  as part of #73's recorder integration per that session's
+  "subsume #79" decision.
 
 ## [1.5.2] — 2026-04-27
 

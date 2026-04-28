@@ -6,6 +6,27 @@ This file names the people currently responsible for `cairn-mod`.
 
 - [@skydeval](https://github.com/skydeval)
 
+## Development pattern
+
+cairn-mod is developed by @skydeval with substantial implementation
+assistance from [Claude](https://claude.ai) (Anthropic). The pattern
+is collaborative, not AI-autonomous: architecture, design choices,
+scope discipline, and judgment calls are human; the majority of
+source code is AI-generated. Every commit passes the full quality
+gate (`cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`,
+full test suite, `RUSTDOCFLAGS="-D warnings" cargo doc`) before push,
+and every release passes end-to-end verification against a real
+ATProto PDS.
+
+This pattern is what makes the release cadence possible at solo-
+developer scale. It is not a quality compromise — the project's
+test density, hash-chained audit log (cairn-design.md §F10), and
+trust-chain disclosures (cairn-design.md §4.2) speak to the bar
+each release is held to.
+
+If this development pattern affects your evaluation of cairn-mod
+for your deployment, that's worth knowing upfront.
+
 ## Adding maintainers
 
 When a second maintainer is added, they get their own entry below
