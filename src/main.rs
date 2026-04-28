@@ -11,7 +11,7 @@ use cairn_mod::cli::{
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
-    moderator, moderator_action, operator_login,
+    moderator, moderator_action, moderator_pending, operator_login,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
@@ -444,6 +444,93 @@ enum ModeratorSub {
     /// `tools.cairn.admin.getSubjectStrikes` envelope used by
     /// `strikes`, but renders only the `activeLabels` field.
     Labels(ModeratorLabelsArgs),
+    /// Manage policy-engine pending actions awaiting moderator
+    /// review (§F22 / #74-#77). HTTP-routed via the
+    /// `tools.cairn.admin.{listPendingActions, getPendingAction,
+    /// confirmPendingAction, dismissPendingAction}` admin XRPC
+    /// endpoints. Requires a moderator session.
+    Pending(ModeratorPendingArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorPendingArgs {
+    #[command(subcommand)]
+    sub: ModeratorPendingSub,
+}
+
+#[derive(Debug, Subcommand)]
+enum ModeratorPendingSub {
+    /// List unresolved pending policy actions awaiting review.
+    /// Default newest-first, all subjects; `--subject` narrows.
+    List(ModeratorPendingListArgs),
+    /// Show full context for a single pending action.
+    View(ModeratorPendingViewArgs),
+    /// Confirm a pending: promote it to a real subject_actions
+    /// row (#74). The moderator takes responsibility; the
+    /// originating rule is preserved as forensic provenance.
+    Confirm(ModeratorPendingConfirmArgs),
+    /// Dismiss a pending: mark it resolved without creating a
+    /// subject_actions row (#75). No emission, no strike change.
+    Dismiss(ModeratorPendingDismissArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorPendingListArgs {
+    /// Filter to one subject. Server returns SubjectNotFound when
+    /// the subject has never had a pending row.
+    #[arg(long)]
+    subject: Option<String>,
+    /// Per-page row limit (server caps at 250; default 50).
+    #[arg(long)]
+    limit: Option<i64>,
+    /// Opaque pagination cursor from a prior page.
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the tabular renderer.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorPendingViewArgs {
+    /// pending_policy_actions row id.
+    pending_id: i64,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorPendingConfirmArgs {
+    /// pending_policy_actions row id.
+    pending_id: i64,
+    /// Optional moderator-facing rationale. Stored on the
+    /// resulting subject_actions row's `notes` column and echoed
+    /// in the audit row's `moderator_note` field.
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ModeratorPendingDismissArgs {
+    /// pending_policy_actions row id.
+    pending_id: i64,
+    /// Optional moderator-facing rationale. Echoed in the audit
+    /// row's `moderator_reason` field (the pending table itself
+    /// has no resolved_reason column).
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -787,6 +874,30 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Moderator {
             sub: ModeratorSub::Labels(args),
         } => run_moderator_labels(args).await,
+        Command::Moderator {
+            sub:
+                ModeratorSub::Pending(ModeratorPendingArgs {
+                    sub: ModeratorPendingSub::List(args),
+                }),
+        } => run_moderator_pending_list(args).await,
+        Command::Moderator {
+            sub:
+                ModeratorSub::Pending(ModeratorPendingArgs {
+                    sub: ModeratorPendingSub::View(args),
+                }),
+        } => run_moderator_pending_view(args).await,
+        Command::Moderator {
+            sub:
+                ModeratorSub::Pending(ModeratorPendingArgs {
+                    sub: ModeratorPendingSub::Confirm(args),
+                }),
+        } => run_moderator_pending_confirm(args).await,
+        Command::Moderator {
+            sub:
+                ModeratorSub::Pending(ModeratorPendingArgs {
+                    sub: ModeratorPendingSub::Dismiss(args),
+                }),
+        } => run_moderator_pending_dismiss(args).await,
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
@@ -1390,6 +1501,97 @@ async fn run_moderator_labels(args: ModeratorLabelsArgs) -> Result<(), CliError>
             "{}",
             moderator_action::format_labels_human(&resp, &subject_for_msg)
         );
+    }
+    Ok(())
+}
+
+async fn run_moderator_pending_list(args: ModeratorPendingListArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_pending::list(
+        &mut session,
+        &path,
+        moderator_pending::ListPendingInput {
+            subject: args.subject,
+            limit: args.limit,
+            cursor: args.cursor,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_pending::format_list_json(&resp));
+    } else {
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        println!("{}", moderator_pending::format_list_human(&resp, &now));
+    }
+    Ok(())
+}
+
+async fn run_moderator_pending_view(args: ModeratorPendingViewArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_pending::view(
+        &mut session,
+        &path,
+        moderator_pending::ViewPendingInput {
+            pending_id: args.pending_id,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_pending::format_view_json(&resp));
+    } else {
+        println!("{}", moderator_pending::format_view_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_pending_confirm(args: ModeratorPendingConfirmArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_pending::confirm(
+        &mut session,
+        &path,
+        moderator_pending::ConfirmPendingInput {
+            pending_id: args.pending_id,
+            reason: args.reason,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_pending::format_confirm_json(&resp));
+    } else {
+        println!("{}", moderator_pending::format_confirm_human(&resp));
+    }
+    Ok(())
+}
+
+async fn run_moderator_pending_dismiss(args: ModeratorPendingDismissArgs) -> Result<(), CliError> {
+    let path = session_path()?;
+    let mut session = session::SessionFile::load(&path)?.ok_or(CliError::NotLoggedIn)?;
+    let json = args.json;
+    let resp = moderator_pending::dismiss(
+        &mut session,
+        &path,
+        moderator_pending::DismissPendingInput {
+            pending_id: args.pending_id,
+            reason: args.reason,
+            cairn_server_override: args.cairn_server,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", moderator_pending::format_dismiss_json(&resp));
+    } else {
+        println!("{}", moderator_pending::format_dismiss_human(&resp));
     }
     Ok(())
 }

@@ -20,6 +20,7 @@ pub mod login;
 pub mod logout;
 pub mod moderator;
 pub mod moderator_action;
+pub mod moderator_pending;
 pub mod operator_login;
 pub mod operator_session;
 pub mod output;
