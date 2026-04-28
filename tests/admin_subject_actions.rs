@@ -4253,3 +4253,390 @@ async fn get_pending_action_temp_suspension_renders_duration_iso() {
         "1 day in canonical PT<seconds>S form"
     );
 }
+
+// =================== rule-firing idempotency (#80, v1.6) ===================
+//
+// End-to-end pinning of #72's conservative-idempotency contract
+// through the writer's full transaction surface. The pure-function
+// tests in src/policy/evaluator.rs::tests already cover the
+// crossing-detection / already-fired-window / severity-ordering
+// logic in isolation; these tests pin the same contract under the
+// recorder's INSERT + audit + cache pipeline plus the resolution
+// surfaces from #74 (confirm), #75 (dismiss), and the cascade
+// from #76.
+//
+// Each test threads a complete lifecycle: record actions to cross
+// a threshold, observe the rule firing, then exercise the path
+// that opens (or fails to open) the rule's window — revoke,
+// dismiss, confirm-then-revoke — and verify the next threshold
+// crossing either re-fires the rule (positive scenarios) or is
+// suppressed (negative scenarios).
+//
+// Threshold + dampening interplay: with the default StrikePolicy
+// (curve [1, 2], hate-speech base_weight=4), one temp_suspension
+// hate-speech action lands curve[0]=1 strike on a virgin subject;
+// a second lands curve[1]=2 (cumulative 3); a third lands the
+// full base_weight=4 (cumulative 7). Tests using threshold=1 cross
+// on the first action; threshold=3 crosses on the second.
+
+#[tokio::test]
+async fn auto_rule_re_fires_after_window_cleared_and_threshold_recrossed() {
+    // Conservative idempotency, positive path (auto mode):
+    //   - Rule fires (auto-warning lands).
+    //   - Revoke the auto-warning → window opens.
+    //   - Revoke the precipitating action → strikes drop below
+    //     threshold.
+    //   - Record another action that crosses from below → rule
+    //     re-fires.
+    let policy = policy_with_rules(vec![auto_warning_rule("warn_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // First crossing: rule fires.
+    let precip1 = record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let auto1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_1'
+           ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    // Open the firing window: revoke the auto-action AND the
+    // precipitating action (the auto-warning carries 0 strikes,
+    // so revoking it alone wouldn't drop the count below
+    // threshold 1).
+    revoke_action(&h, auto1, Some("test cleanup")).await;
+    revoke_action(&h, precip1, Some("test cleanup")).await;
+
+    // Second crossing: rule re-fires.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let policy_rows = sqlx::query!(
+        r#"SELECT
+             id            AS "id!: i64",
+             revoked_at,
+             triggered_by_policy_rule
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_1'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        policy_rows.len(),
+        2,
+        "rule fires twice: once before revoke, once after window cleared"
+    );
+    assert_eq!(policy_rows[0].id, auto1);
+    assert!(
+        policy_rows[0].revoked_at.is_some(),
+        "first auto-action stays revoked"
+    );
+    assert!(
+        policy_rows[1].revoked_at.is_none(),
+        "re-fired auto-action is fresh, unrevoked"
+    );
+}
+
+#[tokio::test]
+async fn flag_rule_re_fires_after_pending_dismissed_and_threshold_recrossed() {
+    // Conservative idempotency, positive path (flag mode):
+    //   - Rule fires (pending lands).
+    //   - Dismiss the pending → window opens.
+    //   - Revoke the precipitating action → strikes drop.
+    //   - Record another crossing → rule re-fires (new pending).
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    let precip1 = record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let pending1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    // Dismiss the pending; revoke the precipitating to drop count.
+    let resp =
+        post_dismiss_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending1})).await;
+    assert!(resp.status().is_success());
+    revoke_action(&h, precip1, Some("test cleanup")).await;
+
+    // Re-cross.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    let pendings = sqlx::query!(
+        r#"SELECT id AS "id!: i64", resolution
+           FROM pending_policy_actions
+           WHERE triggered_by_policy_rule = 'flag_at_1'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pendings.len(), 2, "rule re-fires after pending dismissal");
+    assert_eq!(pendings[0].id, pending1);
+    assert_eq!(pendings[0].resolution.as_deref(), Some("dismissed"));
+    assert!(
+        pendings[1].resolution.is_none(),
+        "second pending is fresh, unresolved"
+    );
+}
+
+#[tokio::test]
+async fn flag_rule_re_fires_after_confirm_then_revoke_and_threshold_recrossed() {
+    // Conservative idempotency, positive path (flag mode, confirm
+    // then revoke):
+    //   - Rule fires (pending lands).
+    //   - Confirm pending → materialized subject_actions row.
+    //   - Revoke the materialized row → window opens (#72's
+    //     check inspects subject_actions.revoked_at, not the
+    //     pending's resolution column).
+    //   - Revoke the precipitating action → strikes drop.
+    //   - Record another crossing → rule re-fires (new pending).
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    let precip1 = record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let pending1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    // Confirm pending → materialized indef_suspension row.
+    let confirm_resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending1})).await;
+    assert!(confirm_resp.status().is_success());
+    let materialized_id = confirm_resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    // Revoke the materialized indef_suspension to open the window.
+    // Then revoke the precipitating to drop the count below 1.
+    revoke_action(&h, materialized_id, Some("test cleanup")).await;
+    revoke_action(&h, precip1, Some("test cleanup")).await;
+
+    // Re-cross.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    let pendings = sqlx::query!(
+        r#"SELECT id AS "id!: i64", resolution
+           FROM pending_policy_actions
+           WHERE triggered_by_policy_rule = 'flag_at_1'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pendings.len(), 2, "rule re-fires after confirm-then-revoke");
+    assert_eq!(
+        pendings[0].resolution.as_deref(),
+        Some("confirmed"),
+        "first pending stays confirmed (revoking the materialized action does NOT roll back the resolution)"
+    );
+    assert!(
+        pendings[1].resolution.is_none(),
+        "second pending is fresh, unresolved"
+    );
+}
+
+#[tokio::test]
+async fn auto_rule_does_not_re_fire_with_more_strikes_above_threshold() {
+    // Conservative idempotency, negative path (auto mode):
+    //   - Rule fires once on the crossing action.
+    //   - Subsequent actions push strikes higher (still above
+    //     threshold) but don't "cross" from below — rule does
+    //     NOT re-fire.
+    //
+    // threshold=3 with the default curve [1,2] and hate-speech
+    // base_weight=4: action 1 lands strike 1 (no cross), action 2
+    // lands cumulative 3 (crosses), action 3 lands cumulative 7
+    // (no new crossing — already above threshold).
+    let policy = policy_with_rules(vec![auto_warning_rule("warn_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3, fires
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 3 → 7, no cross
+
+    let auto_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_actions WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_3'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        auto_count, 1,
+        "rule fires once on crossing; subsequent strikes don't re-fire"
+    );
+}
+
+#[tokio::test]
+async fn flag_rule_does_not_re_fire_while_pending_unresolved() {
+    // Conservative idempotency, negative path (flag mode,
+    // unresolved pending): once the pending lands, the rule's
+    // window is closed regardless of strike accumulation —
+    // moderator review pending is the suppression marker.
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3, fires
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 3 → 7, no re-fire (pending unresolved)
+
+    let pending_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM pending_policy_actions WHERE triggered_by_policy_rule = 'flag_at_3'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_count, 1);
+}
+
+#[tokio::test]
+async fn flag_rule_does_not_re_fire_after_pending_confirmed_unrevoked() {
+    // Conservative idempotency, negative path (flag mode,
+    // confirmed but unrevoked materialized action): #72's check
+    // looks for an unrevoked subject_actions row carrying the
+    // rule's name, so a confirmed pending whose materialized
+    // action is still active suppresses re-firing.
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3, fires, pending lands
+
+    let pending1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let confirm_resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending1})).await;
+    assert!(confirm_resp.status().is_success());
+
+    // More strikes after confirmation: rule does NOT re-fire.
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 3 → 7
+
+    let pending_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM pending_policy_actions WHERE triggered_by_policy_rule = 'flag_at_3'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_count, 1);
+
+    // Only one materialized indef_suspension row exists from the
+    // confirmation; no second auto-firing landed.
+    let materialized_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM subject_actions WHERE triggered_by_policy_rule = 'flag_at_3'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(materialized_count, 1);
+}
+
+#[tokio::test]
+async fn cascade_revoke_re_fires_pending_rule_after_takedown_revoked() {
+    // Layered scenario covering the cascade interaction with
+    // re-firing:
+    //   - Two rules: flag_indef at threshold 1, auto_takedown at
+    //     threshold 3.
+    //   - Action 1 crosses 1 → flag_indef fires, indef pending
+    //     lands.
+    //   - Action 2 crosses 3 → auto_takedown fires. The cascade
+    //     auto-dismisses the indef pending (#76).
+    //   - Revoke the takedown + the precipitating actions to
+    //     drop strikes back to 0.
+    //   - New action re-crosses 1 → flag_indef re-fires (its
+    //     original pending was cascade-dismissed, so the window
+    //     is open). New pending lands; the cascade-dismissed
+    //     pending stays dismissed (forensic record).
+    let policy = policy_with_rules(vec![
+        flag_indef_rule("flag_at_1", 1),
+        auto_takedown_rule("td_at_3", 3),
+    ]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    let precip1 = record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let precip2 = record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    // Locate the auto-takedown row.
+    let takedown_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND action_type = 'takedown'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    // Cascade auto-dismissed the original indef pending.
+    let pending1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM pending_policy_actions
+           WHERE triggered_by_policy_rule = 'flag_at_1'
+           ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let cascade_resolution: Option<String> = sqlx::query_scalar!(
+        "SELECT resolution FROM pending_policy_actions WHERE id = ?1",
+        pending1,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        cascade_resolution.as_deref(),
+        Some("dismissed"),
+        "cascade auto-dismissed the original pending"
+    );
+
+    // Revoke the takedown so the subject is no longer takendown
+    // (the evaluator's takendown gate would otherwise block
+    // every rule). Then drop strikes back to 0 by revoking both
+    // precipitating actions.
+    revoke_action(&h, takedown_id, Some("test cleanup")).await;
+    revoke_action(&h, precip1, Some("test cleanup")).await;
+    revoke_action(&h, precip2, Some("test cleanup")).await;
+
+    // Re-cross flag_at_1's threshold.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    // Two pendings exist for flag_at_1: the original cascade-
+    // dismissed one, and the fresh re-fire.
+    let pendings = sqlx::query!(
+        r#"SELECT id AS "id!: i64", resolution
+           FROM pending_policy_actions
+           WHERE triggered_by_policy_rule = 'flag_at_1'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pendings.len(), 2);
+    assert_eq!(pendings[0].id, pending1);
+    assert_eq!(
+        pendings[0].resolution.as_deref(),
+        Some("dismissed"),
+        "cascade-dismissed pending stays dismissed (forensic)"
+    );
+    assert!(
+        pendings[1].resolution.is_none(),
+        "re-fired pending is fresh, unresolved"
+    );
+}

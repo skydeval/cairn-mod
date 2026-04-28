@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\", resolution\n           FROM pending_policy_actions\n           WHERE triggered_by_policy_rule = 'flag_at_1'\n           ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "resolution",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "47ec60ea2f1e71f9d106dd2dbbdce8b84dfd3015db2d1b936095da39d074eb18"
+}

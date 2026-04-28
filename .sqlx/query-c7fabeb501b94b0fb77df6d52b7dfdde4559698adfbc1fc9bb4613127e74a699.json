@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id            AS \"id!: i64\",\n             revoked_at,\n             triggered_by_policy_rule\n           FROM subject_actions\n           WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_1'\n           ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "triggered_by_policy_rule",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "c7fabeb501b94b0fb77df6d52b7dfdde4559698adfbc1fc9bb4613127e74a699"
+}

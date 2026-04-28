@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM subject_actions WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_3'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "18042261558ef19d0358c4a36ee37565d6d0a3df0edd73f10c7fb3b04d32ee49"
+}

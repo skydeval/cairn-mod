@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!: i64\"\n           FROM subject_actions\n           WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_1'\n           ORDER BY id ASC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3908731103ad79d991d2c47ffbc0548c58a4445c228e086a3376e5b8f72085ee"
+}
