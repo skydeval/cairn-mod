@@ -92,7 +92,7 @@ pub(super) async fn handler(
                 duration, effective_at, expires_at, notes, report_ids,
                 strike_value_base, strike_value_applied, was_dampened,
                 strikes_at_time_of_action, revoked_at, revoked_by_did, revoked_reason,
-                audit_log_id, created_at
+                audit_log_id, created_at, actor_kind, triggered_by_policy_rule
          FROM subject_actions
          WHERE subject_did = ",
     );

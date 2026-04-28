@@ -383,6 +383,27 @@ pub struct HistoryEntry {
     /// RFC-3339 wall-clock at INSERT.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// `"moderator"` for moderator-recorded actions and confirmed-
+    /// pending materializations; `"policy"` for actions the policy
+    /// automation engine recorded directly (§F22). Always populated
+    /// in v1.6+ wire responses; defaults to `"moderator"` if a
+    /// pre-v1.6 server omits the field.
+    #[serde(rename = "actorKind", default = "default_actor_kind")]
+    pub actor_kind: String,
+    /// Name of the `[policy_automation.<rule>]` sub-block that
+    /// produced this action. Present when `actor_kind == "policy"`
+    /// and on moderator-confirmed pending materializations
+    /// (forensic provenance); absent otherwise.
+    #[serde(
+        rename = "triggeredByPolicyRule",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub triggered_by_policy_rule: Option<String>,
+}
+
+fn default_actor_kind() -> String {
+    "moderator".to_string()
 }
 
 /// Wire-shaped response from `tools.cairn.admin.getSubjectHistory`.
@@ -453,9 +474,12 @@ pub async fn history(
 }
 
 /// Tabular human renderer for `cairn moderator history`. Columns:
-/// id | when | type | reasons | applied (vs base) | dampened | revoked.
-/// Empty result renders as a friendly "no actions" line rather than an
-/// empty table — matches the listReports posture from v1.2.
+/// id | when | type | actor | reasons | applied (vs base) | dampened
+/// | revoked. The ACTOR column surfaces the v1.6 actor_kind so
+/// operators can visually distinguish moderator-recorded actions
+/// from policy-automation-recorded ones (§F22). Empty result
+/// renders as a friendly "no actions" line rather than an empty
+/// table — matches the listReports posture from v1.2.
 pub fn format_history_human(resp: &HistoryResponse, subject: &str) -> String {
     use std::fmt::Write;
     if resp.actions.is_empty() {
@@ -480,6 +504,13 @@ pub fn format_history_human(resp: &HistoryResponse, subject: &str) -> String {
         .max()
         .unwrap_or(4)
         .max(4);
+    let actor_w = resp
+        .actions
+        .iter()
+        .map(|e| e.actor_kind.len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
     let reasons_w = resp
         .actions
         .iter()
@@ -491,16 +522,18 @@ pub fn format_history_human(resp: &HistoryResponse, subject: &str) -> String {
     let mut s = String::new();
     let _ = writeln!(
         s,
-        "{:>id_w$}  {:<24}  {:<type_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
+        "{:>id_w$}  {:<24}  {:<type_w$}  {:<actor_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
         "ID",
         "EFFECTIVE_AT",
         "TYPE",
+        "ACTOR",
         "REASONS",
         "APPLIED",
         "DAMPENED",
         "REVOKED",
         id_w = id_w,
         type_w = type_w,
+        actor_w = actor_w,
         reasons_w = reasons_w,
     );
     for e in &resp.actions {
@@ -519,16 +552,18 @@ pub fn format_history_human(resp: &HistoryResponse, subject: &str) -> String {
         let revoked = if e.revoked_at.is_some() { "yes" } else { "no" };
         let _ = writeln!(
             s,
-            "{:>id_w$}  {:<24}  {:<type_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
+            "{:>id_w$}  {:<24}  {:<type_w$}  {:<actor_w$}  {:<reasons_w$}  {:>9}  {:<8}  {:<8}",
             e.id,
             e.effective_at,
             e.action_type,
+            e.actor_kind,
             reasons,
             applied,
             dampened,
             revoked,
             id_w = id_w,
             type_w = type_w,
+            actor_w = actor_w,
             reasons_w = reasons_w,
         );
     }

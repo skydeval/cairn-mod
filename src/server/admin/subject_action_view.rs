@@ -46,6 +46,8 @@ pub(super) struct SubjectActionRow {
     pub revoked_reason: Option<String>,
     pub audit_log_id: Option<i64>,
     pub created_at: i64,
+    pub actor_kind: String,
+    pub triggered_by_policy_rule: Option<String>,
 }
 
 /// Wire shape per `tools.cairn.admin.defs#subjectAction`. Optional
@@ -92,6 +94,23 @@ pub(super) struct SubjectActionEntry {
     pub audit_log_id: Option<i64>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// Discriminator for who recorded the action: `"moderator"`
+    /// for moderator-recorded actions and confirmed-pending
+    /// materializations, `"policy"` for actions the policy
+    /// automation engine recorded directly (§F22). Always
+    /// populated.
+    #[serde(rename = "actorKind")]
+    pub actor_kind: String,
+    /// Name of the `[policy_automation.<rule>]` sub-block that
+    /// produced this action. Present when `actor_kind` is
+    /// `"policy"` (auto-recorded firings) and on moderator-
+    /// confirmed pending materializations (forensic provenance);
+    /// absent otherwise.
+    #[serde(
+        rename = "triggeredByPolicyRule",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub triggered_by_policy_rule: Option<String>,
 }
 
 /// Convert a [`SubjectActionRow`] to the wire shape. Fails on
@@ -134,5 +153,7 @@ pub(super) fn project(row: SubjectActionRow) -> Result<SubjectActionEntry> {
         revoked_reason: row.revoked_reason,
         audit_log_id: row.audit_log_id,
         created_at: rfc3339_from_epoch_ms(row.created_at)?,
+        actor_kind: row.actor_kind,
+        triggered_by_policy_rule: row.triggered_by_policy_rule,
     })
 }

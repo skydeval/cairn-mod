@@ -453,6 +453,7 @@
         "id",
         "subjectDid",
         "actorDid",
+        "actorKind",
         "actionType",
         "reasonCodes",
         "effectiveAt",
@@ -479,7 +480,19 @@
         "actorDid": {
           "type": "string",
           "format": "did",
-          "description": "Moderator/admin who recorded the action (JWT iss when via XRPC; CLI caller DID otherwise)."
+          "description": "Moderator/admin who recorded the action (JWT iss when via XRPC; CLI caller DID otherwise). For policy-recorded actions (§F22), this is the synthetic policy DID `did:internal:policy`."
+        },
+        "actorKind": {
+          "type": "string",
+          "knownValues": [
+            "moderator",
+            "policy"
+          ],
+          "description": "Discriminator for who recorded the action: `moderator` for moderator-driven recordAction calls and confirmed-pending materializations; `policy` for actions the policy automation engine recorded directly via a mode=auto rule firing (§F22). Always populated; pre-v1.6 rows backfill to `moderator` via the column default."
+        },
+        "triggeredByPolicyRule": {
+          "type": "string",
+          "description": "Name of the [policy_automation.<rule>] sub-block that produced this action (§F22). Present when `actorKind` is `policy` (auto-recorded firings) and on moderator-confirmed pending materializations (where actor_kind is `moderator` but the rule's name is preserved as forensic provenance per the confirm-flow contract). Absent for moderator-recorded actions the policy engine had no hand in."
         },
         "actionType": {
           "type": "string",

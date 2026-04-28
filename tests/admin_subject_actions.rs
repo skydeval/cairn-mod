@@ -5156,3 +5156,56 @@ async fn lifecycle_recordaction_against_takendown_subject_does_not_fire_rules() 
         "no flag-mode rule queues a pending while takendown"
     );
 }
+
+#[tokio::test]
+async fn get_subject_history_exposes_policy_attribution() {
+    // Regression: pre-fix, getSubjectHistory's SELECT and wire
+    // shape didn't include the v1.6 actor_kind +
+    // triggered_by_policy_rule columns, so policy-recorded actions
+    // returned with null attribution despite the DB carrying the
+    // values correctly. This test pins the round-trip end-to-end
+    // — record actions that fire an auto-rule, fetch via the
+    // admin XRPC, assert the policy attribution surfaces.
+    let policy = policy_with_rules(vec![auto_warning_rule("warn_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3 → fires
+
+    let resp = http()
+        .get(format!(
+            "http://{}/xrpc/{HISTORY_LXM}?subject={SUBJECT_DID}",
+            h.addr
+        ))
+        .bearer_auth(build_jwt(ADMIN_DID, HISTORY_LXM))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status={}", resp.status());
+    let body: Value = resp.json().await.unwrap();
+    let actions = body["actions"].as_array().unwrap();
+
+    // The response should contain the auto-warning row with
+    // policy attribution. Find the entry with actorKind=policy
+    // and verify its full attribution shape.
+    let policy_entry = actions
+        .iter()
+        .find(|e| e["actorKind"] == "policy")
+        .expect("policy-recorded auto-warning surfaces in history");
+    assert_eq!(policy_entry["triggeredByPolicyRule"], "warn_at_3");
+    assert_eq!(policy_entry["actorDid"], "did:internal:policy");
+    assert_eq!(policy_entry["actionType"], "warning");
+
+    // Moderator-recorded entries surface actorKind=moderator and
+    // omit triggeredByPolicyRule (skip_serializing_if absent).
+    let moderator_entry = actions
+        .iter()
+        .find(|e| e["actorKind"] == "moderator")
+        .expect("moderator-recorded precipitating actions surface too");
+    assert_eq!(moderator_entry["actorDid"], ADMIN_DID);
+    assert!(
+        moderator_entry.get("triggeredByPolicyRule").is_none(),
+        "moderator-recorded actions omit triggeredByPolicyRule"
+    );
+}
