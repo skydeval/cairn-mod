@@ -94,6 +94,7 @@ Subscribers of a cairn-mod-hosted labeler should understand:
 3. **One operator per instance is a single point of compromise for that labeler.** Operators who want to reduce this risk should consider publishing transparency records (e.g., a monthly signed Merkle root of the audit log to the labeler's PDS). Out of scope for v1 but enabled by v1.1's hash-chaining.
 4. **Operators set their own moderation policy.** cairn-mod's strike-calculation rules — base weights per reason, dampening curve, decay function, good-standing threshold, cache freshness window — live in operator config (see §F20.2 / §F20.3 / §F20.4 / §F20.9). Operators can verify their own labeler's behavior against their declared policy by reading the config alongside the audit log; subscribers comparing two cairn-mod-hosted labelers can observe policy variation directly (a labeler weighting `hate-speech` at 4 strikes is not the same as one weighting it at 8, and that difference is visible from operator config alone, not hidden behavior). The trade-off is symmetric: operators can be permissive or inconsistent, and cairn-mod does not enforce a single moderation philosophy. cairn-mod's contribution is making policy declarable and observable, not adjudicating what the policy should be.
 5. **Internal moderation state and protocol-visible labels are different surfaces, both observable.** cairn-mod's account moderation state model (§F20) records actions in cairn-mod's own database; the label emission system (§F21) translates those actions into ATProto labels that AppViews and other consumers can honor or ignore. The translation rules — which action types emit which labels, with what severity and expiry — live in operator config (`[label_emission]`; see §F21.1 for the default mapping table and override knobs). They are observable on both sides: operators read config alongside the audit log to verify their own labeler's emission, and subscribers comparing two cairn-mod-hosted labelers can see policy variation in both layers (action recording AND label emission). Operators retain the same latitude as disclosure 4: a deployment may emit `!hideaway-takedown` instead of `!takedown`, gate warnings on or off, customize blurs and locales — all visible from config. The invariant cairn-mod enforces is that *every recorded action either emits or explicitly doesn't*, and that revocation atomically negates whatever was emitted. Notes never emit (defense-in-depth at the resolver, regardless of operator override attempts). cairn-mod's contribution is making the translation declarable and observable, not adjudicating what the mapping should be.
+6. **Pending action visibility is moderator-tier only.** cairn-mod's public read endpoints (`tools.cairn.public.getMyStrikeState`, with `activeLabels` per §F21.8) surface the labels actually emitted but do not surface pending actions awaiting moderator review. Subscribers see what cairn-mod has *done* — actions on the wire — not what cairn-mod *might* do. Operators retain pending visibility via the admin XRPC + CLI (§F22.10); subjects do not. Reasoning: pending action info isn't actionable for the subject (they cannot defend themselves against a moderator's pending review they don't know exists), pre-emptive disclosure creates pressure on moderators reviewing flags, and cairn-mod's transparency posture has limits — this is one of them. Operators who want subjects to see pending state explicitly (e.g., for a "you're on review; here's what for" workflow) can build that surface on top of the admin endpoints — cairn-mod ships the substrate, not the UX.
 
 ## 5. Authentication Model
 
@@ -1097,13 +1098,184 @@ Two read surfaces shipped alongside emission:
 
 The v1.5 contribution is the action → label translation: how operators declare the mapping, how emission lands atomically with the action INSERT, how revocation negates, how reads expose the active set. Several adjacent capabilities are deliberately out of scope:
 
-- **Policy automation** (v1.6) — automatic action recording when a subject's strike count crosses an operator-declared threshold. v1.4's recorder is moderator-driven; v1.5's recorder still is; v1.6 will add operator-config-gated automatic-action paths (auto-vs-flag mode chosen per rule).
+- **Policy automation** — shipped in v1.6 (see §F22). The bridge from threshold-crossing to automatic action (mode=auto) or pending-for-review (mode=flag) now lives in the recorder, with operator-declared rules in `[policy_automation]`.
 - **PDS administrative actions** (v1.7+) — operator-config-gated bridge to `com.atproto.admin.*` on operator-controlled PDSes. Operators provide PDS admin credentials and declare which action types translate into PDS-level account state changes; cairn-mod calls the admin endpoints in lockstep with label emission. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments.
 - **Per-reason severity overrides** (v1.6+ if demand) — currently all reason labels are `inform`. Per-reason tuning is conceivable but not motivated.
 - **Per-reason decay overrides** — already deferred per §F20.10; the v1.5 emission surface does not change the calculus.
 - **Background cache refresh job** — already deferred per §F20.9; activeLabels recomputation rides the same cache-bypass posture and inherits the same deferral.
 - **Single-JOIN optimization for `activeLabels`** — the v1.5 implementation uses an N+1 query pattern (one SELECT per candidate action). Acceptable for v1.5's bounded-history use cases; query optimization deferred until profiling against real deployments surfaces a need.
 - **CID plumbing for record-level subjects** — `ActionForEmission.cid` exists but v1.5 always passes `None` (subject CIDs aren't yet plumbed through `RecordActionRequest`). Record-level labels without CID are protocol-valid, just less specific. Wiring through `tools.cairn.admin.recordAction` + the operator CLI is a future ticket.
+
+### F22. Policy automation (v1.6)
+
+Bridge from §F20's strike accounting and §F21's label emission to operator-declared automatic action. Where v1.4 records actions to `subject_actions`, runs decay against them, and surfaces the strike state, and v1.5 translates that action stream into ATProto labels, v1.6 closes the loop: operators declare rules in `[policy_automation.rules.<name>]` sub-blocks, and the recorder evaluates those rules inside every recordAction transaction. When a subject's strike count crosses a declared threshold, the rule fires — either auto-recording a consequent action (mode=auto) or queueing a `pending_policy_actions` row for moderator review (mode=flag). Both paths hash-chain into the audit log alongside the precipitating action and any emitted labels. See §4.2 disclosure 6 for the trust-chain framing on pending visibility.
+
+The §F22 contract: every recordAction transaction evaluates the operator's policy automation rules against the strike state before-and-after the precipitating action. At most one rule fires per transaction (severity ordering breaks ties); the firing's consequence — auto-recorded action OR pending row — commits atomically with the precipitating action, its emitted labels, and a single hash-chained audit row. Conservative idempotency holds: a rule fires once per subject until the firing is explicitly resolved (revoked, dismissed, or confirmed-then-revoked). Takedown is terminal and cascades; pendings stay forensic record across the cascade.
+
+#### F22.1. Policy rule shape and config block
+
+Operators declare rules in their TOML config:
+
+```toml
+[policy_automation]
+enabled = true
+
+[policy_automation.rules.warn_at_5]
+threshold_strikes = 5
+action_type = "warning"
+mode = "auto"
+reason_codes = ["policy_threshold"]
+
+[policy_automation.rules.flag_indef_at_15]
+threshold_strikes = 15
+action_type = "indef_suspension"
+mode = "flag"
+reason_codes = ["repeated_violation"]
+
+[policy_automation.rules.temp_at_10]
+threshold_strikes = 10
+action_type = "temp_suspension"
+mode = "auto"
+duration = "P7D"
+reason_codes = ["policy_threshold"]
+```
+
+Per-rule fields:
+
+- `threshold_strikes` (required, ≥1): the count at which the rule fires when crossed from below.
+- `action_type` (required): one of `warning` / `note` / `temp_suspension` / `indef_suspension` / `takedown`.
+- `mode` (required): `auto` (synthetic-policy-recorded action lands inside the same transaction) or `flag` (`pending_policy_actions` row lands awaiting moderator review).
+- `duration` (required for `temp_suspension`, rejected otherwise): ISO-8601 duration. The same parser the moderator-recorded path uses (`P{n}D`, `P{n}W`, `PT{n}H`, `PT{n}M`, `PT{n}S`, and combinations).
+- `reason_codes` (required, non-empty): identifiers from `[moderation_reasons]`. Validated at config load; the rule's reasons must all exist in the operator's vocabulary.
+
+Rule-naming convention: lowercase ASCII, digits, and underscores; `[a-z][a-z0-9_]{0,63}`. Names are unique within `[policy_automation]`. The block is optional — when absent, the policy engine is disabled and the recorder behaves identically to v1.5.
+
+#### F22.2. Threshold-crossing semantics
+
+The rule matcher requires a *strict crossing*: `state_before.current_count < rule.threshold_strikes && state_after.current_count >= rule.threshold_strikes`. Already-above events do not re-fire; staying-below events do not fire.
+
+Conservative idempotency closes the firing window after a rule matches. The window stays closed until the rule's prior firing is resolved:
+
+| Prior firing                  | Window state | Re-fire allowed? |
+|---|---|---|
+| Auto-recorded action, unrevoked       | closed | no |
+| Auto-recorded action, revoked         | open   | yes (next crossing) |
+| Pending, unresolved                   | closed | no |
+| Pending, dismissed                    | open   | yes (next crossing) |
+| Pending, confirmed → action unrevoked | closed | no |
+| Pending, confirmed → action revoked   | open   | yes (next crossing) |
+
+The revocation-and-recross path requires both: the prior firing's row revoked (or pending dismissed / confirmed-then-revoked) AND the strike count dropping back below threshold so a future action can cross it from below. For a threshold-1 rule whose auto-action is a warning (zero-strike), revoking just the auto-warning isn't enough — the strike count is still at 1 from the precipitating action; the precipitating action itself must also be revoked (or naturally decay) before the next crossing can occur.
+
+The "decay-and-recross fires the rule again" semantic is **deferred to v1.7+** (§F22.11). v1.6 ships conservative idempotency only; pure-function unit tests (`src/policy/evaluator.rs::tests`) cover the decay-aware crossing logic in isolation, but the full lifecycle through the recorder doesn't yet treat decay as a window-opening event.
+
+#### F22.3. Severity ordering and rule selection
+
+When multiple rules match a single crossing event, severity order resolves: `takedown > indef_suspension > temp_suspension > warning > note`. Within the same severity, the higher-threshold rule wins (catches the "you got further past the rule" case). Exactly one rule fires per recordAction; the others' windows stay open and may fire on future crossings.
+
+If the highest-severity matching rule has already fired (window closed per §F22.2), the evaluator falls through to the next-highest matching rule whose window is open. If every matching rule's window is closed, the recorder writes the precipitating action without firing anything.
+
+A pre-existing unrevoked Takedown blocks every rule firing — the evaluator's takendown gate fires unconditionally before any crossing check (§F22.5).
+
+#### F22.4. Auto vs flag mode
+
+`mode = "auto"`: the rule's consequence is a real `subject_actions` row inserted in the same transaction as the precipitating action. The auto-action carries `actor_kind = 'policy'`, `actor_did = "did:internal:policy"`, and `triggered_by_policy_rule = "<rule name>"`. Label emission runs through the §F21 path — action label + reason labels per the operator's `[label_emission]` mapping. The auto-action itself can in turn fire cascading consequences if it is a Takedown (§F22.6).
+
+`mode = "flag"`: the rule's consequence is a `pending_policy_actions` row. No `subject_actions` row, no label emission. The pending row carries the rule's proposed shape (`action_type`, `duration`, `reason_codes`, `triggered_by_policy_rule`) and a foreign-key reference to the precipitating action via `triggering_action_id`. The pending awaits moderator review through the read + resolve surfaces (§F22.10).
+
+Mode applies forward only. Pending rows already in the queue keep the mode they were created under; if an operator changes a rule's mode in config and reloads, the existing pendings are unaffected — they resolve via the same confirm/dismiss surfaces. New rule firings after the reload use the new mode.
+
+#### F22.5. Pending action resolution: confirm and dismiss
+
+A pending action is resolved by exactly one of two moderator-tier surfaces:
+
+**Confirm** (`tools.cairn.admin.confirmPendingAction`, `cairn moderator pending confirm`): promotes the pending's proposed action to a real `subject_actions` row. The materialized row carries `actor_kind = 'moderator'` (the moderator takes responsibility by confirming), `actor_did = <moderator DID>`, AND `triggered_by_policy_rule = <pending's rule>` for forensic provenance. Label emission runs; strike state recomputes; the pending row's resolution columns transition NULL → 'confirmed' with `confirmed_action_id` linking forward to the materialized row. Strike values for the materialized action are computed at confirmation time, not proposal time — the moderator's decision is what the strike state should reflect; `expires_at` for `temp_suspension` re-anchors on the confirmation wall-clock.
+
+The confirm path defends against a `SubjectTakendown` race: if a takedown lands between the pending's creation and the confirm call, the confirm rejects with the `SubjectTakendown` error rather than materialize an action that contradicts terminal-state semantics. In steady state this is unreachable (the takedown's cascade auto-dismisses the pending — §F22.6); the defensive check closes the race.
+
+**Dismiss** (`tools.cairn.admin.dismissPendingAction`, `cairn moderator pending dismiss`): marks the pending resolved without creating any `subject_actions` row. No label emission, no strike-state recompute. The pending's `resolution` column transitions NULL → 'dismissed'; `confirmed_action_id` stays NULL (dismissed pendings never link forward). The moderator's optional `--reason` lands on the audit row's `moderator_reason` field, not on the pending row itself — the pending table tracks resolution state; rationale lives in audit (a single-concern split simpler than adding a `resolved_reason` column).
+
+The schema's BEFORE-UPDATE trigger on `pending_policy_actions` permits each resolution column's NULL → non-NULL transition exactly once. Re-resolution attempts (a second confirm or a confirm-after-dismiss) abort at the trigger; the recorder also checks pre-UPDATE and surfaces `PendingAlreadyResolved` for a clean lexicon error.
+
+#### F22.6. Auto-dismissal on takedown
+
+Takedown is terminal. When a Takedown row INSERTs against a subject — whether moderator-recorded, policy-auto-recorded, or confirmed-pending-promoted — every unresolved `pending_policy_actions` row for that subject auto-dismisses inside the same transaction. The cascade closes the loop: a takendown subject can't have moderator-actionable pendings linger (the confirm path's `SubjectTakendown` defensive check would reject them anyway), so the recorder cleans up at the boundary.
+
+The cascade attribution depends on the takedown's path:
+
+- Moderator-recorded takedown → cascaded pendings' `resolved_by_did` is the moderator's DID.
+- Policy-auto-recorded takedown → cascaded pendings' `resolved_by_did` is the synthetic policy DID (`did:internal:policy`).
+- Confirmed-pending takedown → cascaded pendings' `resolved_by_did` is the confirming moderator's DID (the confirm flow's UPDATE to 'confirmed' on the just-confirmed pending lands first, so the cascade naturally excludes it via the `WHERE resolution IS NULL` filter).
+
+The cascade audit rows reuse the same `audit_log.action` value as the explicit moderator dismiss (`pending_policy_action_dismissed`), discriminated by a `triggered_by` field in the reason JSON: `"moderator_dismissed"` (manual) vs `"takedown_terminal"` (cascade). The cascade shape additionally carries `takedown_action_id` cross-referencing the triggering subject_actions row; audit consumers filter via `json_extract(reason, '$.triggered_by')`.
+
+Revocation of a takedown does **not** un-dismiss the cascaded pendings. They stay dismissed as forensic record — the moderator's takedown decision was what closed them, and revoking the takedown doesn't retroactively change that the cascade ran. If the subject later decay-and-recrosses (or moderator-action-and-recrosses) a threshold whose rule's prior firing was cascade-dismissed, a new pending fires per the conservative idempotency rules (§F22.2); the old cascade-dismissed pending is unaffected.
+
+#### F22.7. Schema linkage and audit log integration
+
+Two schema additions in migration `0005_policy_automation.sql`:
+
+`subject_actions` gains:
+- `actor_kind` (TEXT NOT NULL DEFAULT 'moderator'; CHECK in 'moderator' | 'policy'). Existing rows backfill to 'moderator'. New rows from the moderator path set 'moderator' explicitly; auto-recorded rows set 'policy'. Confirmed-pending rows set 'moderator' (the moderator takes responsibility by confirming).
+- `triggered_by_policy_rule` (TEXT NULL). The rule name that produced the row, NULL for moderator-recorded actions the engine had no hand in. Preserved through the pending → confirmed pipeline.
+
+The `subject_actions_no_update_except_revoke` trigger from #46 / #57 is extended: both new columns are write-once at INSERT.
+
+New table `pending_policy_actions` (id, subject_did, subject_uri, action_type, duration_ms, reason_codes, triggered_by_policy_rule, triggered_at, triggering_action_id FK→subject_actions(id), resolution, resolved_at, resolved_by_did, confirmed_action_id FK→subject_actions(id)). Same write-once-on-NULL-to-non-NULL trigger pattern as `subject_actions.revoked_*` and `subject_actions.emitted_label_uri` (#46 / #57): the four resolution columns transition once and freeze. DELETE aborts unconditionally.
+
+Audit vocabulary additions:
+
+- `pending_policy_action_confirmed` — moderator confirms a pending; reason JSON cross-references `pending_id`, `action_id`, `triggered_by_policy_rule`, plus the materialized action's shape.
+- `pending_policy_action_dismissed` — pending resolved without a materialized action. Two shapes share the same `audit_log.action` value, discriminated by reason JSON's `triggered_by` field: `moderator_dismissed` (#75 manual dismiss; carries `moderator_reason`) and `takedown_terminal` (#76 cascade auto-dismiss; carries `takedown_action_id`).
+
+There is no separate `pending_policy_action_created` audit row. Pending creation rides the precipitating action's `subject_action_recorded` audit row, which gains a `policy_consequence` field cross-referencing the pending's id (`{rule_fired, mode, pending_action_id}`). For mode=auto firings, the same `policy_consequence` field cross-references the auto-action's id (`{rule_fired, mode, auto_action_id}`). The hash chain locks the bundle (precipitating action + policy consequence + cascade dismissals) atomically.
+
+`cairn audit verify` continues to walk the chain across the policy automation surface; the v1.3 hash-chaining (§F10) is unchanged in shape.
+
+#### F22.8. Synthetic actor DID for policy-recorded actions
+
+Auto-recorded actions land with `actor_did = "did:internal:policy"` — a hardcoded synthetic DID identifying the policy automation engine itself. The DID has no PDS, no DID document, no signing key; it exists only as a string discriminator in cairn-mod's database and in audit-log `actor_did` fields.
+
+The source of truth for "who recorded this" is the `actor_kind` column (`'moderator'` vs `'policy'`); the synthetic DID is a human-readable convenience for forensic readers and operator dashboards. Moderator-confirmed pendings produce subject_actions rows with the moderator's real DID as `actor_did` and `actor_kind = 'moderator'`; the rule's name lives on `triggered_by_policy_rule` for provenance.
+
+Operators who want a different synthetic identifier can settle that in a future ticket (the constant lives in `crate::policy::automation::SYNTHETIC_POLICY_ACTOR_DID`); v1.6 ships the hardcoded value.
+
+#### F22.9. Public introspection: pending state is NOT visible
+
+The public read endpoints from §F21.8 are unchanged. `tools.cairn.public.getMyStrikeState`'s response carries the same `subjectStrikeState` envelope including `activeLabels`, where activeLabels reflects only labels emitted from confirmed (or moderator-recorded, or auto-recorded) actions. Pending actions, dismissed pendings, cascade audit context, and moderator rationale are NOT surfaced via the public surface.
+
+Reasoning per §4.2 disclosure 6: pending state isn't actionable for the subject (they cannot defend themselves against a moderator's pending review they don't know exists), pre-emptive disclosure creates pressure on moderators reviewing flags, and cairn-mod's transparency posture has limits — this is one of them. Subscribers see what cairn-mod has *done*, not what cairn-mod *might* do.
+
+#### F22.10. Operator surfaces (admin XRPC + CLI)
+
+Read:
+
+- `tools.cairn.admin.listPendingActions` (query) — paginated newest-first list with optional `subject` and `resolution` filters. Mod or Admin role. Returns `SubjectNotFound` (404) when the `subject` filter is provided and no `pending_policy_actions` row exists for that DID.
+- `tools.cairn.admin.getPendingAction` (query) — single row by id. Mod or Admin role. Returns `PendingActionNotFound` (404) when the id doesn't exist.
+
+Write:
+
+- `tools.cairn.admin.confirmPendingAction` (procedure) — promote pending → materialized action. Errors: `PendingActionNotFound`, `PendingAlreadyResolved`, `SubjectTakendown` (defensive race-closer).
+- `tools.cairn.admin.dismissPendingAction` (procedure) — resolve pending without action. Errors: `PendingActionNotFound`, `PendingAlreadyResolved`. No `SubjectTakendown` check (explicit dismissal works regardless of takedown state — and is in fact the cleanup path the cascade automates).
+
+CLI (HTTP-routed via the admin XRPC; no direct DB):
+
+- `cairn moderator pending list [--subject <DID>] [--cursor] [--limit] [--json]` — tabular id / subject / action_type / rule / triggered_at / days-since-triggered.
+- `cairn moderator pending view <pending-id> [--json]` — multi-line context.
+- `cairn moderator pending confirm <pending-id> [--reason "..."] [--json]` — `--reason` lands on the materialized action's `notes` column.
+- `cairn moderator pending dismiss <pending-id> [--reason "..."] [--json]` — `--reason` lands in the audit row's `moderator_reason` field.
+
+The CLI's `--resolution` filter on `list` is not exposed in v1.6 — the CLI is the moderator review queue (defaults to unresolved); confirmed/dismissed pendings remain reachable via the admin XRPC if needed. A future ticket can expose the filter if real workflow demand surfaces.
+
+#### F22.11. Deferred to future releases
+
+The v1.6 contribution is policy automation: rule declaration, threshold-crossing detection, mode=auto / mode=flag dispatch, conservative idempotency, takedown cascade, moderator review surfaces. Several adjacent capabilities are deliberately out of scope:
+
+- **Decay-and-recross re-firing** (v1.7+ if real demand surfaces) — v1.6's conservative idempotency requires explicit resolution (revoke / dismiss) to open a rule's window. A rule whose firing decayed below threshold but isn't explicitly resolved stays closed; the next crossing doesn't re-fire. Operators who want decay-driven re-firing can layer it via revocation tooling. v1.6 prioritizes operational predictability — operators don't get surprised by automated re-firing as decay timing approaches a crossing.
+- **Mode-applies-forward configuration mutation** (v1.7+) — config-reload semantics for in-flight pendings (changing a rule's mode after pendings exist for it) are deliberately untested at the integration layer for v1.6. Pure-function evaluator tests cover the relevant decision logic; the writer's config is currently spawn-time-only, so config-mutation requires a process restart anyway.
+- **PDS administrative actions** (v1.7+) — operator-config-gated bridge to `com.atproto.admin.*` on operator-controlled PDSes, layering on top of v1.6's auto-recorded actions. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the v1.6 default-disabled posture preserved from v1.5 §F21.9 carries forward.
+- **Webhook-driven pending creation** (v1.8+ if demand) — v1.6's pendings come exclusively from operator-declared threshold-crossing rules. External automated systems wanting to queue pendings (e.g., a third-party classifier) would land their own pending rows via a future endpoint.
+- **Policy-rule audit reports** (v1.8+ if demand) — operator-facing analytics: "how often did rule X fire? what's the confirm-vs-dismiss rate?" The data is in `audit_log` + `pending_policy_actions` already; aggregate views are a follow-on.
 
 ## 8. Lexicons
 
@@ -1341,13 +1513,16 @@ The signals exist because they're real release-quality indicators. They are soft
 - Cross-language interop tests (TypeScript consumer).
 - Multi-label-per-frame batching in `subscribeLabels`.
 - Operator-facing metrics surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause) and structured-log conventions. (`/health` and `/ready` probe endpoints shipped in v1.1 — see §F14.)
-- Account moderation state model shipped in v1.4 (see §F20). Label emission against moderation state shipped in v1.5 (see §F21) — the bridge between `subject_actions` and the labels table now lives in the recorder, with operator-declared mapping in `[label_emission]`. Items still deferred:
-  - Policy automation: auto-action recording when a subject crosses a strike threshold (v1.6). Operator-declared rules trigger automatic recordAction calls; per-rule mode (auto-record vs flag-for-review) chosen by operator config.
-  - PDS administrative actions (v1.7+). Operator-config-gated bridge that translates emitted labels into PDS-level account state changes by calling `com.atproto.admin.*` on operator-controlled PDSes. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments. Operators who run a PDS for their community (e.g., Hideaway with Prism credentials, or any deployment with admin access to its members' PDSes) opt in by declaring credentials and the per-action-type mapping; cairn-mod calls the admin endpoints in lockstep with label emission.
-  - Multiple-suspension-history accuracy in decay (v1.6+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
-  - Background cache refresh job for `subject_strike_state` (v1.6+). v1.4 ships lazy recompute-on-read; v1.5 didn't change the cache surface; a background job adds lease coordination + restart-handling complexity that defers cleanly until a real performance need surfaces.
-  - Per-reason decay overrides (v1.6+). All reasons currently share one decay function and window.
-  - Per-reason severity overrides on emitted reason labels (v1.6+ if demand). v1.5 fixes reason-label severity at `inform`; per-reason tuning is conceivable but not motivated.
+- Account moderation state model shipped in v1.4 (see §F20). Label emission against moderation state shipped in v1.5 (see §F21). Policy automation shipped in v1.6 (see §F22) — operator-declared rules trigger automatic action recording (mode=auto) or moderator-review pending rows (mode=flag) when subjects cross strike thresholds, with conservative idempotency, takedown cascade, and a confirm/dismiss moderator surface. Items still deferred:
+  - PDS administrative actions (v1.7+). Operator-config-gated bridge that translates emitted labels (and the v1.6 auto-recorded actions layered on top) into PDS-level account state changes by calling `com.atproto.admin.*` on operator-controlled PDSes. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments. Operators who run a PDS for their community (e.g., Hideaway with Prism credentials, or any deployment with admin access to its members' PDSes) opt in by declaring credentials and the per-action-type mapping; cairn-mod calls the admin endpoints in lockstep with label emission.
+  - Decay-and-recross re-firing (v1.7+ if demand). v1.6 ships conservative idempotency: a rule's window opens only on explicit resolution (revoke / dismiss / confirm-then-revoke). A future release may treat decay-driven count drops as window-opening events; deferred for operational predictability.
+  - Mode-applies-forward configuration mutation (v1.7+). Config-reload semantics for in-flight pendings (changing a rule's mode after pendings exist for it) are deliberately untested at the integration layer for v1.6; the writer's config is currently spawn-time-only.
+  - Multiple-suspension-history accuracy in decay (v1.7+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
+  - Background cache refresh job for `subject_strike_state` (v1.7+). v1.4 ships lazy recompute-on-read; v1.5 / v1.6 didn't change the cache surface; a background job adds lease coordination + restart-handling complexity that defers cleanly until a real performance need surfaces.
+  - Per-reason decay overrides (v1.7+). All reasons currently share one decay function and window.
+  - Per-reason severity overrides on emitted reason labels (v1.7+ if demand). v1.5 fixes reason-label severity at `inform`; per-reason tuning is conceivable but not motivated.
+  - Webhook-driven pending creation (v1.8+ if demand). v1.6's pendings come exclusively from operator-declared threshold-crossing rules. External automated systems (e.g., third-party classifiers) wanting to queue pendings would land their own pending rows via a future endpoint.
+  - Policy-rule audit reports (v1.8+ if demand). Operator-facing analytics — "how often did rule X fire? what's the confirm-vs-dismiss rate?" — over the data already in `audit_log` + `pending_policy_actions`.
   - Accessory bot or Web UI for user-facing strike-state rendering — separate project from cairn-mod itself; `tools.cairn.public.getMyStrikeState` (with `activeLabels` from §F21.8) is the substrate, not the UI.
 
 **Continued v1.x trajectory.** Subsequent v1.x releases continue toward Ozone parity for community-tier deployments. Full parity expected around v1.10 (review queue with distinct workflows for signals vs reports, source management with negation-on-revocation default, webhook signal intake, team management refinement). The v1.x sequence is incremental and each release ships in isolation; the trajectory is not a commitment to any particular release sequencing.
