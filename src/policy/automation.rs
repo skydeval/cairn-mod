@@ -38,7 +38,7 @@
 //!   `pub(crate)` from #51, exposed for cross-module reuse here).
 //! - `reason_codes` (optional `Vec<String>`) — reason codes
 //!   attached to the produced action. Defaults to
-//!   `["policy_threshold"]` when omitted. Each code must appear
+//!   `["policy-threshold"]` when omitted. Each code must appear
 //!   in the operator's `[moderation_reasons]` vocabulary;
 //!   cross-validation runs at [`crate::config::Config::validate`]
 //!   level via [`PolicyAutomationPolicy::validate_reason_codes_against`].
@@ -85,9 +85,16 @@ pub const SYNTHETIC_POLICY_ACTOR_DID: &str = "did:internal:policy";
 
 /// Default reason code applied to a rule's produced action when
 /// the operator omits `reason_codes` on the rule. Operators using
-/// this default must declare a `policy_threshold` reason in their
+/// this default must declare a `policy-threshold` reason in their
 /// `[moderation_reasons]` vocabulary.
-pub const DEFAULT_POLICY_REASON_CODE: &str = "policy_threshold";
+///
+/// The identifier uses a hyphen, not an underscore: reason
+/// identifiers are validated as `[a-z0-9-]` only by
+/// [`crate::moderation::reasons::ReasonVocabulary`], so an
+/// underscore-form constant would be unusable in practice
+/// (cross-validation would reject any vocabulary that tried to
+/// declare it).
+pub const DEFAULT_POLICY_REASON_CODE: &str = "policy-threshold";
 
 /// Whether a rule auto-records the resulting action or queues a
 /// pending row for moderator review.
@@ -461,8 +468,8 @@ mod tests {
     }
 
     #[test]
-    fn default_reason_code_is_policy_threshold() {
-        assert_eq!(DEFAULT_POLICY_REASON_CODE, "policy_threshold");
+    fn default_reason_code_is_policy_dash_threshold() {
+        assert_eq!(DEFAULT_POLICY_REASON_CODE, "policy-threshold");
     }
 
     // ---------- enabled flag ----------
@@ -509,7 +516,7 @@ mod tests {
         assert_eq!(rule.action_type, ActionType::Warning);
         assert_eq!(rule.mode, PolicyMode::Auto);
         assert!(rule.duration.is_none());
-        assert_eq!(rule.reason_codes, vec!["policy_threshold".to_string()]);
+        assert_eq!(rule.reason_codes, vec!["policy-threshold".to_string()]);
     }
 
     #[test]
@@ -521,7 +528,7 @@ mod tests {
                     "action_type": "temp_suspension",
                     "mode": "auto",
                     "duration": "P3D",
-                    "reason_codes": ["policy_threshold", "spam"],
+                    "reason_codes": ["policy-threshold", "spam"],
                 }
             }
         }));
@@ -530,7 +537,7 @@ mod tests {
         assert_eq!(rule.duration, Some(Duration::from_secs(3 * 86_400)));
         assert_eq!(
             rule.reason_codes,
-            vec!["policy_threshold".to_string(), "spam".to_string()]
+            vec!["policy-threshold".to_string(), "spam".to_string()]
         );
     }
 
@@ -905,7 +912,7 @@ mod tests {
     #[test]
     fn cross_validation_default_reason_code_must_be_in_vocabulary() {
         // When operator omits reason_codes on a rule, it defaults
-        // to ["policy_threshold"]. If the operator's vocabulary
+        // to ["policy-threshold"]. If the operator's vocabulary
         // doesn't declare that identifier, cross-validation fails.
         let cfg = config_with_policy_and_reasons(
             serde_json::json!({
@@ -924,7 +931,7 @@ mod tests {
         let policy = PolicyAutomationPolicy::from_config(&cfg).expect("from_config");
         let vocab = ReasonVocabulary::from_config(&cfg).expect("vocab");
         let err = policy.validate_reason_codes_against(&vocab).unwrap_err();
-        assert!(format!("{err}").contains("policy_threshold"));
+        assert!(format!("{err}").contains("policy-threshold"));
     }
 
     #[test]

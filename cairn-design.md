@@ -1124,7 +1124,7 @@ enabled = true
 threshold_strikes = 5
 action_type = "warning"
 mode = "auto"
-reason_codes = ["policy_threshold"]
+reason_codes = ["policy-threshold"]
 
 [policy_automation.rules.flag_indef_at_15]
 threshold_strikes = 15
@@ -1137,7 +1137,7 @@ threshold_strikes = 10
 action_type = "temp_suspension"
 mode = "auto"
 duration = "P7D"
-reason_codes = ["policy_threshold"]
+reason_codes = ["policy-threshold"]
 ```
 
 Per-rule fields:

@@ -263,7 +263,7 @@ mod tests {
             } else {
                 None
             },
-            reason_codes: vec!["policy_threshold".to_string()],
+            reason_codes: vec!["policy-threshold".to_string()],
         }
     }
 

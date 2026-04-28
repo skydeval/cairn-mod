@@ -4399,8 +4399,8 @@ mod tests {
         let json = build_record_action_audit_reason(
             43,
             ActionType::Warning,
-            "policy_threshold",
-            &["policy_threshold".to_string()],
+            "policy-threshold",
+            &["policy-threshold".to_string()],
             0,
             0,
             false,

@@ -560,7 +560,7 @@ pub struct PolicyRuleToml {
     /// Each entry must exist in the operator's
     /// `[moderation_reasons]` vocabulary; cross-validation lives
     /// at [`Config::validate`]. When omitted, the resolver
-    /// substitutes a single-element `["policy_threshold"]` — that
+    /// substitutes a single-element `["policy-threshold"]` — that
     /// identifier must therefore appear in the vocabulary, or the
     /// operator must specify `reason_codes` explicitly on every
     /// rule.
