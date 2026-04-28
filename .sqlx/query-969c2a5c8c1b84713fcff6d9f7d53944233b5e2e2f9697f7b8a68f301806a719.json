@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason FROM audit_log\n               WHERE action = 'pending_policy_action_dismissed'\n                 AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'\n               ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "969c2a5c8c1b84713fcff6d9f7d53944233b5e2e2f9697f7b8a68f301806a719"
+}

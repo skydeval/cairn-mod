@@ -4640,3 +4640,519 @@ async fn cascade_revoke_re_fires_pending_rule_after_takedown_revoked() {
         "re-fired pending is fresh, unresolved"
     );
 }
+
+// =================== policy automation lifecycle (#81, v1.6) ===================
+//
+// End-to-end composition tests covering the full v1.6 policy
+// automation pipeline. Atomic operations have unit and per-feature
+// integration coverage from #73 / #74 / #75 / #76 / #77 / #80;
+// these tests verify the *story* — that all pieces compose
+// correctly into the lifecycle a moderator actually exercises.
+//
+// Each scenario threads a complete narrative and asserts ALL
+// relevant state at completion: subject_actions counts and
+// columns, pending_policy_actions resolution state, labels
+// emitted (or not), audit_log shape, strike-state cache
+// reflecting reality.
+
+/// Read the cached strike count for a subject. Used by lifecycle
+/// tests to spot-check the cache reflects writer's recompute
+/// after each action.
+async fn cached_strike_count(h: &Harness, subject_did: &str) -> i64 {
+    sqlx::query_scalar!(
+        r#"SELECT current_strike_count AS "c!: i64"
+           FROM subject_strike_state WHERE subject_did = ?1"#,
+        subject_did,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap()
+}
+
+/// Count `subject_actions` rows for a subject, optionally
+/// filtered to actor_kind. `None` → all rows.
+async fn count_subject_actions(h: &Harness, subject_did: &str, actor_kind: Option<&str>) -> i64 {
+    match actor_kind {
+        Some(kind) => sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM subject_actions WHERE subject_did = ?1 AND actor_kind = ?2",
+            subject_did,
+            kind,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap(),
+        None => sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM subject_actions WHERE subject_did = ?1",
+            subject_did,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn lifecycle_auto_rule_full_story() {
+    // Story:
+    //   Fresh subject → strikes accumulate → rule fires at
+    //   crossing → continued strikes don't re-fire → revoke
+    //   auto-action AND precipitating → re-cross fires the rule
+    //   again. Pin the cache + audit chain at each major step.
+    let policy = policy_with_rules(vec![auto_warning_rule("warn_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Action 1: 0 → 1 strike (curve[0]). No rule fires (1 < 3).
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    assert_eq!(cached_strike_count(&h, SUBJECT_DID).await, 1);
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, Some("policy")).await,
+        0,
+        "below threshold: rule has not fired"
+    );
+
+    // Action 2: 1 → 3 strike (curve[1]). Crosses threshold 3.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    assert_eq!(cached_strike_count(&h, SUBJECT_DID).await, 3);
+    let auto1: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND triggered_by_policy_rule = 'warn_at_3'
+           ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    // The crossing audit row references the auto-action's id via
+    // policy_consequence; pin the linkage.
+    let precip_audit: Value = serde_json::from_str(
+        sqlx::query_scalar!(
+            r#"SELECT reason FROM audit_log
+               WHERE action = 'subject_action_recorded'
+               ORDER BY id DESC LIMIT 1 OFFSET 1"#,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+        .as_deref()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        precip_audit["policy_consequence"]["rule_fired"],
+        "warn_at_3"
+    );
+    assert_eq!(
+        precip_audit["policy_consequence"]["auto_action_id"]
+            .as_i64()
+            .unwrap(),
+        auto1
+    );
+
+    // Action 3: 3 → 7 strike (full base_weight). Above threshold,
+    // no fresh crossing → rule does NOT re-fire.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    assert_eq!(cached_strike_count(&h, SUBJECT_DID).await, 7);
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, Some("policy")).await,
+        1,
+        "still one auto-action: window remained closed"
+    );
+
+    // Open the window: revoke the auto-action AND every
+    // strike-bearing precipitating action so strikes drop to 0.
+    revoke_action(&h, auto1, Some("test cleanup")).await;
+    let strike_bearing: Vec<i64> = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE subject_did = ?1 AND actor_kind = 'moderator' AND revoked_at IS NULL"#,
+        SUBJECT_DID,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    for id in strike_bearing {
+        revoke_action(&h, id, Some("test cleanup")).await;
+    }
+    assert_eq!(
+        cached_strike_count(&h, SUBJECT_DID).await,
+        0,
+        "all actions revoked → cache reflects 0 strikes"
+    );
+
+    // Re-cross: action 1 lands curve[0]=1, action 2 lands
+    // curve[1]=2 (cumulative 3). Rule re-fires on action 2.
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, Some("policy")).await,
+        2,
+        "rule re-fired: two auto-actions exist (one revoked, one fresh)"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_flag_rule_confirm_full_story() {
+    // Story:
+    //   Fresh subject → flag rule fires → pending lands (no
+    //   action, no labels) → moderator confirms → materialized
+    //   action lands with rule provenance preserved → labels
+    //   emit → strike state recomputes → audit chain captures
+    //   the bundle.
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3, fires
+    let pending_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    // Pending state: unresolved. No materialized auto-action;
+    // labels reflect ONLY the precipitating temp_suspensions
+    // (action label + reason label per emission default).
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, Some("policy")).await,
+        0,
+        "flag mode does not materialize"
+    );
+    let labels_pre_confirm: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert!(
+        labels_pre_confirm >= 2,
+        "precipitating actions emitted labels"
+    );
+
+    // Moderator confirms via the admin XRPC.
+    let confirm_resp =
+        post_confirm_pending(&h, ADMIN_DID, serde_json::json!({"pendingId": pending_id})).await;
+    assert!(confirm_resp.status().is_success());
+    let materialized_id = confirm_resp.json::<Value>().await.unwrap()["actionId"]
+        .as_i64()
+        .unwrap();
+
+    // Materialized row carries actor_kind='moderator' (responsibility)
+    // AND triggered_by_policy_rule (forensic provenance).
+    let materialized = sqlx::query!(
+        r#"SELECT
+             actor_kind AS "actor_kind!: String",
+             actor_did AS "actor_did!: String",
+             triggered_by_policy_rule,
+             action_type AS "action_type!: String"
+           FROM subject_actions WHERE id = ?1"#,
+        materialized_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(materialized.actor_kind, "moderator");
+    assert_eq!(materialized.actor_did, ADMIN_DID);
+    assert_eq!(
+        materialized.triggered_by_policy_rule.as_deref(),
+        Some("flag_at_3")
+    );
+    assert_eq!(materialized.action_type, "indef_suspension");
+
+    // Pending row: resolution + linkage.
+    let pending = sqlx::query!(
+        r#"SELECT resolution, confirmed_action_id
+           FROM pending_policy_actions WHERE id = ?1"#,
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending.resolution.as_deref(), Some("confirmed"));
+    assert_eq!(pending.confirmed_action_id, Some(materialized_id));
+
+    // Labels emitted for the indef_suspension; total label count
+    // grew. Audit chain has a `pending_policy_action_confirmed`
+    // row referencing the pending_id.
+    let labels_post: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert!(
+        labels_post > labels_pre_confirm,
+        "indef_suspension emits labels on confirm"
+    );
+    let confirm_audit_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM audit_log WHERE action = 'pending_policy_action_confirmed'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(confirm_audit_count, 1);
+}
+
+#[tokio::test]
+async fn lifecycle_flag_rule_dismiss_full_story() {
+    // Story:
+    //   Fresh subject → flag rule fires → moderator dismisses
+    //   with rationale → no materialization, no labels, strike
+    //   state unchanged, audit row carries `triggered_by:
+    //   "moderator_dismissed"` and the moderator's reason.
+    let policy = policy_with_rules(vec![flag_indef_rule("flag_at_3", 3)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let pending_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    let pre_count = cached_strike_count(&h, SUBJECT_DID).await;
+    let pre_actions = count_subject_actions(&h, SUBJECT_DID, None).await;
+    let pre_labels: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+    let resp = post_dismiss_pending(
+        &h,
+        ADMIN_DID,
+        serde_json::json!({"pendingId": pending_id, "reason": "policy too aggressive"}),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    // Pending dismissed; nothing else changed.
+    let resolution: Option<String> = sqlx::query_scalar!(
+        "SELECT resolution FROM pending_policy_actions WHERE id = ?1",
+        pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(resolution.as_deref(), Some("dismissed"));
+    assert_eq!(
+        cached_strike_count(&h, SUBJECT_DID).await,
+        pre_count,
+        "dismissal does not perturb strike state"
+    );
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, None).await,
+        pre_actions,
+        "dismissal does not materialize an action"
+    );
+    let post_labels: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM labels")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(post_labels, pre_labels, "dismissal does not emit labels");
+
+    // Audit row's reason JSON: triggered_by + moderator_reason.
+    let dismiss_audit: Value = serde_json::from_str(
+        sqlx::query_scalar!(
+            r#"SELECT reason FROM audit_log
+               WHERE action = 'pending_policy_action_dismissed'
+               ORDER BY id DESC LIMIT 1"#,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+        .as_deref()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(dismiss_audit["triggered_by"], "moderator_dismissed");
+    assert_eq!(dismiss_audit["moderator_reason"], "policy too aggressive");
+    assert_eq!(dismiss_audit["pending_id"].as_i64().unwrap(), pending_id);
+}
+
+#[tokio::test]
+async fn lifecycle_takedown_cascade_full_story() {
+    // Story:
+    //   Subject accumulates → flag_indef pending lands → strikes
+    //   keep climbing → auto_takedown fires → cascade dismisses
+    //   the indef pending in the same transaction → !takedown
+    //   label emits → recordAction against takendown subject
+    //   still succeeds (no SubjectTakendown gate on the moderator
+    //   path) but no rule fires.
+    let policy = policy_with_rules(vec![
+        flag_indef_rule("flag_at_3", 3),
+        auto_takedown_rule("td_at_7", 7),
+    ]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Action 1: 0 → 1 (no cross). Action 2: 1 → 3 (crosses
+    // flag_at_3 → indef pending lands). Action 3: 3 → 7 (crosses
+    // td_at_7 → auto-takedown lands; cascade dismisses indef
+    // pending).
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+    let indef_pending_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64" FROM pending_policy_actions ORDER BY id ASC LIMIT 1"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    // Auto-takedown landed.
+    let takedown_id: i64 = sqlx::query_scalar!(
+        r#"SELECT id AS "id!: i64"
+           FROM subject_actions
+           WHERE actor_kind = 'policy' AND action_type = 'takedown'"#,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+
+    // Cascade auto-dismissed the indef pending; the cascade
+    // audit row's reason JSON identifies the trigger.
+    let pending_state = sqlx::query!(
+        r#"SELECT resolution, resolved_by_did
+           FROM pending_policy_actions WHERE id = ?1"#,
+        indef_pending_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_state.resolution.as_deref(), Some("dismissed"));
+    assert_eq!(pending_state.resolved_by_did.as_deref(), Some(POLICY_DID));
+    let cascade_audit: Value = serde_json::from_str(
+        sqlx::query_scalar!(
+            r#"SELECT reason FROM audit_log
+               WHERE action = 'pending_policy_action_dismissed'
+                 AND json_extract(reason, '$.triggered_by') = 'takedown_terminal'
+               ORDER BY id DESC LIMIT 1"#,
+        )
+        .fetch_one(&h.pool)
+        .await
+        .unwrap()
+        .as_deref()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        cascade_audit["takedown_action_id"].as_i64().unwrap(),
+        takedown_id
+    );
+
+    // !takedown label emitted on the takedown row.
+    let takedown_label: Option<String> = sqlx::query_scalar!(
+        "SELECT emitted_label_uri FROM subject_actions WHERE id = ?1",
+        takedown_id,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(takedown_label.as_deref(), Some("!takedown"));
+
+    // Behavioral note: recording another action against a
+    // takendown subject does NOT reject — moderators can record
+    // forensic Notes/Warnings against takendown subjects. The
+    // evaluator's takendown gate just prevents any rule firing.
+    let policy_actions_before = count_subject_actions(&h, SUBJECT_DID, Some("policy")).await;
+    record_warning(&h, &["spam"]).await;
+    assert_eq!(
+        count_subject_actions(&h, SUBJECT_DID, Some("policy")).await,
+        policy_actions_before,
+        "no policy rule fires while subject is takendown"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_severity_tie_break_higher_threshold_wins() {
+    // Two same-severity rules at different thresholds. Each
+    // rule fires on the action that crosses ITS threshold from
+    // below; the lower-threshold rule fires first, the higher
+    // fires later. Pins #72's per-crossing match logic at the
+    // integration layer.
+    //
+    // Pure "tie-break on the same crossing event" with equal
+    // thresholds requires identical thresholds AND a single
+    // action that crosses both — but the dampening curve means
+    // a single action's strike contribution can't span multiple
+    // threshold values simultaneously. The integration test
+    // pins the per-crossing-event behavior; the pure-function
+    // tests in src/policy/evaluator.rs cover the
+    // tie_within_severity case directly.
+    let policy = policy_with_rules(vec![
+        auto_warning_rule("warn_at_3", 3),
+        auto_warning_rule("warn_at_7", 7),
+    ]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 0 → 1
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 1 → 3 → warn_at_3 fires
+    record_temp_suspension(&h, vec!["hate-speech"]).await; // 3 → 7 → warn_at_7 fires
+
+    let policy_rows = sqlx::query!(
+        r#"SELECT triggered_by_policy_rule
+           FROM subject_actions
+           WHERE actor_kind = 'policy'
+           ORDER BY id ASC"#,
+    )
+    .fetch_all(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(policy_rows.len(), 2);
+    assert_eq!(
+        policy_rows[0].triggered_by_policy_rule.as_deref(),
+        Some("warn_at_3"),
+        "first crossing fires lower-threshold rule"
+    );
+    assert_eq!(
+        policy_rows[1].triggered_by_policy_rule.as_deref(),
+        Some("warn_at_7"),
+        "second crossing fires higher-threshold rule"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_recordaction_against_takendown_subject_does_not_fire_rules() {
+    // Behavioral pinning: handle_record_action has NO
+    // SubjectTakendown gate (only handle_confirm_pending_action
+    // does, defensively). Recording a moderator action against a
+    // takendown subject succeeds — the action lands as forensic
+    // record — but the policy evaluator's takendown gate
+    // prevents any rule from firing.
+    //
+    // Chainlink #11's claim that "recordAction's existing
+    // validation rejects" is not the actual implementation;
+    // this test pins the actual behavior so a future tightening
+    // (if operators demand it) is a deliberate change.
+    let policy = policy_with_rules(vec![auto_warning_rule("warn_at_1", 1)]);
+    let h = spawn_with_policies(cairn_mod::LabelEmissionPolicy::defaults(), policy).await;
+    grant_role(&h.pool, ADMIN_DID, "admin").await;
+
+    // Take the subject down via a moderator-recorded takedown.
+    record_takedown(&h, &["hate-speech"]).await;
+    let policy_actions_before = count_subject_actions(&h, SUBJECT_DID, Some("policy")).await;
+
+    // Subsequent recordAction succeeds; the rule does not fire
+    // because the evaluator's `subject_is_takendown` gate
+    // returns None before any rule_matches_crossing check.
+    record_warning(&h, &["spam"]).await;
+    record_temp_suspension(&h, vec!["hate-speech"]).await;
+
+    let policy_actions_after = count_subject_actions(&h, SUBJECT_DID, Some("policy")).await;
+    assert_eq!(
+        policy_actions_after, policy_actions_before,
+        "no policy rule fires while subject is takendown"
+    );
+    let pending_count: i64 = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM pending_policy_actions WHERE subject_did = ?1",
+        SUBJECT_DID,
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending_count, 0,
+        "no flag-mode rule queues a pending while takendown"
+    );
+}
