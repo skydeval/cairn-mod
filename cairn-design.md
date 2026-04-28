@@ -1146,9 +1146,11 @@ Per-rule fields:
 - `action_type` (required): one of `warning` / `note` / `temp_suspension` / `indef_suspension` / `takedown`.
 - `mode` (required): `auto` (synthetic-policy-recorded action lands inside the same transaction) or `flag` (`pending_policy_actions` row lands awaiting moderator review).
 - `duration` (required for `temp_suspension`, rejected otherwise): ISO-8601 duration. The same parser the moderator-recorded path uses (`P{n}D`, `P{n}W`, `PT{n}H`, `PT{n}M`, `PT{n}S`, and combinations).
-- `reason_codes` (required, non-empty): identifiers from `[moderation_reasons]`. Validated at config load; the rule's reasons must all exist in the operator's vocabulary.
+- `reason_codes` (optional, non-empty when present): identifiers from `[moderation_reasons]`. Validated at config load; the rule's reasons must all exist in the operator's vocabulary. Reason identifiers are validated as `[a-z0-9-]` only — lowercase ASCII letters, digits, and hyphens; **no underscores** (the same constraint that applies to `[moderation_reasons]` keys, since the rule's reason_codes resolve against that vocabulary).
 
-Rule-naming convention: lowercase ASCII, digits, and underscores; `[a-z][a-z0-9_]{0,63}`. Names are unique within `[policy_automation]`. The block is optional — when absent, the policy engine is disabled and the recorder behaves identically to v1.5.
+When `reason_codes` is omitted on a rule, the resolver substitutes a single-element default of `["policy-threshold"]` (the constant `crate::policy::automation::DEFAULT_POLICY_REASON_CODE`). Operators relying on the default must therefore declare a `policy-threshold` reason in `[moderation_reasons]`, OR specify `reason_codes` explicitly on every rule. Cross-block validation at config load catches the missing-default case and refuses startup with a clear message.
+
+Rule-naming convention: lowercase ASCII, digits, and underscores; `[a-z][a-z0-9_]{0,63}`. Names are unique within `[policy_automation]`. (Rule names use underscores; reason identifiers use hyphens — distinct vocabularies, distinct conventions.) The block is optional — when absent, the policy engine is disabled and the recorder behaves identically to v1.5.
 
 #### F22.2. Threshold-crossing semantics
 
@@ -1179,9 +1181,11 @@ A pre-existing unrevoked Takedown blocks every rule firing — the evaluator's t
 
 #### F22.4. Auto vs flag mode
 
-`mode = "auto"`: the rule's consequence is a real `subject_actions` row inserted in the same transaction as the precipitating action. The auto-action carries `actor_kind = 'policy'`, `actor_did = "did:internal:policy"`, and `triggered_by_policy_rule = "<rule name>"`. Label emission runs through the §F21 path — action label + reason labels per the operator's `[label_emission]` mapping. The auto-action itself can in turn fire cascading consequences if it is a Takedown (§F22.6).
+`mode = "auto"`: the rule's consequence is a real `subject_actions` row inserted in the same transaction as the precipitating action. The auto-action carries `actor_kind = 'policy'`, `actor_did = "did:internal:policy"`, and `triggered_by_policy_rule = "<rule name>"`. Label emission runs through the same §F21 path moderator-recorded actions take — `resolve_action_labels` + `resolve_reason_labels` consume the rule's `action_type` and `reason_codes` exactly as if a moderator had recorded the action manually, producing the action label per `[label_emission]` mapping plus per-reason-code labels under the configured prefix. Sign-and-persist + audit chaining are unchanged from #60. The auto-action itself can in turn fire cascading consequences if it is a Takedown (§F22.6).
 
 `mode = "flag"`: the rule's consequence is a `pending_policy_actions` row. No `subject_actions` row, no label emission. The pending row carries the rule's proposed shape (`action_type`, `duration`, `reason_codes`, `triggered_by_policy_rule`) and a foreign-key reference to the precipitating action via `triggering_action_id`. The pending awaits moderator review through the read + resolve surfaces (§F22.10).
+
+**Subject-URI inheritance.** Both auto-recorded and pending consequences inherit the precipitating action's `subject_uri`. A rule firing on a record-level recordAction (`subject = at://did:plc:.../app.bsky.feed.post/abc`) lands as a record-level consequence — the auto-recorded `subject_actions` row OR the `pending_policy_actions` row carries the same `subject_uri` and the labels emit against the same record. Operators expecting account-level enforcement on a record-level trigger should record manually; the policy engine never broadens scope.
 
 Mode applies forward only. Pending rows already in the queue keep the mode they were created under; if an operator changes a rule's mode in config and reloads, the existing pendings are unaffected — they resolve via the same confirm/dismiss surfaces. New rule firings after the reload use the new mode.
 
@@ -1190,6 +1194,8 @@ Mode applies forward only. Pending rows already in the queue keep the mode they 
 A pending action is resolved by exactly one of two moderator-tier surfaces:
 
 **Confirm** (`tools.cairn.admin.confirmPendingAction`, `cairn moderator pending confirm`): promotes the pending's proposed action to a real `subject_actions` row. The materialized row carries `actor_kind = 'moderator'` (the moderator takes responsibility by confirming), `actor_did = <moderator DID>`, AND `triggered_by_policy_rule = <pending's rule>` for forensic provenance. Label emission runs; strike state recomputes; the pending row's resolution columns transition NULL → 'confirmed' with `confirmed_action_id` linking forward to the materialized row. Strike values for the materialized action are computed at confirmation time, not proposal time — the moderator's decision is what the strike state should reflect; `expires_at` for `temp_suspension` re-anchors on the confirmation wall-clock.
+
+The dual-attribution shape — `actor_kind = 'moderator'` AND `triggered_by_policy_rule` non-NULL — surfaces in operator-facing tools as a moderator-attributed action that nonetheless preserves which rule originally proposed it. `cairn moderator history` displays the row with `ACTOR = moderator` (column added in v1.6); the rule attribution stays visible via `--json` (`triggeredByPolicyRule` field) and through the audit chain. Forensic readers reconstructing "what did the policy engine surface for review, and what did moderators do about it?" walk the `triggered_by_policy_rule` foreign-key into `pending_policy_actions` and follow `confirmed_action_id` back to the materialized row.
 
 The confirm path defends against a `SubjectTakendown` race: if a takedown lands between the pending's creation and the confirm call, the confirm rejects with the `SubjectTakendown` error rather than materialize an action that contradicts terminal-state semantics. In steady state this is unreachable (the takedown's cascade auto-dismisses the pending — §F22.6); the defensive check closes the race.
 
@@ -1208,6 +1214,8 @@ The cascade attribution depends on the takedown's path:
 - Confirmed-pending takedown → cascaded pendings' `resolved_by_did` is the confirming moderator's DID (the confirm flow's UPDATE to 'confirmed' on the just-confirmed pending lands first, so the cascade naturally excludes it via the `WHERE resolution IS NULL` filter).
 
 The cascade audit rows reuse the same `audit_log.action` value as the explicit moderator dismiss (`pending_policy_action_dismissed`), discriminated by a `triggered_by` field in the reason JSON: `"moderator_dismissed"` (manual) vs `"takedown_terminal"` (cascade). The cascade shape additionally carries `takedown_action_id` cross-referencing the triggering subject_actions row; audit consumers filter via `json_extract(reason, '$.triggered_by')`.
+
+Each cascade audit row's `actor_did` mirrors the cascade's `resolved_by_did` column above. Operators auditing cascade activity originating from the policy engine specifically (rather than from a moderator's manual takedown) filter on `actor_did = "did:internal:policy"` AND `action = "pending_policy_action_dismissed"` AND `json_extract(reason, '$.triggered_by') = "takedown_terminal"`. The synthetic DID is the human-readable signal that the cascade fired automatically rather than by moderator decision; the underlying `actor_kind` discriminator on the triggering takedown's subject_actions row is the durable source of truth (§F22.8).
 
 Revocation of a takedown does **not** un-dismiss the cascaded pendings. They stay dismissed as forensic record — the moderator's takedown decision was what closed them, and revoking the takedown doesn't retroactively change that the cascade ran. If the subject later decay-and-recrosses (or moderator-action-and-recrosses) a threshold whose rule's prior firing was cascade-dismissed, a new pending fires per the conservative idempotency rules (§F22.2); the old cascade-dismissed pending is unaffected.
 
