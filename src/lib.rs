@@ -27,6 +27,7 @@ pub mod label;
 pub mod labels;
 pub mod moderation;
 pub mod moderators;
+pub mod pds_admin;
 pub mod policy;
 pub mod report;
 pub mod serve;

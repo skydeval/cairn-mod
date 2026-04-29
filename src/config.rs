@@ -153,6 +153,162 @@ pub struct Config {
     ///   reason_codes match the `[moderation_reasons]` vocabulary).
     #[serde(default)]
     pub policy_automation: Option<PolicyAutomationPolicyToml>,
+    /// `[pds_admin]` block (§F23, #83, v1.7). TOML projection of
+    /// the operator's PDS-admin outbound bridge config; resolves
+    /// to a runtime [`crate::pds_admin::PdsAdminPolicy`] via
+    /// `PdsAdminPolicy::from_config`.
+    ///
+    /// Two states:
+    /// - `None` — operator declared no block; the resolver returns
+    ///   the disabled default (engine off; backend unconfigured;
+    ///   action_map empty).
+    /// - `Some(_)` — partial or full operator declaration. When
+    ///   `enabled = true`, exactly one backend subsection must be
+    ///   present (v1.7 supports `[pds_admin.ozone]` only); the
+    ///   `[pds_admin.action_map]` table must cover every cairn-mod
+    ///   action type. When `enabled = false`, subsections may be
+    ///   present (forward-compat) but are not cross-validated.
+    ///
+    /// Cross-block validation against
+    /// [`crate::moderation::types::ActionType`]'s vocabulary lives
+    /// in [`Config::validate`] (every action_map key must parse
+    /// via `ActionType::from_db_str`); the resolver in
+    /// `crate::pds_admin::PdsAdminPolicy::from_config` handles
+    /// per-block validation (URL scheme, env-var resolution,
+    /// allowed-method set, with_lift_after gating).
+    #[serde(default)]
+    pub pds_admin: Option<PdsAdminConfigToml>,
+}
+
+/// TOML projection of [`crate::pds_admin::PdsAdminPolicy`] (§F23,
+/// #83, v1.7). Tops the `[pds_admin]` block. v1.7 ships
+/// bsky-PDS-only (`[pds_admin.ozone]`); `[pds_admin.locus]` is
+/// reserved for v1.8 and rejected at config-load with a clear
+/// "deferred to v1.8" message rather than silently ignored.
+///
+/// Unknown sibling subsections (anything other than the named
+/// fields and `locus`) are captured into [`Self::other_backends`]
+/// for the same reject-with-helpful-message treatment, so an
+/// operator typo (`[pds_admin.ozonee]`) surfaces at config load
+/// instead of silently disabling the bridge.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PdsAdminConfigToml {
+    /// Master toggle. `false` (default) — engine off; the
+    /// outbound bridge is not consulted on any recordAction.
+    /// `true` — engine on; exactly one backend subsection must
+    /// be present and the action_map must cover every cairn-mod
+    /// action type.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `[pds_admin.ozone]` subsection — the bsky-PDS backend
+    /// config. Required when `enabled = true`. May be present
+    /// when `enabled = false` for forward-compat (the
+    /// per-block resolver still validates it).
+    #[serde(default)]
+    pub ozone: Option<PdsAdminOzoneToml>,
+    /// `[pds_admin.action_map]` subsection. Required when
+    /// `enabled = true`. Maps cairn-mod action types
+    /// (`takedown`, `temp_suspension`, etc.) to backend method
+    /// names. Each value is either a bare string (the method
+    /// name or `"skip"`) or a table (`{ method = "...",
+    /// with_lift_after = bool }`); see [`PdsAdminActionMapValueToml`].
+    #[serde(default)]
+    pub action_map: Option<BTreeMap<String, PdsAdminActionMapValueToml>>,
+    /// `[pds_admin.locus]` subsection — Aurora-Locus backend.
+    /// Reserved for v1.8; rejected at config-load in v1.7 with
+    /// a clear "deferred to v1.8" message. Parsed as opaque
+    /// JSON so v1.7 doesn't have to know the v1.8 schema; only
+    /// that the key was set.
+    #[serde(default)]
+    pub locus: Option<serde_json::Value>,
+    /// Catch-all for unrecognized backend subsection names
+    /// (e.g., a typo like `[pds_admin.ozonee]` or a future
+    /// `[pds_admin.kestrel]`). v1.7 rejects each at
+    /// config-load. The flatten attribute collects every
+    /// unmatched key under `[pds_admin]` here; the named
+    /// fields above (`enabled`, `ozone`, `action_map`, `locus`)
+    /// are consumed first.
+    #[serde(flatten, default)]
+    pub other_backends: BTreeMap<String, serde_json::Value>,
+}
+
+/// TOML projection of the bsky-PDS backend config (§F23, #83).
+/// Maps to the runtime
+/// [`crate::pds_admin::OzoneBackendConfig`] via
+/// [`crate::pds_admin::PdsAdminPolicy::from_config`], which:
+/// - parses `pds_url` via [`url::Url::parse`] and rejects
+///   non-https schemes (v1.7 is production-https-only — http
+///   support via a future `[server].dev_mode` flag is deferred);
+/// - reads the env var named by `admin_password_env` and
+///   rejects empty/unset values;
+/// - clamps `request_timeout_seconds` into `1..=60`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PdsAdminOzoneToml {
+    /// Base URL of the bsky-PDS this cairn-mod talks to. Must
+    /// parse via [`url::Url::parse`] and use the `https` scheme.
+    /// http support is deferred to a future `[server].dev_mode`
+    /// flag (#83 explicitly does NOT introduce that flag);
+    /// operators wanting local-mode testing in v1.7 should run
+    /// their bsky-PDS behind a localhost TLS proxy.
+    pub pds_url: String,
+    /// Name of the environment variable holding the PDS admin
+    /// password (the bsky-PDS Basic-auth credential). Empty or
+    /// unset values are rejected at config load. The variable's
+    /// value is read once at config load and resolved into the
+    /// runtime config; subsequent env mutations don't affect
+    /// the running process.
+    pub admin_password_env: String,
+    /// Per-request HTTP timeout in seconds. Defaults to 10 when
+    /// omitted; clamped to 1..=60 at validation time.
+    #[serde(default = "default_pds_admin_request_timeout_seconds")]
+    pub request_timeout_seconds: u32,
+}
+
+/// One entry in [`PdsAdminConfigToml::action_map`]. v1.7's TOML
+/// shape supports two forms — a bare method name string, or a
+/// `{ method, with_lift_after }` table. The table form is
+/// reserved for the v1.8 deferred-execution layer
+/// (`with_lift_after = true` triggers a follow-up restore call);
+/// v1.7 parses the table syntactically (forward-compat) but
+/// rejects `with_lift_after = true` at config load.
+///
+/// `serde(untagged)` handles the dual shape: try `Bare(String)`
+/// first; fall through to `Table` if the value is a TOML table.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PdsAdminActionMapValueToml {
+    /// Bare-string form: just the method name. Most actions use
+    /// this form (`takedown = "takedown_account"`,
+    /// `warning = "skip"`).
+    Bare(String),
+    /// Table form, e.g. `temp_suspension = { method =
+    /// "takedown_account", with_lift_after = true }`. v1.7
+    /// rejects `with_lift_after = true` at validation; the
+    /// table form with `with_lift_after = false` (or omitted)
+    /// is equivalent to the bare-string form.
+    Table(PdsAdminActionMapTableToml),
+}
+
+/// The table-form variant of [`PdsAdminActionMapValueToml`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct PdsAdminActionMapTableToml {
+    /// Backend method name. Same allowed set as the bare-string
+    /// form: `takedown_account` / `suspend_account` /
+    /// `restore_account` / `apply_label` / `negate_label` /
+    /// `skip`.
+    pub method: String,
+    /// When `true`, cairn-mod is expected to schedule a follow-up
+    /// `restore_account` call after the suspension expires.
+    /// **v1.7 rejects this at config load** — the deferred-
+    /// execution layer it requires is deferred to v1.8.
+    /// Defaults to `false` so absent + table-form-without-flag
+    /// is equivalent to the bare-string form.
+    #[serde(default)]
+    pub with_lift_after: bool,
+}
+
+fn default_pds_admin_request_timeout_seconds() -> u32 {
+    10
 }
 
 /// TOML projection of one entry in
@@ -648,6 +804,16 @@ impl Config {
         let policy_automation =
             crate::policy::automation::PolicyAutomationPolicy::from_config(self)?;
         policy_automation.validate_reason_codes_against(&vocab)?;
+        // PDS-admin policy (§F23, #83, v1.7): per-block validation
+        // (URL scheme, env-var resolution, allowed-method set,
+        // with_lift_after gating, every-action-type-mapped check)
+        // runs in from_config. No cross-block check beyond
+        // ActionType::from_db_str validation in the resolver
+        // itself; the bridge's destination is the PDS, not
+        // cairn-mod's reason vocabulary, so [moderation_reasons]
+        // is unrelated. See [`crate::pds_admin::PdsAdminPolicy`]
+        // for the full validation rules.
+        let _ = crate::pds_admin::PdsAdminPolicy::from_config(self)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the
