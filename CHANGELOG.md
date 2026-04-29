@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [pds_admin] `probe()` trait method + `OzoneBackend::probe` (`describeServer`) + serve.rs startup wiring (#90)
 - [xrpc_gateway] `[xrpc_gateway]` config block + module skeleton + 501 catch-all router (#91)
 - [xrpc_gateway] NSID allowlist enum + per-handler dispatch stubs + XRPC-shape 405 envelope (#92)
+- [xrpc_gateway] `XrpcAuthService` + tower middleware: ATProto service-auth JWT verification (ES256K, claim validation; replay deferred to #94) (#93)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).

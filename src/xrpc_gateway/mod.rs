@@ -25,12 +25,24 @@
 //! See `.design-notes/v1_7-architectural-decisions.md` §A6 / §A7
 //! / §A8 / §A14 for the inbound-direction architecture rationale.
 
+pub mod auth;
 pub mod config;
 pub mod error;
+pub mod middleware;
 pub mod nsid;
 pub mod router;
 
+/// Shared test fixtures for the xrpc_gateway module's auth +
+/// middleware tests. `pub(crate)` so the router's integration
+/// tests can construct valid JWTs and an [`auth::XrpcAuthService`]
+/// with a deterministic clock without duplicating the key /
+/// resolver / JWT-builder boilerplate from
+/// [`auth::tests`].
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+
+pub use auth::{XrpcAuthClaims, XrpcAuthService};
 pub use config::{XrpcGatewayConfig, XrpcGatewayConfigToml};
-pub use error::XrpcGatewayError;
-pub use nsid::Nsid;
+pub use error::{XrpcAuthError, XrpcGatewayError};
+pub use nsid::{Nsid, extract_nsid_from_request_uri};
 pub use router::build_router;

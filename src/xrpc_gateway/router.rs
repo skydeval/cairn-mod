@@ -36,6 +36,8 @@
 //! - **#95-#98** — per-NSID handler bodies. Replace the 501
 //!   stubs.
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -44,7 +46,9 @@ use axum::routing::{get, post};
 use serde::Serialize;
 
 use crate::xrpc_gateway::Nsid;
+use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
+use crate::xrpc_gateway::middleware::xrpc_auth_middleware;
 
 /// Build the inbound XRPC gateway router.
 ///
@@ -56,11 +60,35 @@ use crate::xrpc_gateway::config::XrpcGatewayConfig;
 /// non-gateway routes fall through to cairn-mod's existing 404
 /// handling.
 ///
-/// `_config` is accepted but not yet consulted — #92's allowlist
-/// has no per-config behavior. #93 (auth) will hook into the
-/// [`XrpcGatewayConfig`]'s `service_did` and skew/replay fields
-/// via tower middleware.
-pub fn build_router(_config: XrpcGatewayConfig) -> Router {
+/// `_config` is accepted but not yet consulted — its fields are
+/// indirectly applied via the auth service constructed alongside
+/// it in [`mod@crate::serve`]. #94 will hook directly into the
+/// `replay_cache_ttl` field for the replay-cache middleware
+/// composed alongside the auth layer.
+///
+/// `auth_service` wraps the auth verification surface from #93.
+/// Applied as a tower layer (`axum::middleware::from_fn_with_state`)
+/// so it runs BEFORE NSID dispatch — auth failures short-circuit
+/// at the layer boundary; cryptographically-valid-but-mismatched
+/// JWTs never reach the (still-stub) handlers.
+pub fn build_router(config: XrpcGatewayConfig, auth_service: Arc<XrpcAuthService>) -> Router {
+    build_routes_only(config).layer(axum::middleware::from_fn_with_state(
+        auth_service,
+        xrpc_auth_middleware,
+    ))
+}
+
+/// The router's NSID routes + fallbacks **without** the auth
+/// middleware. Used by:
+/// - The public [`build_router`], which wraps this with the auth
+///   layer for production.
+/// - Tests of the post-auth router shape (501/405/fallback
+///   behavior) that don't want the auth layer in the way.
+///
+/// `pub(crate)` so the in-crate tests can construct the inner
+/// router without bringing up the auth surface; production callers
+/// always go through [`build_router`].
+pub(crate) fn build_routes_only(_config: XrpcGatewayConfig) -> Router {
     Router::new()
         .route(
             "/xrpc/com.atproto.moderation.createReport",
@@ -246,7 +274,7 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_nsids_return_501_with_correct_method() {
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let cases: &[(reqwest::Method, &str)] = &[
             (reqwest::Method::POST, "com.atproto.moderation.createReport"),
             (reqwest::Method::POST, "tools.ozone.moderation.emitEvent"),
@@ -279,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_method_on_known_nsid_returns_405_envelope() {
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         // POST-only NSIDs hit with GET; GET-only NSIDs hit with POST.
         let cases: &[(reqwest::Method, &str)] = &[
             (reqwest::Method::GET, "com.atproto.moderation.createReport"),
@@ -316,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_nsid_returns_501_via_fallback() {
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         for nsid in [
             "tools.ozone.moderation.somethingElse",
             "tools.ozone.moderation.emitEventV2",
@@ -352,7 +380,7 @@ mod tests {
         // path match is also case-sensitive (axum 0.8 default),
         // so capitalized variants do NOT route to the named
         // handler — they hit the unknown-NSID fallback instead.
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let res = client()
             .post(format!("{url}/xrpc/tools.ozone.moderation.EmitEvent"))
             .send()
@@ -384,7 +412,7 @@ mod tests {
         // composes the gateway with .merge(...) against other
         // routers that handle their own paths; this test pins the
         // standalone-router behavior for unit-level confidence.
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let res = client().get(format!("{url}/health")).send().await.unwrap();
         assert_eq!(res.status().as_u16(), 501);
         let body: serde_json::Value = res.json().await.unwrap();
@@ -403,7 +431,7 @@ mod tests {
         // exact field set here so a future drift (e.g., adding a
         // `code` field) is a deliberate decision made through
         // this test.
-        let url = spawn_for_test(build_router(fixture_config())).await;
+        let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let res = client()
             .post(format!("{url}/xrpc/com.atproto.moderation.createReport"))
             .send()
@@ -431,5 +459,225 @@ mod tests {
     fn method_not_allowed_envelope_status_is_405() {
         let response = method_not_allowed_response("foo.bar.baz", &Method::GET);
         assert_eq!(response.status().as_u16(), 405);
+    }
+
+    // ===========================================================================
+    // #93: through-the-middleware integration tests
+    // ===========================================================================
+    //
+    // These tests build the FULL `build_router(config, auth_service)` —
+    // the auth layer is in the request path. They exercise the auth
+    // middleware's pass-through (unknown NSID), short-circuit (missing /
+    // bad / wrong-claim auth), and success-then-handler-stub flows.
+    //
+    // Test fixtures (JWT builder, mock resolver, fixed clock) live in
+    // `crate::xrpc_gateway::test_fixtures` so the auth-unit and
+    // router-integration surfaces share the same key material.
+
+    use crate::xrpc_gateway::test_fixtures as fx;
+
+    /// Spin up the full authenticated router + return its base URL.
+    async fn spawn_authed() -> String {
+        let auth = fx::build_service();
+        let router = build_router(fx::fixture_config(), auth);
+        spawn_for_test(router).await
+    }
+
+    fn auth_header(jwt: &str) -> String {
+        format!("Bearer {jwt}")
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_header_returns_401_authrequired() {
+        let url = spawn_authed().await;
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 401);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("AuthRequired")
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_authorization_header_returns_401() {
+        let url = spawn_authed().await;
+        // Wrong scheme.
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", "Basic dXNlcjpwYXNz")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 401);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("AuthRequired")
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_nsid_path_passes_through_auth_to_router_fallback() {
+        // Per #93's design: middleware skips auth for unknown
+        // NSIDs and lets the router's fallback return 501. The
+        // auth header is ignored on unknown paths — a probe-by-
+        // 401-vs-501 trade-off the prompt explicitly accepts.
+        let url = spawn_authed().await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/com.example.unknown"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 501);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("MethodNotImplemented")
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_jwt_for_known_nsid_reaches_handler_stub_501() {
+        let url = spawn_authed().await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        // Auth passes, request reaches the handler, handler is
+        // still a #92 stub returning MethodNotImplemented.
+        assert_eq!(res.status().as_u16(), 501);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("MethodNotImplemented")
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_jwt_for_known_nsid_with_wrong_method_returns_405_after_auth() {
+        let url = spawn_authed().await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        // emitEvent is POST-only; GET it with valid auth → auth
+        // passes, MethodRouter fallback fires with 405.
+        let res = client()
+            .get(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 405);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("MethodNotAllowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_with_audience_mismatch_returns_403_invalidtoken() {
+        let url = spawn_authed().await;
+        let mut claims = fx::valid_claims("tools.ozone.moderation.emitEvent");
+        claims["aud"] = serde_json::json!("did:web:other.example.com");
+        let jwt = fx::build_jwt(&claims, "ES256K");
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InvalidToken")
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_with_lxm_mismatching_url_returns_403() {
+        let url = spawn_authed().await;
+        // JWT's lxm claims emitEvent; URL is queryStatuses.
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .get(format!("{url}/xrpc/tools.ozone.moderation.queryStatuses"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InvalidToken")
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_jwt_returns_403_expiredtoken() {
+        let url = spawn_authed().await;
+        let mut claims = fx::valid_claims("tools.ozone.moderation.emitEvent");
+        // Past `clock_skew_tolerance` (30s); deterministic via
+        // the fixed-time clock injected into XrpcAuthService.
+        claims["exp"] = serde_json::json!(fx::FIXED_NOW - 100);
+        let jwt = fx::build_jwt(&claims, "ES256K");
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("ExpiredToken")
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_with_alg_none_returns_401_invalidtoken() {
+        // alg=none is the load-bearing JWT-vuln vector. Pin that
+        // it surfaces via the auth middleware as 401 InvalidToken
+        // (not as a successful pass-through that reaches the
+        // handler).
+        let url = spawn_authed().await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "none",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 401);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InvalidToken")
+        );
     }
 }

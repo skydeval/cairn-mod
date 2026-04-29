@@ -23,7 +23,7 @@
 //! [`Nsid::ToolsOzoneModerationEmitEvent`] — it falls through to
 //! the unknown-NSID handler and returns 501. Tested.
 
-use axum::http::Method;
+use axum::http::{Method, Uri};
 
 /// The allowlisted NSIDs cairn-mod's `xrpc_gateway` accepts inbound.
 ///
@@ -100,6 +100,25 @@ impl Nsid {
             }
         }
     }
+}
+
+/// Extract the v1.7-allowlisted [`Nsid`] from a request URI's path.
+///
+/// Returns `Some(Nsid)` when the path matches `/xrpc/<allowlisted-nsid>`
+/// exactly (case-sensitive); returns `None` when the path doesn't
+/// have the `/xrpc/` prefix or the segment after isn't on the
+/// allowlist.
+///
+/// Used by both the auth middleware (#93) and the router's
+/// fallback handler (#92) to keep path-extraction logic
+/// consistent. Lifting the logic into a single helper means the
+/// two callers can't drift on edge cases (trailing slashes,
+/// percent-encoding, etc.) — they share the function and they
+/// share the test coverage.
+pub fn extract_nsid_from_request_uri(uri: &Uri) -> Option<Nsid> {
+    uri.path()
+        .strip_prefix("/xrpc/")
+        .and_then(Nsid::from_path_segment)
 }
 
 #[cfg(test)]
@@ -188,6 +207,42 @@ mod tests {
                 "round-trip failed for {n:?}"
             );
         }
+    }
+
+    #[test]
+    fn extract_from_uri_recognizes_allowlisted_paths() {
+        let uri: Uri = "/xrpc/tools.ozone.moderation.emitEvent".parse().unwrap();
+        assert_eq!(
+            extract_nsid_from_request_uri(&uri),
+            Some(Nsid::ToolsOzoneModerationEmitEvent)
+        );
+    }
+
+    #[test]
+    fn extract_from_uri_returns_none_for_non_xrpc_path() {
+        let uri: Uri = "/health".parse().unwrap();
+        assert_eq!(extract_nsid_from_request_uri(&uri), None);
+    }
+
+    #[test]
+    fn extract_from_uri_returns_none_for_unknown_nsid_under_xrpc() {
+        let uri: Uri = "/xrpc/com.atproto.moderation.deleteReport".parse().unwrap();
+        assert_eq!(extract_nsid_from_request_uri(&uri), None);
+    }
+
+    #[test]
+    fn extract_from_uri_strips_query_string_implicitly_via_path() {
+        // `Uri::path()` returns just the path component without
+        // query string. Pinning that here so a future caller
+        // doesn't accidentally pass `uri.to_string()` (which
+        // would include the query) into the helper.
+        let uri: Uri = "/xrpc/tools.ozone.moderation.queryStatuses?subject=did:plc:x"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            extract_nsid_from_request_uri(&uri),
+            Some(Nsid::ToolsOzoneModerationQueryStatuses)
+        );
     }
 
     #[test]

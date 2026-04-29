@@ -158,10 +158,27 @@ where
 
     // Step 4: auth context (DID resolver + JWT replay cache, #11).
     // No network IO at construction — only when a request arrives.
-    let auth = Arc::new(AuthContext::new(AuthConfig {
+    //
+    // The DID resolver is constructed explicitly so it can be
+    // shared between AuthContext (outbound + admin-XRPC, #11) and
+    // XrpcAuthService (inbound xrpc_gateway, #93). Sharing the
+    // resolver gives both layers the same SSRF filter and the
+    // same `did:web:` resolution behavior; #93's prompt locked
+    // this decision (architecture call A8 / "DID resolver: extend
+    // existing resolver if needed; do not fork").
+    let auth_config = AuthConfig {
         service_did: config.service_did.clone(),
         ..AuthConfig::default()
-    }));
+    };
+    let did_resolver: Arc<dyn crate::auth::did::DidResolver> =
+        Arc::new(crate::auth::did::HttpDidResolver::new(
+            auth_config.plc_directory_url.clone(),
+            auth_config.resolver_timeout,
+        ));
+    let auth = Arc::new(AuthContext::with_resolver(
+        auth_config,
+        did_resolver.clone(),
+    ));
 
     // Step 5: compose the full router. Each per-feature constructor
     // owns its own Extension state; `.merge` layers them side-by-side.
@@ -209,21 +226,27 @@ where
     .merge(did_document_router(pool.clone(), config.clone()))
     .merge(health_router(pool.clone(), writer.clone()));
 
-    // §F23 inbound surface / #91. Mount the inbound XRPC gateway
-    // when [xrpc_gateway].enabled = true. Disabled-by-default so
-    // operators upgrading from v1.6 see no new behavior. Returns
-    // 501 for every NSID until #92 lands the allowlist enum and
-    // #95-#98 land the per-handler bodies.
+    // §F23 inbound surface / #91-#93. Mount the inbound XRPC
+    // gateway when [xrpc_gateway].enabled = true. Disabled-by-
+    // default so operators upgrading from v1.6 see no new
+    // behavior. Auth verification (#93) is wired via tower
+    // middleware on the gateway router; replay cache (#94) and
+    // per-NSID handler bodies (#95-#98) land in subsequent
+    // issues.
     if let Some(gateway_cfg) = crate::xrpc_gateway::XrpcGatewayConfig::from_config(&config)
         .map_err(|e| CliError::Startup(format!("xrpc_gateway: {e}")))?
     {
+        let xrpc_auth = Arc::new(crate::xrpc_gateway::XrpcAuthService::new(
+            gateway_cfg.clone(),
+            did_resolver.clone(),
+        ));
         tracing::info!(
             service_did = %gateway_cfg.service_did,
             clock_skew_tolerance_seconds = gateway_cfg.clock_skew_tolerance.as_secs(),
             replay_cache_ttl_seconds = gateway_cfg.replay_cache_ttl.as_secs(),
-            "xrpc_gateway enabled: routes mounted at /xrpc/* (allowlist empty until #92)"
+            "xrpc_gateway enabled: routes mounted at /xrpc/* (auth wired; replay cache + handler bodies pending #94/#95)"
         );
-        router = router.merge(crate::xrpc_gateway::build_router(gateway_cfg));
+        router = router.merge(crate::xrpc_gateway::build_router(gateway_cfg, xrpc_auth));
     }
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see

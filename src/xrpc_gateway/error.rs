@@ -60,3 +60,174 @@ pub enum XrpcGatewayError {
         method: String,
     },
 }
+
+/// Errors from inbound JWT verification (#93, §A8).
+///
+/// Distinct from [`XrpcGatewayError`] because the failure mode +
+/// HTTP-status / XRPC-error-code mapping is auth-specific. Used by
+/// [`crate::xrpc_gateway::auth::XrpcAuthService::verify`] and
+/// surfaced to clients via the auth middleware in
+/// [`crate::xrpc_gateway::middleware`].
+///
+/// HTTP status mapping per §A8 (and matching ATProto's auth
+/// conventions):
+/// - **401 Unauthorized** — credential is missing, malformed, or
+///   cryptographically invalid (the caller hasn't proven who they
+///   are).
+/// - **403 Forbidden** — credential is cryptographically valid
+///   but doesn't authorize this specific request (audience,
+///   method binding, or expiry mismatch).
+///
+/// XRPC error codes follow ATProto convention: `AuthRequired` for
+/// missing credentials, `InvalidToken` for everything else,
+/// `ExpiredToken` for the specific expired-credential case.
+#[derive(Debug, thiserror::Error)]
+pub enum XrpcAuthError {
+    /// Bearer token absent or malformed `Authorization` header.
+    #[error("missing or malformed Authorization header")]
+    MissingOrMalformedAuthHeader,
+
+    /// JWT structure invalid (not three base64url-encoded segments
+    /// separated by dots, or one of the segments is unparseable
+    /// JSON, or a required claim is missing).
+    #[error("invalid JWT structure: {0}")]
+    InvalidJwtStructure(String),
+
+    /// JWT header's `alg` is not on cairn-mod's allowlist.
+    /// cairn-mod accepts ES256K only, matching `crate::auth`'s
+    /// outbound surface.
+    #[error("unsupported JWT algorithm: {0}; only ES256K is accepted")]
+    UnsupportedAlgorithm(String),
+
+    /// DID resolution failed — network error, NXDOMAIN, malformed
+    /// DID document, etc. Includes the issuer for log correlation.
+    #[error("failed to resolve issuer DID {iss}: {reason}")]
+    DidResolutionFailed {
+        /// Issuer DID from the JWT's `iss` claim.
+        iss: String,
+        /// Human-readable reason from the underlying resolver.
+        reason: String,
+    },
+
+    /// Issuer's DID document has no usable `#atproto` verification
+    /// method. Either the fragment isn't present, or it's present
+    /// but unparseable (wrong key type, malformed multibase, etc.).
+    #[error("issuer DID {iss} has no usable #atproto verification method: {reason}")]
+    NoVerificationMethod {
+        /// Issuer DID.
+        iss: String,
+        /// Human-readable reason.
+        reason: String,
+    },
+
+    /// Cryptographic signature verification failed against the
+    /// issuer's resolved pubkey. The credential is malformed —
+    /// caller hasn't proven they hold the corresponding private
+    /// key.
+    #[error("JWT signature verification failed for issuer {iss}")]
+    SignatureVerificationFailed {
+        /// Issuer DID.
+        iss: String,
+    },
+
+    /// `aud` claim doesn't match cairn-mod's xrpc_gateway service
+    /// DID. The credential is cryptographically valid but was
+    /// minted for a different audience.
+    #[error("audience mismatch: expected {expected}, got {actual}")]
+    AudienceMismatch {
+        /// Service DID cairn-mod expected (from
+        /// [`crate::xrpc_gateway::config::XrpcGatewayConfig::service_did`]).
+        expected: String,
+        /// Audience claim the JWT actually carried.
+        actual: String,
+    },
+
+    /// `lxm` claim doesn't match the request's URL NSID. Distinct
+    /// from [`Self::LxmNotAllowlisted`]: the JWT was crafted for a
+    /// **different valid v1.7 endpoint** than the one being
+    /// requested.
+    #[error("method mismatch: lxm claim {lxm} does not match request NSID {nsid}")]
+    MethodMismatch {
+        /// `lxm` claim from the JWT.
+        lxm: String,
+        /// NSID derived from the request URL.
+        nsid: String,
+    },
+
+    /// `lxm` is a syntactically-valid NSID but isn't on cairn-mod's
+    /// v1.7 allowlist. Distinct from [`Self::MethodMismatch`]: the
+    /// JWT was crafted for an endpoint cairn-mod **doesn't
+    /// support**, vs one it supports but the URL points at a
+    /// different one.
+    #[error("lxm claim {lxm} is not on the v1.7 NSID allowlist")]
+    LxmNotAllowlisted {
+        /// `lxm` claim from the JWT.
+        lxm: String,
+    },
+
+    /// `exp` has passed (accounting for the configured
+    /// [`crate::xrpc_gateway::config::XrpcGatewayConfig::clock_skew_tolerance`]).
+    #[error("JWT expired at {exp}; now is {now}")]
+    Expired {
+        /// `exp` claim from the JWT (Unix seconds).
+        exp: i64,
+        /// Current time when the check ran (Unix seconds).
+        now: i64,
+    },
+}
+
+impl XrpcAuthError {
+    /// HTTP status code for the response envelope.
+    ///
+    /// 401 for "you haven't proven who you are" failures
+    /// (missing/malformed credential, sig fail, alg-rejected).
+    /// 403 for "you've proven who you are but this credential
+    /// doesn't authorize this request" failures (claim mismatches,
+    /// expiry).
+    ///
+    /// The split lets operators distinguish "client needs to send
+    /// credentials" from "client's credentials are valid but
+    /// scoped wrong" in monitoring dashboards.
+    pub fn http_status(&self) -> axum::http::StatusCode {
+        use axum::http::StatusCode;
+        match self {
+            Self::MissingOrMalformedAuthHeader
+            | Self::InvalidJwtStructure(_)
+            | Self::UnsupportedAlgorithm(_)
+            | Self::DidResolutionFailed { .. }
+            | Self::NoVerificationMethod { .. }
+            | Self::SignatureVerificationFailed { .. } => StatusCode::UNAUTHORIZED,
+
+            Self::AudienceMismatch { .. }
+            | Self::MethodMismatch { .. }
+            | Self::LxmNotAllowlisted { .. }
+            | Self::Expired { .. } => StatusCode::FORBIDDEN,
+        }
+    }
+
+    /// XRPC-envelope `error` field. Follows ATProto convention:
+    /// `AuthRequired` for missing credentials, `ExpiredToken` for
+    /// the specific expired-credential case, `InvalidToken` for
+    /// everything else (malformed structure, sig fail, claim
+    /// mismatch).
+    ///
+    /// More-specific codes (`AudienceMismatch`,
+    /// `MethodMismatch`) are NOT used in v1.7 because bsky-PDS's
+    /// own surface uses `InvalidToken` uniformly for these per
+    /// findings §6.3 — matching their convention preserves
+    /// fingerprint indistinguishability.
+    pub fn xrpc_error_code(&self) -> &'static str {
+        match self {
+            Self::MissingOrMalformedAuthHeader => "AuthRequired",
+            Self::Expired { .. } => "ExpiredToken",
+            Self::InvalidJwtStructure(_)
+            | Self::UnsupportedAlgorithm(_)
+            | Self::DidResolutionFailed { .. }
+            | Self::NoVerificationMethod { .. }
+            | Self::SignatureVerificationFailed { .. }
+            | Self::AudienceMismatch { .. }
+            | Self::MethodMismatch { .. }
+            | Self::LxmNotAllowlisted { .. } => "InvalidToken",
+        }
+    }
+}
