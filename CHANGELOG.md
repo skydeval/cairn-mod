@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [pds_admin] config block: parsing, validation, schema (#83)
 - [pds_admin] `PdsAdminBackend` trait + `BackendError` + `BackendActionId` + `Subject` types (#84)
 - [pds_admin] `pds_admin_audit` table + unified hash chain spanning `audit_log` (#85)
+- [pds_admin] `OzoneBackend` skeleton: ctor + Basic-auth + xrpc-url helpers (#86)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).

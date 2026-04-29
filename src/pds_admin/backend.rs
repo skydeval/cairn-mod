@@ -187,6 +187,27 @@ pub enum BackendError {
     Validation(String),
 }
 
+/// Errors from constructing a backend at startup.
+///
+/// Distinct from [`BackendError`] (which is per-call): these
+/// are configuration-time failures that prevent a backend from
+/// existing in the first place. v1.7 only has one variant
+/// ([`Self::HttpClient`]) since `OzoneBackend::new` only owns
+/// HTTP-client construction; v1.8's `LocusBackend` will likely
+/// add variants for JWT-secret resolution and other key-material
+/// loading.
+#[derive(Debug, thiserror::Error)]
+pub enum BackendInitError {
+    /// `reqwest::Client::builder().build()` failed. Almost
+    /// always a TLS/runtime configuration problem; in practice
+    /// reqwest's defaults don't fail on supported platforms,
+    /// but the fallible signature is preserved so a future
+    /// custom-CA / custom-DNS configuration path can surface
+    /// errors cleanly.
+    #[error("failed to build HTTP client: {0}")]
+    HttpClient(String),
+}
+
 /// Trait implemented by PDS-side enforcement backends.
 ///
 /// v1.7 ships one implementation: `OzoneBackend` for bsky-PDS
