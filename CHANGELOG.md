@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+- [pds_admin] config block: parsing, validation, schema (#83)
+- [pds_admin] `PdsAdminBackend` trait + `BackendError` + `BackendActionId` + `Subject` types (#84)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).
