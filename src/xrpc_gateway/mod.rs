@@ -27,8 +27,10 @@
 
 pub mod config;
 pub mod error;
+pub mod nsid;
 pub mod router;
 
 pub use config::{XrpcGatewayConfig, XrpcGatewayConfigToml};
 pub use error::XrpcGatewayError;
+pub use nsid::Nsid;
 pub use router::build_router;

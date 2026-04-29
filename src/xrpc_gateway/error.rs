@@ -13,9 +13,15 @@
 
 /// Errors from the inbound XRPC gateway.
 ///
-/// Initial scope is purely structural; subsequent issues add
-/// `AuthFailed(String)` (#93), `ReplayDetected(String)` (#94), and
-/// per-handler errors (#95+).
+/// These variants are used **for structured logging**, not as
+/// HTTP response types — the operator-facing wire response is the
+/// XRPC error envelope (`{"error": ..., "message": ...}`)
+/// produced by [`crate::xrpc_gateway::router`]. The error enum
+/// gives the WARN/ERROR log lines a consistent Display surface so
+/// log aggregators can match on the variant name.
+///
+/// Subsequent issues grow this set: `AuthFailed(String)` (#93),
+/// `ReplayDetected(String)` (#94), per-handler errors (#95+).
 #[derive(Debug, thiserror::Error)]
 pub enum XrpcGatewayError {
     /// The gateway was disabled when the request arrived.
@@ -29,4 +35,28 @@ pub enum XrpcGatewayError {
     /// gateway serve traffic.
     #[error("xrpc_gateway disabled — request should not have been routed here")]
     GatewayDisabled,
+
+    /// The request's path is `/xrpc/<nsid>` but `<nsid>` is not
+    /// on cairn-mod's hard-coded v1.7 allowlist (the four entries
+    /// in [`crate::xrpc_gateway::Nsid`]). Per §A7, the surface is
+    /// not config-extensible. Operators get a 501 envelope on the
+    /// wire; cairn-mod logs at WARN with this variant so noise
+    /// from probes / scanners surfaces in operator-visible
+    /// telemetry.
+    #[error("NSID not on v1.7 allowlist: {0}")]
+    UnknownNsid(String),
+
+    /// The request's NSID is on the allowlist but the HTTP method
+    /// doesn't match the NSID's expected method (e.g., GET on
+    /// createReport). Caller gets a 405 envelope on the wire;
+    /// cairn-mod logs at WARN. Reaching this in production
+    /// suggests a misconfigured upstream proxy or a buggy
+    /// client — bsky-PDS itself sends correct methods.
+    #[error("HTTP method {method} not allowed for NSID {nsid}")]
+    MethodNotAllowed {
+        /// Allowlisted NSID the request targeted.
+        nsid: &'static str,
+        /// HTTP method the request actually used.
+        method: String,
+    },
 }
