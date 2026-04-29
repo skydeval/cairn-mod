@@ -1767,8 +1767,7 @@ The signals exist because they're real release-quality indicators. They are soft
 - Cross-language interop tests (TypeScript consumer).
 - Multi-label-per-frame batching in `subscribeLabels`.
 - Operator-facing metrics surface: `/metrics` Prometheus endpoint (labels emitted, reports received, subscriber count, DID resolution failure rate, auth rejection rate by cause) and structured-log conventions. (`/health` and `/ready` probe endpoints shipped in v1.1 — see §F14.)
-- Account moderation state model shipped in v1.4 (see §F20). Label emission against moderation state shipped in v1.5 (see §F21). Policy automation shipped in v1.6 (see §F22) — operator-declared rules trigger automatic action recording (mode=auto) or moderator-review pending rows (mode=flag) when subjects cross strike thresholds, with conservative idempotency, takedown cascade, and a confirm/dismiss moderator surface. Items still deferred:
-  - PDS administrative actions (v1.7+). Operator-config-gated bridge that translates emitted labels (and the v1.6 auto-recorded actions layered on top) into PDS-level account state changes by calling `com.atproto.admin.*` on operator-controlled PDSes. **Default is labeler-only when `[pds_admin]` is absent or disabled** — the existing labels-only surface remains the unchanged baseline for community-tier deployments. Operators who run a PDS for their community (e.g., Hideaway with Prism credentials, or any deployment with admin access to its members' PDSes) opt in by declaring credentials and the per-action-type mapping; cairn-mod calls the admin endpoints in lockstep with label emission.
+- Account moderation state model shipped in v1.4 (see §F20). Label emission against moderation state shipped in v1.5 (see §F21). Policy automation shipped in v1.6 (see §F22) — operator-declared rules trigger automatic action recording (mode=auto) or moderator-review pending rows (mode=flag) when subjects cross strike thresholds, with conservative idempotency, takedown cascade, and a confirm/dismiss moderator surface. PDS-side enforcement bridge and inbound XRPC gateway shipped in v1.7 (see §F23) — outbound `[pds_admin]` propagates account-state changes to the operator's PDS; inbound `xrpc_gateway` accepts proxied `tools.ozone.moderation.*` calls and PDS-forwarded `com.atproto.moderation.createReport`. v1.7 ships bsky-PDS support; the `PdsAdminBackend` trait abstraction reserves the path for Aurora-Locus and other Rust-PDS backends. Items still deferred:
   - Decay-and-recross re-firing (v1.7+ if demand). v1.6 ships conservative idempotency: a rule's window opens only on explicit resolution (revoke / dismiss / confirm-then-revoke). A future release may treat decay-driven count drops as window-opening events; deferred for operational predictability.
   - Mode-applies-forward configuration mutation (v1.7+). Config-reload semantics for in-flight pendings (changing a rule's mode after pendings exist for it) are deliberately untested at the integration layer for v1.6; the writer's config is currently spawn-time-only.
   - Multiple-suspension-history accuracy in decay (v1.7+). v1.4 ships the "only-most-recent-unrevoked-suspension" simplification.
@@ -1779,7 +1778,20 @@ The signals exist because they're real release-quality indicators. They are soft
   - Policy-rule audit reports (v1.8+ if demand). Operator-facing analytics — "how often did rule X fire? what's the confirm-vs-dismiss rate?" — over the data already in `audit_log` + `pending_policy_actions`.
   - Accessory bot or Web UI for user-facing strike-state rendering — separate project from cairn-mod itself; `tools.cairn.public.getMyStrikeState` (with `activeLabels` from §F21.8) is the substrate, not the UI.
 
-**Continued v1.x trajectory.** Subsequent v1.x releases continue toward Ozone parity for community-tier deployments. Full parity expected around v1.10 (review queue with distinct workflows for signals vs reports, source management with negation-on-revocation default, webhook signal intake, team management refinement). The v1.x sequence is incremental and each release ships in isolation; the trajectory is not a commitment to any particular release sequencing.
+**Trajectory: cairn-mod as PDS-agnostic moderation infrastructure.** v1.7 establishes the architectural shape that subsequent releases extend along two axes:
+
+- **Backend coverage** (the outbound `pds_admin` bridge): bsky-PDS in v1.7, Aurora-Locus in v1.8, future Rust-PDS implementations as they reach maturity. Each backend lands as a `PdsAdminBackend` trait implementation; cairn-mod's existing strike accounting, label emission, policy automation, and audit chain are unchanged across backends.
+- **Ozone parity floor** (the surface cairn-mod offers operators): account-state enforcement (v1.7) → review queue + extended event types (v1.9) → web UI (v2.0). Each release picks up an additional piece of the parity floor with no expectation that operators must adopt every feature; cairn-mod stays deployable as a single binary at every release point.
+
+Concrete v1.x trajectory:
+
+- **v1.8: Aurora-Locus backend, retry policy, gateway refinements.** A `LocusBackend` implementation of the `PdsAdminBackend` trait (snake_case admin-surface adapter, JWT-with-scope auth, accumulating-label semantics that Locus's bitemporal label model requires); the explicit `backend = "ozone" | "locus"` selector in `[pds_admin]` (concurrent multi-backend operation deferred indefinitely — the PDS itself is the community boundary). Operator-configurable retry with backoff for failed bridge calls, dead-letter handling for unrecoverable failures, and a CLI surface for inspecting and re-driving — the retry-policy decision benefits from real v1.7 operator feedback, which is why it doesn't ship in v1.7. Gateway refinements: per-PDS rate limiting on the `createReport` path, bulk-fetching optimization for `queryStatuses`'s N+1 lookups (currently acceptable at `limit ≤ 100`).
+- **v1.9: review queue, extended event types, source management.** The review queue (with distinct workflows for signal items vs. user reports) becomes implementable now that PDS-side enforcement and inbound proxy are in place. Real review-state lifecycle (so `subjectStatusView.reviewState` reflects actual state instead of constant `#reviewClosed`). Extended inbound event types: `modEventEscalate`, `modEventResolveAppeal`, `modEventMute`, `modEventEmail` — alongside the review-queue and team-management features that give those events meaningful destinations. Appeal flow lands here. Source management (third-party signal contributors). Capability negotiation beyond v1.7's startup probe if there's a real anchor by then (multi-backend deployments would force the issue).
+- **v2.0: web UI on top of complete admin surface.** No new backend work; the surface is complete enough by v1.9 that v2.0 wraps it in a web UI. The single-binary distribution model continues; the web UI is operator-deployed alongside the daemon.
+
+**Future cycle, not promised to a specific version:** XRPC management of the `xrpc_known_callers` / `xrpc_trusted_pdses` collaboration tables (v1.7 is CLI-only per the bootstrap problem in §F23.4); `tools.ozone.communication.*` and `tools.ozone.team.*` proxied surfaces; action-time CIDs on `subject_actions` (so `strongRef.cid` can be populated in `subjectStatusView` per §F23.5's documented limitation). Each lands when there's a clear anchor; not promised to a specific version.
+
+**Enterprise-tier (deferred-but-anticipated):** multi-instance replay-cache coordination (v1.7's replay cache is single-instance per §F23.9), Postgres support, multi-node deployments. See the cairn-mod-enterprise paragraph below for the framing.
 
 **Future direction: cairn-mod-enterprise (open scope).** A platform-tier sibling project for large-scale deployments — Postgres backend, multi-node coordination, observability primitives, HA posture, scheduled jobs, operational tooling — is contemplated as eventual direction but not currently in scope. The split between community-tier (single-binary SQLite, what cairn-mod is today) and enterprise-tier (cluster-aware Postgres) lets the community-tier surface stay tight while the enterprise-tier project absorbs the operational complexity that doesn't belong in a single-maintainer crate. No version commitment; depends on community-tier completion plus genuine adoption pull. Could land alongside v1.x as a separate project, or anchor v2.0 as a unification of both. Deferred for explicit decision when the conditions are clearer.
 
@@ -1855,6 +1867,92 @@ Exercise the new version's user-visible features against a real PDS deployment (
 ### 19.4 Post-release monitoring
 
 Release-cadence-agnostic monitoring is part of normal maintenance per §20.2's issue-triage SLA: security reports get a 48-hour acknowledgment regardless of how recent the last release was, bug reports flow through weekly triage, feature requests batch into the next minor. A retrospective note in chainlink for each release ("what slipped, what worked, what next-version needs") is good practice but is not a gated part of the runbook.
+
+### 19.5 Operator deployment runbook for v1.7 (PDS bridge + XRPC gateway)
+
+v1.7 ships two opt-in features (the outbound `pds_admin` bridge and the inbound `xrpc_gateway`); operators choose to enable each independently. This subsection walks through the deployment flow per feature plus the post-deployment verification dance. Architectural reference: §F23.
+
+#### 19.5.1 Upgrading from v1.6
+
+**v1.7 is backward-compatible with v1.6 deployments that don't enable the new features.** Operators upgrading without touching `[pds_admin]` or `[xrpc_gateway]` config see no behavior change; the bridge and gateway are opt-in (default `enabled = false`).
+
+Migration steps for the no-new-features case:
+
+1. **Upgrade the binary:** `cargo install cairn-mod --version <X.Y.Z>` (or rebuild from source per the operator's distribution model).
+2. **Restart cairn-mod.** Embedded migrations run automatically on startup (per §14: schema migrations run via `sqlx::migrate` at boot); no separate `cairn migrate` step exists in v1.7.
+3. **Verify with `cairn audit verify`.** Pre-#88 deployments have no `pds_admin_audit` rows; post-upgrade verify walks the unified chain across `audit_log` + the three new tables (`pds_admin_audit`, `xrpc_known_callers`, `xrpc_trusted_pdses`) and should pass without divergence. The new tables are empty until the operator opts in, so the chain walk is effectively unchanged from v1.6.
+
+If `cairn audit verify` reports divergence, do not proceed with v1.7's new features. The chain integrity is load-bearing for §F23.9's audit chain ordering invariant; investigate divergence before enabling the bridge or gateway (which add new chain rows).
+
+#### 19.5.2 Enabling `[pds_admin]` (outbound bridge)
+
+The flow for first-time enable on a bsky-PDS deployment:
+
+1. **Decide the action_map.** Typical mapping for bsky-PDS operators (see §F23.6's example): `takedown` → `takedown_account`, `indef_suspension` → `takedown_account` (bsky-PDS conflates these via `updateSubjectStatus`), `temp_suspension` → `suspend_account`, `warning` → `skip`, `note` → `skip`. Labels stay cairn-mod-native (per §F23.1's `OzoneBackend` non-implementation of `apply_label`); the action_map only routes account-state actions.
+2. **Set the admin-password env var.** Per the `_env` convention from §F23.6: pick a name (e.g., `CAIRN_BSKY_ADMIN_PW`), set it in the operator's process environment, and reference it from `[pds_admin.ozone].admin_password_env`. The plaintext password never enters the TOML.
+3. **Declare the `pds-admin-cli` reserved reason code in `[moderation_reasons]`** (per §F23.8). Without this, manual escalations via `cairn pds-admin {takedown,suspend}` that omit `--reason` fail with `ReasonNotFound`.
+4. **Edit cairn-mod's TOML config** to set `[pds_admin].enabled = true`, populate `[pds_admin.ozone]` with `pds_url` + `admin_password_env`, and define `[pds_admin.action_map]`. See §F23.6 for the full example.
+5. **Restart cairn-mod.**
+6. **Watch the startup log for the probe outcome.** Per §F23.1 (and §A15), `OzoneBackend` issues a non-mutating `describeServer` probe at startup. INFO log line `pds_admin probe successful: backend=ozone url=...` indicates reachable PDS + valid credentials. WARN/ERROR indicates misconfiguration — fix and restart. Probe failure does not block startup (cairn-mod's label emission and report intake are independent of the bridge), but bridge calls themselves will fail with audited errors until the underlying issue is resolved.
+7. **Verify with a manual takedown** against a test subject DID using `cairn pds-admin takedown <test-did> --reason pds-admin-cli`. Check both sides:
+   - **cairn-mod side:** the `subject_actions` row exists with `action_type='takedown'`; the `pds_admin_audit` row exists with `outcome='success'` and `backend_method='takedown_account'`. The CLI's response surfaces both via the `bridge` field.
+   - **bsky-PDS side:** the account is now taken down — verify via the PDS's admin UI or via a follow-up `tools.ozone.moderation.queryStatuses` call.
+
+If step 7 fails with a non-success bridge outcome, the CLI surfaces the underlying error code and message. Common cases: `auth` (admin password rejected — re-check the env var); `network` (PDS unreachable — check `pds_url` reachability from cairn-mod's host); `validation` (the action_map produced an invalid backend call — re-check the mapping).
+
+#### 19.5.3 Enabling `[xrpc_gateway]` (inbound gateway)
+
+This flow requires bsky-PDS operator coordination. cairn-mod's gateway accepts inbound calls; the upstream bsky-PDS is what forwards them. Both ends must be configured.
+
+1. **Publish cairn-mod's service DID.** Per §F23.6's `service_did` convention. If using `did:web:<host>`, publish a `.well-known/did.json` document at the operator's host with the labeler's `#atproto` verification method. The `did:web` resolution path is what bsky-PDS users' clients use to mint service-auth JWTs targeting cairn-mod.
+2. **Configure bsky-PDS's `tools.ozone.*` proxy URL** (the env var name varies — historically `PDS_OZONE_URL` on bsky-PDS deployments; verify against the operator's current bsky-PDS docs). Setting it points the PDS's `tools.ozone.moderation.*` proxy at cairn-mod. Operator must restart bsky-PDS for the change to take effect.
+3. **Configure bsky-PDS's `PDS_REPORT_SERVICE_URL` env var** if forwarding `com.atproto.moderation.createReport` is desired (per A10 / §F23.4). Same restart-required note. Skip this step if the operator wants reports to remain on the user-direct path (§F11) only.
+4. **Declare the `xrpc-gateway-default` reserved reason code in `[moderation_reasons]`** (per §F23.8). Without this, inbound `modEventTakedown` / `modEventComment` / `modEventReverseTakedown` events that don't carry an explicit `createLabelVals` fail with `ReasonNotFound`.
+5. **Edit cairn-mod's TOML config** to set `[xrpc_gateway].enabled = true` and populate `service_did`, `replay_cache_ttl_seconds`, `clock_skew_tolerance_seconds`. See §F23.6 for the full example.
+6. **Restart cairn-mod.** The gateway router mounts at `/xrpc/<NSID>` and the auth + membership + replay middleware layers compose (see §F23.3 for the security-load-bearing layer order).
+7. **Seed `xrpc_known_callers`.** For each moderator who should be able to call cairn-mod via proxied XRPC (e.g., from bsky.app or another bsky-PDS client), add their DID:
+   ```
+   cairn xrpc-callers add did:plc:moderator-1 --note "alice@example.com" --by did:plc:operator
+   ```
+   Or use the convenience flag during moderator onboarding (per §F23.7 / #99):
+   ```
+   cairn moderator add did:plc:moderator-1 --role mod --with-xrpc-callers --by did:plc:operator
+   ```
+   The two paths are equivalent for the gateway membership; the convenience flag also adds the DID to the `moderators` table (§5.2) for direct service-auth.
+8. **Seed `xrpc_trusted_pdses`** for each upstream PDS forwarding reports:
+   ```
+   cairn xrpc-pdses add did:web:bsky.example.com --note "primary PDS" --by did:plc:operator
+   ```
+   Per §F23.4: adding a PDS extends transitive trust to the PDS's `reportedBy` assertions. Only add upstream PDSes the operator trusts the operation of (see threat-model §4.9).
+9. **Verify with a probe call.** From a moderator's bsky.app client (or any client that proxies through bsky-PDS), attempt a `tools.ozone.moderation.emitEvent` against a test subject. Check cairn-mod's logs for the layer outcomes (`auth verification succeeded`, membership-allowed, replay-novel) and check `cairn moderator events --subject <test-did>` for the resulting recordAction. If any layer rejects, the response status indicates which (401 = auth, 403 = membership, 400 ExpiredToken = replay).
+
+#### 19.5.4 Verification dance for combined deployment
+
+For operators who enabled both blocks, the post-deployment verification:
+
+1. **`cairn audit verify`** — walks all four chains in chain-order timestamps (per §F23.9's audit chain ordering invariant). Should pass without divergence. Run after every config-change restart for the first few weeks; the operator's confidence in the unified chain is built incrementally.
+2. **`cairn moderator events --ozone-only`** — produces the same set that `tools.ozone.moderation.queryEvents` would return for an external moderator (per §F23.5's filter-out policy and §F23.7's bridge-flag framing). Compare against expected behavior; any divergence between this output and the gateway endpoint's output is a projection bug worth reporting.
+3. **Manual end-to-end test against a staging bsky-PDS:**
+   - Issue a takedown via `cairn pds-admin takedown <staging-did>` (outbound bridge fires; subject_actions row + pds_admin_audit row + bsky-PDS account-state change all materialize).
+   - Issue a takedown via `tools.ozone.moderation.emitEvent` from a moderator's client against a different staging DID (inbound gateway fires; the production-path dispatch fires the bridge in turn — same downstream state on bsky-PDS as the manual takedown).
+   - `cairn audit verify` after both passes; the audit chain integrity is preserved across both code paths.
+
+Reference §F23.9's invariants for what to expect during operational events:
+
+- **Restart clears the replay cache.** A running attacker's previously-replayed JWT becomes acceptable again post-restart, until the JWT's own `exp` passes (60s on bsky-PDS). Schedule restarts during low-activity windows if this is a concern.
+- **Audit chain ordering** is load-bearing for verify integrity. Manual table inserts or out-of-order backfills fork the chain; operators should not write directly to the audit tables — go through cairn-mod's CLI / writer surface.
+
+#### 19.5.5 Disabling the new features (rollback)
+
+The rollback path is operator-side clean — v1.6 behavior is restored without data loss:
+
+1. **Edit cairn-mod's TOML config:** `[pds_admin].enabled = false` and/or `[xrpc_gateway].enabled = false` (or remove the blocks entirely).
+2. **Restart cairn-mod.** The bridge dispatch becomes a no-op; the gateway router does not mount at `/xrpc/*` (so unknown-NSID 501 falls through to cairn-mod's existing 404 handler for non-allowlisted paths).
+3. **Existing rows are preserved.** `pds_admin_audit` rows remain in the unified hash chain and `cairn audit verify` continues to walk them; `xrpc_known_callers` / `xrpc_trusted_pdses` rows remain in the database. Re-enabling the features restores the previous configuration without re-seeding.
+4. **Unset the bsky-PDS-side env vars** to prevent forwarding to a now-non-responding endpoint. Restart bsky-PDS. (No CLI helper for this in v1.7 — it's bsky-PDS-side operator work.)
+5. **Verify with `cairn audit verify`** — the unified chain still walks cleanly; the disabled features just stop adding new rows.
+
+Disabling does not roll back actions that have already fired through the bridge or gateway. A pre-disable inbound `emitEvent` produced a `subject_actions` row and (if action_type=takedown) a `pds_admin_audit` row; those persist and the bsky-PDS-side state remains taken down. To reverse a specific action, use `cairn moderator revoke <action_id>` (which fires the bridge's restore_account if the action was a takedown / suspension) or a `tools.cairn.admin.revokeAction` admin XRPC call.
 
 ## 20. Maintenance & Disclosure
 
