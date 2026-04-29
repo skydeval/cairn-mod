@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [audit] `cairn audit verify` extended to walk the unified chain across `audit_log` and `pds_admin_audit` (#88)
 - [pds_admin] `OzoneBackend::suspend_account` + `restore_account` bodies; ISO-duration → days plumbing; revoke-action dispatch path (#89)
 - [pds_admin] `probe()` trait method + `OzoneBackend::probe` (`describeServer`) + serve.rs startup wiring (#90)
+- [xrpc_gateway] `[xrpc_gateway]` config block + module skeleton + 501 catch-all router (#91)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).

@@ -37,6 +37,7 @@ pub mod signing;
 pub mod signing_key;
 pub mod storage;
 pub mod writer;
+pub mod xrpc_gateway;
 
 pub use auth::{AuthConfig, AuthContext, AuthError, VerifiedCaller};
 pub use config::Config;

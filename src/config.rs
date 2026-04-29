@@ -178,6 +178,17 @@ pub struct Config {
     /// allowed-method set, with_lift_after gating).
     #[serde(default)]
     pub pds_admin: Option<PdsAdminConfigToml>,
+
+    /// `[xrpc_gateway]` block (§F23 inbound surface, #91, v1.7).
+    /// Operator-config-gated inbound XRPC listener for proxied
+    /// Ozone moderation calls + forwarded createReport calls.
+    /// Resolves to a runtime
+    /// [`crate::xrpc_gateway::XrpcGatewayConfig`] via
+    /// [`crate::xrpc_gateway::XrpcGatewayConfig::from_config`];
+    /// absence (the v1.6-shape default) leaves the gateway off
+    /// and the listener does not mount.
+    #[serde(default)]
+    pub xrpc_gateway: Option<crate::xrpc_gateway::XrpcGatewayConfigToml>,
 }
 
 /// TOML projection of [`crate::pds_admin::PdsAdminPolicy`] (§F23,
@@ -814,6 +825,14 @@ impl Config {
         // is unrelated. See [`crate::pds_admin::PdsAdminPolicy`]
         // for the full validation rules.
         let _ = crate::pds_admin::PdsAdminPolicy::from_config(self)?;
+        // [xrpc_gateway] (§F23 inbound, #91, v1.7). Run the
+        // resolver for its side effect: enforces required-field
+        // presence when enabled, malformed-DID rejection,
+        // bounds-checking on numeric tunables, unknown-extras-key
+        // rejection. The resolved config is rebuilt at
+        // `serve::run` startup; here we only care that the
+        // validation passes.
+        let _ = crate::xrpc_gateway::XrpcGatewayConfig::from_config(self)?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the

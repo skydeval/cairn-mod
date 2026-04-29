@@ -634,6 +634,7 @@ mod tests {
             label_emission: None,
             policy_automation: None,
             pds_admin: Some(toml),
+            xrpc_gateway: None,
         }
     }
 

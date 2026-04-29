@@ -179,7 +179,7 @@ where
         c.declared_label_values = config.labeler.as_ref().map(|l| l.label_values.clone());
         c
     };
-    let router = admin_router(
+    let mut router = admin_router(
         pool.clone(),
         writer.clone(),
         auth.clone(),
@@ -208,6 +208,23 @@ where
     .merge(wellknown_router())
     .merge(did_document_router(pool.clone(), config.clone()))
     .merge(health_router(pool.clone(), writer.clone()));
+
+    // §F23 inbound surface / #91. Mount the inbound XRPC gateway
+    // when [xrpc_gateway].enabled = true. Disabled-by-default so
+    // operators upgrading from v1.6 see no new behavior. Returns
+    // 501 for every NSID until #92 lands the allowlist enum and
+    // #95-#98 land the per-handler bodies.
+    if let Some(gateway_cfg) = crate::xrpc_gateway::XrpcGatewayConfig::from_config(&config)
+        .map_err(|e| CliError::Startup(format!("xrpc_gateway: {e}")))?
+    {
+        tracing::info!(
+            service_did = %gateway_cfg.service_did,
+            clock_skew_tolerance_seconds = gateway_cfg.clock_skew_tolerance.as_secs(),
+            replay_cache_ttl_seconds = gateway_cfg.replay_cache_ttl.as_secs(),
+            "xrpc_gateway enabled: routes mounted at /xrpc/* (allowlist empty until #92)"
+        );
+        router = router.merge(crate::xrpc_gateway::build_router(gateway_cfg));
+    }
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see
     // the module-level note on the L3 ordering invariant.
