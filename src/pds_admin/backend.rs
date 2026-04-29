@@ -263,11 +263,22 @@ pub trait PdsAdminBackend: Send + Sync {
     /// `[moderation_reasons]` identifier, or a
     /// `[pds_admin.action_map]`-mapped string); `notes` is
     /// optional moderator-facing free text.
+    ///
+    /// `precipitating_action_id` is the `subject_actions(id)` of
+    /// the cairn-mod-side action that triggered this call. Some
+    /// backends (notably bsky-PDS, which returns no action id of
+    /// its own) embed it into the synthesized
+    /// [`BackendActionId`] so a later [`Self::restore_account`]
+    /// call can find the original; others (Aurora-Locus, v1.8+)
+    /// pass it through to a backend-side `ref` field. Adopted in
+    /// #87 with the `OzoneBackend::takedown_account` body —
+    /// implementations that don't need it ignore the parameter.
     async fn takedown_account(
         &self,
         did: &str,
         reason: &str,
         notes: Option<&str>,
+        precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError>;
 
     /// Suspend an account at the PDS side, optionally with a
@@ -280,12 +291,15 @@ pub trait PdsAdminBackend: Send + Sync {
     ///
     /// `duration_days` is the operator's intended suspension
     /// length. `None` means "suspend until manually restored."
+    /// `precipitating_action_id` follows the same convention as
+    /// [`Self::takedown_account`].
     async fn suspend_account(
         &self,
         did: &str,
         reason: &str,
         duration_days: Option<u32>,
         notes: Option<&str>,
+        precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError>;
 
     /// Restore (un-takedown / un-suspend) an account at the

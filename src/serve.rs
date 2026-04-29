@@ -32,8 +32,8 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::signing_key::SigningKey;
 use crate::{
-    admin_router, create_report_router, did_document_router, health_router, public_router,
-    spawn_writer, storage, subscribe_router, wellknown_router,
+    admin_router, create_report_router, did_document_router, health_router, public_router, storage,
+    subscribe_router, wellknown_router,
 };
 
 /// How long we give in-flight handlers to drain after the shutdown
@@ -102,7 +102,17 @@ where
         .validate_reason_codes_against(&reason_vocabulary)
         .map_err(|e| CliError::Startup(format!("policy automation: {e}")))?;
 
-    let writer = spawn_writer(
+    // §F23 / #87. Resolve the [pds_admin] policy and, if
+    // enabled, instantiate the configured backend. v1.7 ships
+    // only OzoneBackend (bsky-PDS); v1.8 will add LocusBackend
+    // selection here. When disabled (or [pds_admin] omitted
+    // entirely), the bridge is None and the writer's
+    // post-recordAction dispatch is a no-op.
+    let pds_admin_policy = crate::pds_admin::PdsAdminPolicy::from_config(&config)
+        .map_err(|e| CliError::Startup(format!("pds_admin: {e}")))?;
+    let pds_admin_bridge = build_pds_admin_bridge(&pds_admin_policy)?;
+
+    let writer = crate::writer::spawn_with_pds_admin(
         pool.clone(),
         key,
         config.service_did.clone(),
@@ -112,6 +122,7 @@ where
         strike_policy.clone(),
         label_emission_policy,
         policy_automation_policy,
+        pds_admin_bridge,
     )
     .await
     .map_err(map_spawn_writer_error)?;
@@ -288,6 +299,49 @@ fn map_spawn_writer_error(e: Error) -> CliError {
         },
         other => CliError::Startup(format!("writer spawn: {other}")),
     }
+}
+
+/// Construct the §F23 PDS-admin bridge from the resolved policy.
+///
+/// `Ok(None)` when the bridge is disabled (operator omitted
+/// `[pds_admin]` entirely, or set `enabled = false`). `Ok(Some)`
+/// when the policy resolves a backend successfully. `Err` when
+/// the backend constructor fails (almost always a transient
+/// reqwest TLS-config issue; treated as a startup failure since
+/// the operator declared the bridge enabled).
+///
+/// v1.7 has only the [`Ozone`](crate::pds_admin::PdsAdminBackendConfig::Ozone)
+/// variant; v1.8 will add `Locus` selection here.
+fn build_pds_admin_bridge(
+    policy: &crate::pds_admin::PdsAdminPolicy,
+) -> Result<Option<crate::pds_admin::PdsAdminBridge>, CliError> {
+    if !policy.enabled {
+        return Ok(None);
+    }
+    let backend_config = policy.backend.as_ref().ok_or_else(|| {
+        // Defensive: #83's resolver guarantees `backend` is
+        // Some(_) when enabled. Reaching this means a future
+        // resolver change broke the invariant.
+        CliError::Startup(
+            "pds_admin: enabled but no backend resolved (config-resolver invariant violated)"
+                .into(),
+        )
+    })?;
+    let backend: Arc<dyn crate::pds_admin::PdsAdminBackend> = match backend_config {
+        crate::pds_admin::PdsAdminBackendConfig::Ozone(ozone_cfg) => {
+            let backend = crate::pds_admin::OzoneBackend::new(ozone_cfg)
+                .map_err(|e| CliError::Startup(format!("pds_admin ozone backend: {e}")))?;
+            tracing::info!(
+                pds_url = %ozone_cfg.pds_url,
+                "pds_admin: Ozone backend (bsky-PDS) initialized"
+            );
+            Arc::new(backend)
+        }
+    };
+    Ok(Some(crate::pds_admin::PdsAdminBridge {
+        policy: policy.clone(),
+        backend,
+    }))
 }
 
 /// §F1 startup verify (#8). Inline `mod verify` to keep the

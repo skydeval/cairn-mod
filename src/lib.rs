@@ -64,5 +64,5 @@ pub use writer::{
     ApplyLabelRequest, ConfirmPendingActionRequest, ConfirmedPendingAction,
     DismissPendingActionRequest, DismissedPendingAction, LabelEvent, NegateLabelRequest,
     RecordActionRequest, RecordedAction, RevokeActionRequest, RevokedAction, SweepBatchResult,
-    SweepRequest, SweepResult, WriterHandle, spawn as spawn_writer,
+    SweepRequest, SweepResult, WriterHandle, spawn as spawn_writer, spawn_with_pds_admin,
 };

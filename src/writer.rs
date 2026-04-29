@@ -905,6 +905,50 @@ pub async fn spawn(
     label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
     policy_automation_policy: crate::policy::automation::PolicyAutomationPolicy,
 ) -> Result<WriterHandle> {
+    spawn_with_pds_admin(
+        pool,
+        key,
+        service_did,
+        retention_days,
+        retention,
+        reason_vocabulary,
+        strike_policy,
+        label_emission_policy,
+        policy_automation_policy,
+        None,
+    )
+    .await
+}
+
+/// Spawn the writer task with an optional PDS-admin bridge
+/// attached (#87 / §F23).
+///
+/// Behaves identically to [`spawn`] when `pds_admin` is `None`.
+/// When `Some(bridge)`, every successful recordAction's
+/// post-commit hook consults
+/// [`crate::pds_admin::dispatch::dispatch_after_record_action`]
+/// to dispatch a backend call against the configured PDS and
+/// audit-record the result.
+///
+/// Lives as a sibling function rather than extending [`spawn`]'s
+/// positional signature so the 18+ existing test files calling
+/// `spawn_writer` (the lib.rs re-export of [`spawn`]) don't have
+/// to thread a `None` argument through. `serve::run` calls this
+/// directly with a constructed bridge when `[pds_admin].enabled`
+/// is true.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_with_pds_admin(
+    pool: Pool<Sqlite>,
+    key: SigningKey,
+    service_did: String,
+    retention_days: Option<u32>,
+    retention: RetentionConfig,
+    reason_vocabulary: ReasonVocabulary,
+    strike_policy: StrikePolicy,
+    label_emission_policy: crate::labels::policy::LabelEmissionPolicy,
+    policy_automation_policy: crate::policy::automation::PolicyAutomationPolicy,
+    pds_admin: Option<crate::pds_admin::dispatch::PdsAdminBridge>,
+) -> Result<WriterHandle> {
     let instance_id = acquire_lease(&pool).await?;
     let signing_key_id = ensure_signing_key_row(&pool, &key).await?;
 
@@ -927,6 +971,7 @@ pub async fn spawn(
         strike_policy,
         label_emission_policy,
         policy_automation_policy,
+        pds_admin,
     };
 
     tokio::spawn(writer.run());
@@ -972,6 +1017,15 @@ struct Writer {
     /// or queue a `pending_policy_actions` row for moderator
     /// review (#73).
     policy_automation_policy: crate::policy::automation::PolicyAutomationPolicy,
+    /// Resolved §F23 PDS-admin bridge (#83 policy + #86
+    /// `OzoneBackend` instance). `None` when `[pds_admin]` is
+    /// disabled — the post-commit dispatch in
+    /// [`Self::handle_record_action`] short-circuits without
+    /// touching the trait. `Some(_)` when enabled — every
+    /// successfully-committed recordAction passes through
+    /// [`crate::pds_admin::dispatch::dispatch_after_record_action`]
+    /// per §A13.
+    pds_admin: Option<crate::pds_admin::dispatch::PdsAdminBridge>,
 }
 
 /// Internal accumulator for an in-flight scheduled sweep. Lives only
@@ -2505,6 +2559,27 @@ impl Writer {
         for event in label_events {
             let _ = self.broadcast_tx.send(event);
         }
+
+        // §F23 / §A13 post-commit PDS-admin dispatch (#87). Fires
+        // AFTER the recordAction transaction has committed and
+        // labels have been broadcast — holding the SQLite write
+        // lock across an HTTP call would deadlock the writer task.
+        // Failures here log + audit-record but do NOT propagate to
+        // the caller; the cairn-mod-side action stays committed
+        // regardless of PDS-side outcome (per §A13's "fail loud,
+        // let the operator decide" posture).
+        crate::pds_admin::dispatch::dispatch_after_record_action(
+            self.pds_admin.as_ref(),
+            &self.pool,
+            crate::pds_admin::dispatch::DispatchContext {
+                action_id: inserted_id,
+                action_type: req.action_type,
+                subject_did: &subject_did,
+                reason_codes: &req.reason_codes,
+                notes: req.notes.as_deref(),
+            },
+        )
+        .await;
 
         Ok(RecordedAction {
             action_id: inserted_id,

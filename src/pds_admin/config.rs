@@ -204,6 +204,29 @@ impl BackendMethod {
             Self::ApplyLabel | Self::NegateLabel => false,
         }
     }
+
+    /// Whether the trait method for this backend method returns
+    /// `Result<BackendActionId, BackendError>` (true) versus
+    /// `Result<(), BackendError>` (false).
+    ///
+    /// Used by the dispatch path in [`crate::pds_admin::dispatch`]
+    /// to project a backend-call result into the unified
+    /// `Result<Option<BackendActionId>, BackendError>` shape that
+    /// [`crate::pds_admin::audit::record_pds_admin_call`] expects.
+    /// Per #87 — single-source the convention so call sites don't
+    /// need to remember which methods carry an id.
+    ///
+    /// `takedown_account` and `suspend_account` synthesize a
+    /// client-side id (per #87's `synthesize_action_id`) so they
+    /// "return" one. `restore_account` takes a prior id and
+    /// returns nothing semantically new. The label methods don't
+    /// participate in the id surface.
+    pub fn returns_action_id(self) -> bool {
+        match self {
+            Self::TakedownAccount | Self::SuspendAccount => true,
+            Self::RestoreAccount | Self::ApplyLabel | Self::NegateLabel => false,
+        }
+    }
 }
 
 /// Admin password newtype. Redacts in `Debug`; zeroes its
@@ -224,10 +247,19 @@ impl BackendMethod {
 pub struct AdminPassword(String);
 
 impl AdminPassword {
-    /// Construct from a resolved env-var value. Internal to the
-    /// resolver — operator code outside this module shouldn't
-    /// produce admin passwords.
-    pub(crate) fn new(s: String) -> Self {
+    /// Construct from a resolved env-var value (or a test
+    /// fixture).
+    ///
+    /// In production the v1.7 resolver is the only call site;
+    /// operator code outside the resolver shouldn't conjure
+    /// admin passwords from arbitrary strings — the
+    /// env-var-resolver path is what makes the
+    /// `admin_password_env` indirection meaningful for #83's
+    /// "no plaintext in TOML" posture. Promoted to `pub` so
+    /// integration tests in `tests/ozone_backend.rs` (#87) can
+    /// construct an [`OzoneBackendConfig`] for wiremock-backed
+    /// tests without a per-test env-var dance.
+    pub fn new(s: String) -> Self {
         Self(s)
     }
 

@@ -1,30 +1,32 @@
-//! `OzoneBackend` skeleton for bsky-PDS (#86, v1.7; Phase B).
+//! `OzoneBackend` for bsky-PDS (Phase B; #86 skeleton, #87
+//! `takedown_account` body).
 //!
 //! Implements the [`PdsAdminBackend`] trait against the operator's
 //! bsky-PDS using HTTP Basic auth (admin password from
-//! `[pds_admin.ozone].admin_password_env`). v1.7 ships the structural
-//! shape so subsequent issues fill in method bodies one at a time:
+//! `[pds_admin.ozone].admin_password_env`). v1.7 builds the surface
+//! one issue at a time:
 //!
-//! - **#86 (this file)** — struct + ctor + helper functions
-//!   (`xrpc_url`, `basic_auth_header`, `map_reqwest_error`); trait
-//!   impl with `unimplemented!()` placeholders for the mutating
-//!   methods. The label methods (`apply_label`, `negate_label`)
-//!   already return [`BackendError::Unsupported`] per §A5 — that's
-//!   the **final v1.7 behavior**, not a placeholder. cairn-mod's own
-//!   `subscribeLabels` (§F4) is the label distribution surface;
-//!   bsky-PDS doesn't implement those routes.
-//! - **#87** — `takedown_account` body via
-//!   `com.atproto.admin.updateSubjectStatus` + integration with the
-//!   recordAction pipeline.
+//! - **#86** — struct + ctor + helper functions (`xrpc_url`,
+//!   `basic_auth_header`, `map_reqwest_error`); trait impl with
+//!   `unimplemented!()` placeholders for the mutating methods.
+//!   Label methods return [`BackendError::Unsupported`] per §A5
+//!   (final v1.7 behavior; cairn-mod's own `subscribeLabels` (§F4)
+//!   is the label distribution surface).
+//! - **#87 (this)** — `takedown_account` body via
+//!   `com.atproto.admin.updateSubjectStatus` + the wire-protocol
+//!   helpers (`synthesize_action_id`, `decode_xrpc_error_envelope`,
+//!   `map_status_to_backend_error`, `parse_retry_after_seconds`).
+//!   Trait signature gains `precipitating_action_id: i64` on
+//!   `takedown_account` / `suspend_account` so backends without a
+//!   native action id (bsky-PDS) can synthesize one. Integration
+//!   into the recordAction pipeline lives in
+//!   [`crate::pds_admin::dispatch`].
 //! - **#88** — `suspend_account` + `restore_account` bodies.
-//! - **#89** — refines the `apply_label`/`negate_label`
-//!   `Unsupported` behavior (docs / tighter test surface). Code-wise
-//!   nothing changes; the methods already return their final value.
-//! - **#90** — `probe()` startup-probe trait method (per §A15);
-//!   adds `probe()` to the trait + the OzoneBackend impl.
+//! - **#89** — refines `apply_label`/`negate_label` docs/tests
+//!   (no code change; methods already return their final value).
+//! - **#90** — `probe()` startup probe trait method (per §A15).
 //!
 //! Construction validates the config but does NOT touch the network.
-//! Probe runs at startup separately (#90).
 
 use std::fmt;
 
@@ -64,13 +66,10 @@ use crate::pds_admin::types::Subject;
 /// `probe()` trait method. Subsequent calls handle their own
 /// transient-network retries (well, *will* in v1.8; v1.7 is
 /// fail-loud per §A13).
+#[derive(Clone)]
 pub struct OzoneBackend {
     /// HTTP client. Reused across calls; reqwest's connection
-    /// pool handles keepalive transparently. Consumed by the
-    /// per-method call sites in #87 (`takedown_account`) and
-    /// #88 (`suspend_account`, `restore_account`); not exercised
-    /// by any code path in #86.
-    #[allow(dead_code)]
+    /// pool handles keepalive transparently.
     client: reqwest::Client,
     /// Base URL of the PDS, e.g. `https://bsky.example.com`.
     /// Always `https://` per #83's config validation. Trailing
@@ -78,10 +77,7 @@ pub struct OzoneBackend {
     /// [`Self::xrpc_url`]) so input shape doesn't matter.
     base_url: Url,
     /// Admin password for HTTP Basic auth. Stored as the
-    /// redacting / zero-on-drop newtype from #83. Consumed by
-    /// the per-method call sites in #87 / #88 via
-    /// [`Self::basic_auth_header`].
-    #[allow(dead_code)]
+    /// redacting / zero-on-drop newtype from #83.
     admin_password: AdminPassword,
 }
 
@@ -124,10 +120,6 @@ impl OzoneBackend {
     /// non-pathological NSID. The fallible return preserves a clean
     /// error path for v1.8+ where NSIDs may come from external
     /// sources.
-    ///
-    /// Lib-time consumers land in #87/#88 (the per-method call
-    /// sites). #86 only exercises the helper through tests.
-    #[allow(dead_code)]
     pub(crate) fn xrpc_url(&self, nsid: &str) -> Result<Url, BackendError> {
         let mut base = self.base_url.clone();
         if !base.path().ends_with('/') {
@@ -147,15 +139,11 @@ impl OzoneBackend {
     ///
     /// Reqwest exposes
     /// [`RequestBuilder::basic_auth`](reqwest::RequestBuilder::basic_auth)
-    /// which would also work; the standalone helper exists so #87+
-    /// can verify byte-for-byte encoding in unit tests without
-    /// constructing a request, and so the `admin:` username (which
-    /// is bsky-PDS's hard-coded admin handle, not operator-
-    /// configurable) is single-sourced here.
-    ///
-    /// Lib-time consumers land in #87/#88. #86 only exercises the
-    /// helper through tests.
-    #[allow(dead_code)]
+    /// which would also work; the standalone helper exists so #87
+    /// could byte-for-byte test the encoding without a request and
+    /// so the `admin:` username (which is bsky-PDS's hard-coded
+    /// admin handle, not operator-configurable) is single-sourced
+    /// here. Call sites in #87+ use this helper.
     pub(crate) fn basic_auth_header(&self) -> String {
         let creds = format!("admin:{}", self.admin_password.as_str());
         let encoded = base64::engine::general_purpose::STANDARD.encode(creds);
@@ -164,29 +152,20 @@ impl OzoneBackend {
 
     /// Map a `reqwest::Error` (transport-layer failure) to the
     /// matching [`BackendError`] variant. Response-body envelope
-    /// decoding (the JSON `{"error": "...", "message": "..."}`
-    /// shape bsky-PDS returns) lives in #87 alongside the per-method
-    /// call sites — that needs the response body, which this helper
-    /// doesn't have.
-    ///
-    /// Categorization rules:
-    /// - Timeout / connect failures → [`BackendError::Network`].
-    /// - Status-code errors here are unexpected (callers in #87+
-    ///   use the response body before reaching the error helper),
-    ///   so this branch is best-effort and rarely hit. Mapped to
-    ///   [`BackendError::RemoteError`] with the raw status code.
-    /// - Everything else → [`BackendError::Network`] (unknown
-    ///   transport failure; operators see the verbatim message).
-    ///
-    /// Consumed by #87+ at every per-method call site. Not unit-
-    /// tested in #86 because `reqwest::Error` has no public
-    /// constructor — testing it requires driving an actual failing
-    /// HTTP request, which #87's wiremock-based tests will do.
-    #[allow(dead_code)]
+    /// decoding (the `{"error": "...", "message": "..."}` shape
+    /// bsky-PDS returns for non-2xx responses) is handled by
+    /// [`map_status_to_backend_error`] — this helper covers the
+    /// "request never reached a status code" cases (DNS failure,
+    /// connection refused, TLS handshake failure, read timeout
+    /// mid-body, etc.).
     pub(crate) fn map_reqwest_error(err: reqwest::Error) -> BackendError {
         if err.is_timeout() || err.is_connect() {
             BackendError::Network(err.to_string())
         } else if err.is_status() {
+            // Reachable only if a caller used `.error_for_status()`
+            // and is mapping the result here; #87's takedown_account
+            // body inspects the status before reading the body, so
+            // this branch is unused in practice.
             let code = err
                 .status()
                 .map(|s| s.as_u16().to_string())
@@ -216,15 +195,204 @@ impl fmt::Debug for OzoneBackend {
     }
 }
 
+// ===========================================================================
+// Wire-protocol helpers (#87)
+// ===========================================================================
+
+/// Synthesize a deterministic [`BackendActionId`] for a backend
+/// that doesn't return one of its own.
+///
+/// bsky-PDS's `com.atproto.admin.updateSubjectStatus` returns 200
+/// with an empty JSON body — no action identifier. cairn-mod
+/// produces one client-side so the recordAction pipeline + audit
+/// row + future `restore_account` lookups have a stable handle.
+///
+/// Format: `ozone:{did}:{precipitating_action_id}`
+/// - `ozone:` prefix identifies the backend that issued the id
+///   (forward-compat for v1.8's `LocusBackend` which will use its
+///   own native ids prefixed `locus:`).
+/// - `{did}` carries the subject for forensic readability.
+/// - `{precipitating_action_id}` is the cairn-mod-side
+///   `subject_actions(id)` — guaranteed unique by SQLite, gives a
+///   clean back-pointer.
+fn synthesize_action_id(did: &str, precipitating_action_id: i64) -> BackendActionId {
+    BackendActionId::new(format!("ozone:{did}:{precipitating_action_id}"))
+}
+
+/// Decode bsky-PDS's XRPC error-envelope JSON.
+///
+/// bsky-PDS returns non-2xx responses as
+/// `{"error": "<code>", "message": "<human readable>"}` per the
+/// XRPC spec (bsky-PDS findings §6.3). Returns `Some((code,
+/// message))` when the body parses; `None` for malformed bodies
+/// (which the caller treats as raw transport content).
+///
+/// `message` is optional in the wire shape; the helper substitutes
+/// an empty string when absent.
+fn decode_xrpc_error_envelope(body: &[u8]) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = v.get("error")?.as_str()?.to_string();
+    let message = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some((code, message))
+}
+
+/// Parse a `Retry-After` header value as integer-seconds.
+///
+/// RFC 7231 §7.1.3 permits two forms: integer-seconds and
+/// HTTP-date. v1.7 only handles integer-seconds — bsky-PDS sends
+/// integers in practice, and the HTTP-date form is rare enough to
+/// punt. `None` on parse failure (caller treats as "no hint").
+fn parse_retry_after_seconds(header: &reqwest::header::HeaderValue) -> Option<u32> {
+    header.to_str().ok()?.trim().parse::<u32>().ok()
+}
+
+/// Map an HTTP status code (with the response body and an optional
+/// `Retry-After` hint) into the matching [`BackendError`] variant.
+///
+/// Handles the bsky-PDS-specific dispositions per #87's prompt:
+/// - **400** with `InvalidRequest` and a subject/did message →
+///   [`BackendError::Validation`] (the operator's request was
+///   malformed in a way that names the subject).
+/// - **400** otherwise → [`BackendError::RemoteError`].
+/// - **401 / 403** → [`BackendError::Auth`].
+/// - **429** → [`BackendError::RateLimited`] with the parsed hint.
+/// - **500 / 502 / 503 / 504** → [`BackendError::Network`]
+///   (transient infrastructure; not auth or validation).
+/// - **Other 5xx** → [`BackendError::RemoteError`].
+/// - **Other** → [`BackendError::RemoteError`] with the raw status.
+///
+/// Bodies that don't parse as the XRPC envelope fall back to
+/// using the raw bytes (best-effort) for the message.
+pub(crate) fn map_status_to_backend_error(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    retry_after_seconds: Option<u32>,
+) -> BackendError {
+    let envelope = decode_xrpc_error_envelope(body);
+    let lossy_body = || String::from_utf8_lossy(body).into_owned();
+
+    match status.as_u16() {
+        400 => {
+            let (code, message) =
+                envelope.unwrap_or_else(|| ("InvalidRequest".to_string(), lossy_body()));
+            // bsky-PDS's "InvalidRequest" with subject/did wording is
+            // the validation-failure shape; everything else under 400
+            // is a generic remote-error envelope.
+            if code == "InvalidRequest" {
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("subject") || lower.contains("did") {
+                    return BackendError::Validation(message);
+                }
+            }
+            BackendError::RemoteError { code, message }
+        }
+        401 | 403 => {
+            let message = envelope.map(|(_, m)| m).unwrap_or_else(lossy_body);
+            BackendError::Auth(format!("HTTP {}: {}", status.as_u16(), message))
+        }
+        429 => {
+            let message = envelope
+                .map(|(_, m)| m)
+                .unwrap_or_else(|| "rate limited".to_string());
+            BackendError::RateLimited {
+                message,
+                retry_after_seconds,
+            }
+        }
+        500 | 502 | 503 | 504 => BackendError::Network(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            envelope.map(|(_, m)| m).unwrap_or_else(lossy_body)
+        )),
+        _ => match envelope {
+            Some((code, message)) => BackendError::RemoteError { code, message },
+            None => BackendError::RemoteError {
+                code: status.as_u16().to_string(),
+                message: lossy_body(),
+            },
+        },
+    }
+}
+
 #[async_trait]
 impl PdsAdminBackend for OzoneBackend {
+    /// Implements `com.atproto.admin.updateSubjectStatus` per
+    /// bsky-PDS findings §6.1.
+    ///
+    /// Wire shape:
+    /// ```json
+    /// {
+    ///   "subject": {
+    ///     "$type": "com.atproto.admin.defs#repoRef",
+    ///     "did": "did:plc:..."
+    ///   },
+    ///   "takedown": {
+    ///     "applied": true,
+    ///     "ref": "cairn-mod:action_id={id}:reason={reason}"
+    ///   }
+    /// }
+    /// ```
+    ///
+    /// `notes` is intentionally NOT mirrored to the wire body —
+    /// it's a cairn-mod-internal moderator artifact stored on the
+    /// `subject_actions` row. Operators wanting notes propagated
+    /// can put them in the reason vocabulary; the `ref` field is
+    /// for cross-system forensic tracking, not narrative content.
+    ///
+    /// Success: bsky-PDS returns 200 with `{}` body. Since no
+    /// action id is returned, this method mints one client-side
+    /// (`ozone:{did}:{precipitating_action_id}` — see the
+    /// `synthesize_action_id` helper below) for use by the audit
+    /// row and any future `restore_account` lookup.
     async fn takedown_account(
         &self,
-        _did: &str,
-        _reason: &str,
-        _notes: Option<&str>,
+        did: &str,
+        reason: &str,
+        notes: Option<&str>,
+        precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError> {
-        unimplemented!("OzoneBackend::takedown_account lands in chainlink #87")
+        let _ = notes;
+        let url = self.xrpc_url("com.atproto.admin.updateSubjectStatus")?;
+
+        let body = serde_json::json!({
+            "subject": {
+                "$type": "com.atproto.admin.defs#repoRef",
+                "did": did,
+            },
+            "takedown": {
+                "applied": true,
+                "ref": format!("cairn-mod:action_id={precipitating_action_id}:reason={reason}"),
+            },
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, self.basic_auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(synthesize_action_id(did, precipitating_action_id));
+        }
+
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(parse_retry_after_seconds);
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        Err(map_status_to_backend_error(
+            status,
+            &body_bytes,
+            retry_after,
+        ))
     }
 
     async fn suspend_account(
@@ -233,6 +401,7 @@ impl PdsAdminBackend for OzoneBackend {
         _reason: &str,
         _duration_days: Option<u32>,
         _notes: Option<&str>,
+        _precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError> {
         unimplemented!("OzoneBackend::suspend_account lands in chainlink #88")
     }
@@ -444,18 +613,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "OzoneBackend::takedown_account lands in chainlink #87")]
-    async fn takedown_account_panics_pointing_at_issue_87() {
-        let backend = fixture_backend("https://bsky.example.com");
-        let _ = backend.takedown_account("did:plc:abc", "spam", None).await;
-    }
-
-    #[tokio::test]
     #[should_panic(expected = "OzoneBackend::suspend_account lands in chainlink #88")]
     async fn suspend_account_panics_pointing_at_issue_88() {
         let backend = fixture_backend("https://bsky.example.com");
         let _ = backend
-            .suspend_account("did:plc:abc", "spam", Some(7), None)
+            .suspend_account("did:plc:abc", "spam", Some(7), None, 1)
             .await;
     }
 
@@ -466,5 +628,142 @@ mod tests {
         let _ = backend
             .restore_account("did:plc:abc", &BackendActionId::new("prior-1"), "rehab")
             .await;
+    }
+
+    // ===== Helper unit tests (#87) =====
+
+    #[test]
+    fn synthesize_action_id_format() {
+        let id = synthesize_action_id("did:plc:abc", 42);
+        assert_eq!(id.as_str(), "ozone:did:plc:abc:42");
+    }
+
+    #[test]
+    fn synthesize_action_id_handles_negative_action_id() {
+        // i64 is signed; ids should always be positive in practice
+        // but the formatter should not silently corrupt negatives.
+        let id = synthesize_action_id("did:plc:x", -1);
+        assert_eq!(id.as_str(), "ozone:did:plc:x:-1");
+    }
+
+    #[test]
+    fn decode_xrpc_envelope_extracts_code_and_message() {
+        let body = br#"{"error": "InvalidRequest", "message": "subject DID malformed"}"#;
+        let (code, message) = decode_xrpc_error_envelope(body).unwrap();
+        assert_eq!(code, "InvalidRequest");
+        assert_eq!(message, "subject DID malformed");
+    }
+
+    #[test]
+    fn decode_xrpc_envelope_message_optional() {
+        let body = br#"{"error": "Foo"}"#;
+        let (code, message) = decode_xrpc_error_envelope(body).unwrap();
+        assert_eq!(code, "Foo");
+        assert_eq!(message, "");
+    }
+
+    #[test]
+    fn decode_xrpc_envelope_returns_none_for_malformed_body() {
+        assert!(decode_xrpc_error_envelope(b"not json").is_none());
+        assert!(decode_xrpc_error_envelope(b"{}").is_none());
+        assert!(decode_xrpc_error_envelope(b"[]").is_none());
+        assert!(decode_xrpc_error_envelope(b"").is_none());
+    }
+
+    #[test]
+    fn map_status_400_invalid_request_with_subject_message_is_validation() {
+        let body =
+            br#"{"error": "InvalidRequest", "message": "subject DID is malformed"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::BAD_REQUEST, body, None);
+        match err {
+            BackendError::Validation(msg) => assert!(msg.contains("subject")),
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_status_400_invalid_request_without_subject_is_remote_error() {
+        let body = br#"{"error": "InvalidRequest", "message": "rate limit exceeded"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::BAD_REQUEST, body, None);
+        match err {
+            BackendError::RemoteError { code, .. } => assert_eq!(code, "InvalidRequest"),
+            other => panic!("expected RemoteError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_status_401_is_auth() {
+        let body = br#"{"error": "AuthenticationRequired", "message": "bad password"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::UNAUTHORIZED, body, None);
+        match err {
+            BackendError::Auth(msg) => {
+                assert!(msg.contains("401"));
+                assert!(msg.contains("bad password"));
+            }
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_status_403_is_auth() {
+        let err = map_status_to_backend_error(reqwest::StatusCode::FORBIDDEN, b"forbidden", None);
+        assert!(matches!(err, BackendError::Auth(_)));
+    }
+
+    #[test]
+    fn map_status_429_carries_retry_after() {
+        let body = br#"{"error": "RateLimitExceeded", "message": "calm down"}"#.as_slice();
+        let err =
+            map_status_to_backend_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, Some(30));
+        match err {
+            BackendError::RateLimited {
+                message,
+                retry_after_seconds,
+            } => {
+                assert_eq!(retry_after_seconds, Some(30));
+                assert_eq!(message, "calm down");
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_status_5xx_transient_is_network() {
+        for code in [500u16, 502, 503, 504] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            let err = map_status_to_backend_error(status, b"oops", None);
+            assert!(
+                matches!(err, BackendError::Network(_)),
+                "{code} should be Network"
+            );
+        }
+    }
+
+    #[test]
+    fn map_status_other_5xx_is_remote_error() {
+        let err = map_status_to_backend_error(
+            reqwest::StatusCode::from_u16(599).unwrap(),
+            b"unrecognized server failure",
+            None,
+        );
+        assert!(matches!(err, BackendError::RemoteError { .. }));
+    }
+
+    #[test]
+    fn parse_retry_after_seconds_handles_integer() {
+        let header = reqwest::header::HeaderValue::from_static("30");
+        assert_eq!(parse_retry_after_seconds(&header), Some(30));
+    }
+
+    #[test]
+    fn parse_retry_after_seconds_rejects_http_date() {
+        let header = reqwest::header::HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT");
+        assert_eq!(parse_retry_after_seconds(&header), None);
+    }
+
+    #[test]
+    fn parse_retry_after_seconds_handles_whitespace() {
+        let header = reqwest::header::HeaderValue::from_static("  120  ");
+        assert_eq!(parse_retry_after_seconds(&header), Some(120));
     }
 }
