@@ -50,7 +50,7 @@ use sqlx::{Pool, Sqlite};
 use crate::xrpc_gateway::Nsid;
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
-use crate::xrpc_gateway::handlers::{XrpcGatewayState, emit_event};
+use crate::xrpc_gateway::handlers::{XrpcGatewayState, create_report, emit_event};
 use crate::xrpc_gateway::middleware::{
     xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
 };
@@ -185,8 +185,14 @@ pub(crate) fn build_routes_only(_config: XrpcGatewayConfig) -> Router {
 // auth middleware can compose without extractor-collision
 // surprises.
 
-async fn handle_create_report() -> Response {
-    method_not_implemented_response(Nsid::ComAtprotoModerationCreateReport.as_path_segment())
+// `com.atproto.moderation.createReport` — body in
+// [`crate::xrpc_gateway::handlers::create_report`] (#96).
+async fn handle_create_report(
+    state: Extension<XrpcGatewayState>,
+    claims: Extension<crate::xrpc_gateway::XrpcAuthClaims>,
+    body: axum::body::Bytes,
+) -> Response {
+    create_report::handler(state, claims, body).await
 }
 
 // `tools.ozone.moderation.emitEvent` — body in
@@ -344,16 +350,17 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_nsids_return_501_with_correct_method() {
-        // emitEvent is excluded post-#95: its handler is a real
-        // body that requires `Extension<XrpcGatewayState>` +
-        // `Extension<XrpcAuthClaims>` from the layered router.
-        // build_routes_only does not provide those, so emitEvent
-        // would 500 here. Through-the-router emitEvent shape tests
-        // live in the integration test file `tests/xrpc_gateway_emit_event.rs`
-        // and the layered tests below.
+        // emitEvent and createReport are excluded post-#95/#96:
+        // their handlers are real bodies that require
+        // `Extension<XrpcGatewayState>` + `Extension<XrpcAuthClaims>`
+        // from the layered router. build_routes_only does not
+        // provide those, so they would 500 here. Through-the-
+        // router shape tests for those NSIDs live in the
+        // integration test files (tests/xrpc_gateway_emit_event.rs
+        // and tests/xrpc_gateway_create_report.rs) and the layered
+        // tests below.
         let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let cases: &[(reqwest::Method, &str)] = &[
-            (reqwest::Method::POST, "com.atproto.moderation.createReport"),
             (reqwest::Method::GET, "tools.ozone.moderation.queryStatuses"),
             (reqwest::Method::GET, "tools.ozone.moderation.queryEvents"),
         ];
@@ -507,9 +514,13 @@ mod tests {
         // exact field set here so a future drift (e.g., adding a
         // `code` field) is a deliberate decision made through
         // this test.
+        //
+        // Uses queryStatuses (still a 501 stub through #96) since
+        // createReport / emitEvent now require Extension state
+        // that build_routes_only doesn't provide.
         let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let res = client()
-            .post(format!("{url}/xrpc/com.atproto.moderation.createReport"))
+            .get(format!("{url}/xrpc/tools.ozone.moderation.queryStatuses"))
             .send()
             .await
             .unwrap();
@@ -821,8 +832,11 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_pds_can_call_create_report() {
-        // Issuer is in xrpc_trusted_pdses. createReport reaches
-        // the handler stub (501).
+        // Issuer is in xrpc_trusted_pdses. createReport passes
+        // membership and reaches the handler. Empty body → 400
+        // InvalidRequest from the post-#96 handler. The important
+        // assertion is that membership did NOT short-circuit at
+        // 403 (which would mean the trusted-PDS gate is broken).
         let pool = empty_pool().await;
         add_trusted_pds(&pool, fx::ISSUER_DID, Some("test"), "did:plc:m")
             .await
@@ -838,7 +852,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(res.status().as_u16(), 501);
+        assert_eq!(res.status().as_u16(), 400);
     }
 
     #[tokio::test]

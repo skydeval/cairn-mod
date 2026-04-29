@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             reported_by, reason_type, reason, subject_type, subject_did,\n             subject_uri, subject_cid, status\n           FROM reports WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reported_by",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason_type",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "reason",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_type",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_did",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_uri",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "subject_cid",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "8b410324fca6099ec571e938e6361fbb96dc1b2bbce7b21695a7ed3869483dc6"
+}

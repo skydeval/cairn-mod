@@ -15,6 +15,7 @@ use sqlx::{Pool, Sqlite};
 
 use crate::writer::WriterHandle;
 
+pub mod create_report;
 pub mod emit_event;
 
 /// Shared state every gateway handler receives via `Extension`.

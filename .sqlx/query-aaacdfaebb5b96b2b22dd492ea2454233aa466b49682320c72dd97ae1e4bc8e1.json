@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reported_by FROM reports WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reported_by",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aaacdfaebb5b96b2b22dd492ea2454233aa466b49682320c72dd97ae1e4bc8e1"
+}
