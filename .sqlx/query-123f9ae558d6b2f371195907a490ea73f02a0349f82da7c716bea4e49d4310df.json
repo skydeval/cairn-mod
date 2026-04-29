@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pds_admin_audit SET row_hash = ?1 WHERE id = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "123f9ae558d6b2f371195907a490ea73f02a0349f82da7c716bea4e49d4310df"
+}

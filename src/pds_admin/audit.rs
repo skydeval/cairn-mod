@@ -202,19 +202,26 @@ pub struct PdsAdminAuditRecord {
 /// `Option<...>`; absence is encoded as field-omission in the
 /// canonical CBOR (matching audit_log's `AuditRowForHashing`
 /// convention — "absent != null").
-struct PdsAdminAuditRowForHashing<'a> {
-    precipitating_action_id: i64,
-    backend_method: &'a str,
-    backend_action_id: Option<&'a str>,
-    outcome: &'a str,
-    error_code: Option<&'a str>,
-    error_message: Option<&'a str>,
+///
+/// `pub(crate)` so #88's `cairn audit-verify` extension can
+/// rehydrate stored rows into this shape and recompute their
+/// hashes against the unified chain. The hashing surface is
+/// internal to cairn-mod; external callers use the typed
+/// [`record_pds_admin_call`] API which constructs this struct
+/// internally.
+pub(crate) struct PdsAdminAuditRowForHashing<'a> {
+    pub(crate) precipitating_action_id: i64,
+    pub(crate) backend_method: &'a str,
+    pub(crate) backend_action_id: Option<&'a str>,
+    pub(crate) outcome: &'a str,
+    pub(crate) error_code: Option<&'a str>,
+    pub(crate) error_message: Option<&'a str>,
     /// Carried as `i64` (rather than `u32`) so the canonical CBOR
     /// encoding matches `audit_log`'s integer convention. u32 →
     /// i64 is lossless.
-    retry_after_seconds: Option<i64>,
-    call_started_at: i64,
-    call_completed_at: i64,
+    pub(crate) retry_after_seconds: Option<i64>,
+    pub(crate) call_started_at: i64,
+    pub(crate) call_completed_at: i64,
 }
 
 /// Build the `LexValue::Map` representation of a `pds_admin_audit`
@@ -267,7 +274,12 @@ fn row_to_lex_value(row: &PdsAdminAuditRowForHashing<'_>) -> LexValue {
     LexValue::Map(m)
 }
 
-fn compute_pds_admin_audit_row_hash(
+/// Compute the SHA-256 row hash for a `pds_admin_audit` row chained
+/// from `prev_hash`. Mirrors
+/// [`crate::audit::hash::compute_audit_row_hash`] but for the
+/// `pds_admin_audit` table's row shape. `pub(crate)` for #88's
+/// audit-verify extension.
+pub(crate) fn compute_pds_admin_audit_row_hash(
     prev_hash: &[u8; 32],
     row: &PdsAdminAuditRowForHashing<'_>,
 ) -> Result<[u8; 32]> {

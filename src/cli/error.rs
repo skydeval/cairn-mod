@@ -207,11 +207,17 @@ pub enum CliError {
     /// (`cairn audit verify --json`) get the JSON line; the stderr
     /// echo is redundant for them but harmless.
     #[error(
-        "audit chain divergence at row {row_id}: expected {expected_hash}, found {actual_hash} ({attested_rows_before_divergence} row(s) verified before divergence)"
+        "audit chain divergence at {table}:{row_id}: expected {expected_hash}, found {actual_hash} ({attested_rows_before_divergence} row(s) verified before divergence)"
     )]
     AuditDivergence {
-        /// `audit_log.id` of the row whose recomputed hash did not
-        /// match the stored row_hash.
+        /// SQL-table name of the divergent row — `"audit_log"` or
+        /// `"pds_admin_audit"`. Added in #88 alongside the unified
+        /// chain walker so operators can correlate
+        /// `(table, row_id)` to a specific row across both tables
+        /// in v1.7+ deployments.
+        table: &'static str,
+        /// Primary key of the divergent row, scoped to the table
+        /// named by `table`.
         row_id: i64,
         /// Hex-encoded SHA-256 the chain says this row's row_hash
         /// should be (recomputed from the running prev_hash + the
@@ -221,7 +227,8 @@ pub enum CliError {
         /// row_hash column.
         actual_hash: String,
         /// Number of rows whose hashes verified before this one —
-        /// the truncation point operators reconcile from.
+        /// the truncation point operators reconcile from. Counts
+        /// across both tables in the unified chain.
         attested_rows_before_divergence: i64,
     },
 }

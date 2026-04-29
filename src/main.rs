@@ -944,11 +944,13 @@ async fn run_audit_verify(args: AuditVerifyArgs) -> Result<(), CliError> {
     }
     match outcome {
         audit_verify::VerifyOutcome::Divergence {
+            table,
             row_id,
             expected_hash,
             actual_hash,
             attested_rows_before_divergence,
         } => Err(CliError::AuditDivergence {
+            table: table.as_str(),
             row_id,
             expected_hash,
             actual_hash,
