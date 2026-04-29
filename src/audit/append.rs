@@ -1,4 +1,5 @@
-//! Audit-log append helpers (#39, v1.3).
+//! Audit-log append helpers (#39, v1.3; chain extended to span
+//! `pds_admin_audit` in #85, v1.7).
 //!
 //! Two public entry points + one shared connection-level helper. All
 //! three route through [`crate::audit::hash::compute_audit_row_hash`]
@@ -13,9 +14,14 @@
 //!                                                                      unpublish)
 //! ```
 //!
-//! All paths read `prev_hash` as the latest non-NULL `audit_log.row_hash`
-//! at write time, falling back to [`crate::audit::hash::GENESIS_PREV_HASH`]
-//! when the table is empty or contains only pre-v1.3 rows.
+//! `prev_hash` is the **most recent chain link across both tables** —
+//! `audit_log.row_hash` (latest non-NULL by id) and
+//! `pds_admin_audit.row_hash` (latest by id). Tie-broken on insertion
+//! timestamp (`audit_log.created_at` vs.
+//! `pds_admin_audit.call_completed_at`); falls back to
+//! [`crate::audit::hash::GENESIS_PREV_HASH`] when both tables are empty
+//! or audit_log only contains pre-v1.3 rows. The unified-chain semantics
+//! live in the crate-internal `read_latest_chain_hash` helper below.
 //!
 //! The chain-integrity invariant is enforced at the SQLite write-lock
 //! layer. [`append_via_pool`] explicitly issues `BEGIN IMMEDIATE` so the
@@ -132,7 +138,7 @@ pub async fn append_via_pool(pool: &Pool<Sqlite>, row: &AuditRowForAppend) -> Re
 /// framing (either inheriting one via [`append_in_tx`] or issuing
 /// `BEGIN IMMEDIATE` via [`append_via_pool`]).
 async fn perform_append(conn: &mut SqliteConnection, row: &AuditRowForAppend) -> Result<i64> {
-    let prev_hash = read_latest_row_hash(&mut *conn).await?;
+    let prev_hash = read_latest_chain_hash(&mut *conn).await?;
     let row_hash = compute_audit_row_hash(&prev_hash, &row.as_hashing())?;
 
     let prev_hash_slice: &[u8] = &prev_hash;
@@ -159,24 +165,61 @@ async fn perform_append(conn: &mut SqliteConnection, row: &AuditRowForAppend) ->
     Ok(id)
 }
 
-/// Read the latest stored `audit_log.row_hash`, skipping pre-v1.3 rows
-/// that have NULL hashes. Returns [`GENESIS_PREV_HASH`] when no
-/// non-NULL row_hash exists.
+/// Read the latest stored `row_hash` across the unified chain
+/// (audit_log + pds_admin_audit, since #85 / v1.7), skipping pre-v1.3
+/// audit_log rows that have NULL hashes. Tie-breaks on insertion
+/// timestamp: `audit_log.created_at` vs `pds_admin_audit.call_completed_at`,
+/// later wins. Returns [`GENESIS_PREV_HASH`] when both tables are empty
+/// (or audit_log only contains pre-v1.3 NULL rows and pds_admin_audit
+/// is empty).
 ///
 /// This produces the trust-horizon semantic: the v1.3 chain is rooted
-/// at GENESIS regardless of whether `cairn audit-rebuild` has run.
-async fn read_latest_row_hash(conn: &mut SqliteConnection) -> Result<[u8; 32]> {
-    let row = sqlx::query!(
-        "SELECT row_hash FROM audit_log
+/// at GENESIS regardless of whether `cairn audit-rebuild` has run, and
+/// extends through whichever pds_admin_audit row chains in next.
+///
+/// `pub(crate)` so the `pds_admin_audit` append helper in
+/// [`crate::pds_admin::audit`] can share the same chain-tip read.
+pub(crate) async fn read_latest_chain_hash(conn: &mut SqliteConnection) -> Result<[u8; 32]> {
+    let audit_log_latest = sqlx::query!(
+        "SELECT row_hash, created_at FROM audit_log
          WHERE row_hash IS NOT NULL
          ORDER BY id DESC LIMIT 1"
     )
     .fetch_optional(&mut *conn)
     .await
     .map_err(|e| Error::Signing(format!("audit prev_hash read: {e}")))?;
-    match row.and_then(|r| r.row_hash) {
-        Some(bytes) => parse_stored_hash(&bytes),
-        None => Ok(GENESIS_PREV_HASH),
+
+    let pds_admin_latest = sqlx::query!(
+        "SELECT row_hash, call_completed_at FROM pds_admin_audit
+         ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| Error::Signing(format!("pds_admin_audit prev_hash read: {e}")))?;
+
+    match (audit_log_latest, pds_admin_latest) {
+        (None, None) => Ok(GENESIS_PREV_HASH),
+        (Some(a), None) => match a.row_hash {
+            Some(bytes) => parse_stored_hash(&bytes),
+            None => Ok(GENESIS_PREV_HASH),
+        },
+        (None, Some(p)) => parse_stored_hash(&p.row_hash),
+        (Some(a), Some(p)) => {
+            // Both tables have rows. Compare insertion timestamps;
+            // the later one is the chain tip. audit_log's row may
+            // still be a pre-v1.3 NULL — guard the unwrap.
+            let a_hash = a.row_hash;
+            match a_hash {
+                None => parse_stored_hash(&p.row_hash),
+                Some(bytes) => {
+                    if p.call_completed_at >= a.created_at {
+                        parse_stored_hash(&p.row_hash)
+                    } else {
+                        parse_stored_hash(&bytes)
+                    }
+                }
+            }
+        }
     }
 }
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT row_hash, call_completed_at FROM pds_admin_audit\n         ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "call_completed_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6c4917b01ef2626d69f7b9d450cb94c83bdc4bfc6cc3c4347e129733954987ea"
+}

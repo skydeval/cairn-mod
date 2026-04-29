@@ -12,19 +12,27 @@
 //! - **#84 ([`backend`])** — [`PdsAdminBackend`] trait +
 //!   [`BackendError`] enum + [`BackendActionId`] opaque newtype
 //!   + [`Subject`] shared type. Type-only; no implementations.
-//! - **#85** — `pds_admin_audit` table + audit-chain integration.
+//! - **#85 ([`audit`])** — `pds_admin_audit` table +
+//!   audit-chain integration. Hash-chains into the same chain as
+//!   `audit_log` (§F10) per §A13.
 //! - **#86–#90** — `OzoneBackend` implementation: HTTP client,
 //!   admin Basic auth, per-method bodies, startup probe.
 //!
 //! See [`config`] for the v1.7 config surface, [`backend`] for
-//! the trait + error types, and
-//! `.design-notes/v1_7-architectural-decisions.md` §A11 / §A2 /
-//! §A5 for the schema and trait rationale.
+//! the trait + error types, [`audit`] for the persistence layer,
+//! and `.design-notes/v1_7-architectural-decisions.md` §A2 / §A5 /
+//! §A11 / §A13 for the trait, label-bridge, schema, and audit-chain
+//! rationale.
 
+pub mod audit;
 pub mod backend;
 pub mod config;
 pub mod types;
 
+pub use audit::{
+    AuditOutcome, PdsAdminAuditRecord, get_pds_admin_audit, list_pds_admin_audit_for_action,
+    record_pds_admin_call,
+};
 pub use backend::{BackendActionId, BackendError, PdsAdminBackend};
 pub use config::{
     ActionMapEntry, AdminPassword, BackendMethod, OzoneBackendConfig, PdsAdminBackendConfig,

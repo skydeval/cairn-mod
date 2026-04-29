@@ -162,12 +162,14 @@ pub enum BackendMethod {
 impl BackendMethod {
     /// Parse the wire-string form. Returns `None` for unknown
     /// strings so the caller can surface a config-load error
-    /// listing the allowed set. Module-private to dodge clippy's
-    /// `should_implement_trait` lint and to match the
-    /// [`crate::policy::automation::PolicyMode`] precedent —
-    /// later issues (#84, #86) can promote visibility if a
-    /// crate-wide consumer needs the parser.
-    fn from_wire_str(s: &str) -> Option<Self> {
+    /// listing the allowed set. `pub(crate)` (and named `from_wire_str`
+    /// rather than `from_str`) to dodge clippy's
+    /// `should_implement_trait` lint while still letting #85's
+    /// `pds_admin_audit` deserializer rehydrate stored
+    /// `backend_method` strings from the DB. Matches the
+    /// [`crate::policy::automation::PolicyMode`] precedent for
+    /// internal-only enum parsers.
+    pub(crate) fn from_wire_str(s: &str) -> Option<Self> {
         match s {
             "takedown_account" => Some(Self::TakedownAccount),
             "suspend_account" => Some(Self::SuspendAccount),

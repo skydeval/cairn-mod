@@ -78,10 +78,28 @@ pub fn compute_audit_row_hash(
     row: &AuditRowForHashing<'_>,
 ) -> Result<[u8; 32]> {
     let canonical = encode(&audit_row_to_lex_value(row))?;
+    Ok(compute_chain_hash(prev_hash, &canonical))
+}
+
+/// SHA-256 wrap that turns `(prev_hash, canonical_bytes)` into the
+/// next chain link's `row_hash`. Extracted from
+/// [`compute_audit_row_hash`] so #85's `pds_admin_audit` table can
+/// share the same SHA-256 primitive without re-deriving it. Different
+/// row shapes canonicalize their content their own way (different
+/// fields, different `LexValue::Map` keys); the chain-link primitive
+/// itself is identical regardless of which table the row lives in.
+///
+/// `pub(crate)` rather than `pub` because the hash construction is
+/// an internal contract — external callers should always go through
+/// the typed per-table wrappers
+/// ([`compute_audit_row_hash`], or §F23's
+/// `pds_admin_audit` analog) so the row-content discipline (which
+/// fields participate, which are excluded) stays single-sourced.
+pub(crate) fn compute_chain_hash(prev_hash: &[u8; 32], canonical: &[u8]) -> [u8; 32] {
     let mut input = Vec::with_capacity(prev_hash.len() + canonical.len());
     input.extend_from_slice(prev_hash);
-    input.extend_from_slice(&canonical);
-    Ok(proto_blue_crypto::sha256(&input))
+    input.extend_from_slice(canonical);
+    proto_blue_crypto::sha256(&input)
 }
 
 /// Build the `LexValue::Map` representation of the row's hash-relevant

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT row_hash, created_at FROM audit_log\n         WHERE row_hash IS NOT NULL\n         ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "210354dd2374473a6a78eaa29961e61454e64b7180f0791f4376ad68b8bd08f5"
+}

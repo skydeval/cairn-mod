@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", precipitating_action_id, backend_method,\n                  backend_action_id, outcome, error_code, error_message,\n                  retry_after_seconds, prev_hash, row_hash,\n                  call_started_at, call_completed_at\n           FROM pds_admin_audit\n           WHERE precipitating_action_id = ?1\n           ORDER BY call_completed_at ASC, id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "precipitating_action_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "backend_method",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend_action_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_code",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_after_seconds",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "prev_hash",
+        "ordinal": 8,
+        "type_info": "Blob"
+      },
+      {
+        "name": "row_hash",
+        "ordinal": 9,
+        "type_info": "Blob"
+      },
+      {
+        "name": "call_started_at",
+        "ordinal": 10,
+        "type_info": "Integer"
+      },
+      {
+        "name": "call_completed_at",
+        "ordinal": 11,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "166d6310d1772dfe2cef2c28eec301ade8596fa52efba0be4b2ae034c91fbde3"
+}
