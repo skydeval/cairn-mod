@@ -34,7 +34,9 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use url::Url;
 
-use crate::pds_admin::backend::{BackendActionId, BackendError, BackendInitError, PdsAdminBackend};
+use crate::pds_admin::backend::{
+    BackendActionId, BackendError, BackendInitError, PdsAdminBackend, ProbeReport,
+};
 use crate::pds_admin::config::{AdminPassword, OzoneBackendConfig};
 use crate::pds_admin::types::Subject;
 
@@ -571,6 +573,83 @@ impl PdsAdminBackend for OzoneBackend {
              cairn-mod's subscribeLabels (§F4) is the label distribution surface \
              (see §A5 in v1.7 architectural decisions)",
         ))
+    }
+
+    /// Probes the configured bsky-PDS via
+    /// `GET /xrpc/com.atproto.server.describeServer`.
+    ///
+    /// Sends the configured admin Basic credentials. bsky-PDS's
+    /// `describeServer` is technically a public service-discovery
+    /// endpoint and ignores the extra header in current versions
+    /// (verified per bsky-PDS findings); sending auth proves the
+    /// credential is parseable and at least minimally accepted,
+    /// rather than deferring auth verification to the first real
+    /// (mutating) call. If a future bsky-PDS version starts
+    /// rejecting authenticated probes, this would surface as a
+    /// startup-WARN and the probe code can be revisited.
+    ///
+    /// Response handling:
+    /// - **200 with parseable JSON object** → `Ok(ProbeReport)`
+    ///   with `detected_version = None` and `capabilities = []`
+    ///   (bsky-PDS doesn't expose a version field in
+    ///   describeServer's v0.4.x response shape; v1.8 may grow
+    ///   this).
+    /// - **200 with non-JSON or non-object body** →
+    ///   `RemoteError { code: "InvalidResponse", ... }`. The URL
+    ///   points at something that isn't a bsky-PDS.
+    /// - **401 / 403** → `Auth(...)`. Even on a public endpoint,
+    ///   401 with our admin Basic header is a strong "credentials
+    ///   are misconfigured" signal.
+    /// - **Other status / network errors** → status- or
+    ///   transport-mapped via the crate-internal
+    ///   `map_status_to_backend_error` and `map_reqwest_error`
+    ///   helpers (same helpers the mutating methods use; one
+    ///   source of truth for error classification).
+    async fn probe(&self) -> Result<ProbeReport, BackendError> {
+        let url = self.xrpc_url("com.atproto.server.describeServer")?;
+
+        let response = self
+            .client
+            .get(url)
+            .header(reqwest::header::AUTHORIZATION, self.basic_auth_header())
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_status_to_backend_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        // 200: confirm the body is a JSON object. We don't act on
+        // any specific field — describeServer's response shape is
+        // operator-data (DID, available domains, T&C URLs); our
+        // job is just to confirm something resembling a PDS
+        // answered.
+        let body_bytes = response.bytes().await.map_err(Self::map_reqwest_error)?;
+        match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(serde_json::Value::Object(_)) => Ok(ProbeReport {
+                backend_name: "ozone",
+                pds_url: self.base_url.as_str().to_string(),
+                detected_version: None,
+                capabilities: Vec::new(),
+            }),
+            Ok(_) | Err(_) => Err(BackendError::RemoteError {
+                code: "InvalidResponse".to_string(),
+                message: "describeServer returned a 200 with non-JSON-object body; \
+                          configured pds_url likely doesn't point at a bsky-PDS"
+                    .to_string(),
+            }),
+        }
     }
 }
 

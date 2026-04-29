@@ -37,7 +37,7 @@ use std::time::Duration;
 use cairn_mod::moderation::types::ActionType;
 use cairn_mod::pds_admin::{
     ActionMapEntry, AdminPassword, AuditOutcome, BackendMethod, OzoneBackend, OzoneBackendConfig,
-    PdsAdminBackend, PdsAdminBridge, PdsAdminPolicy, list_pds_admin_audit_for_action,
+    PdsAdminBackend, PdsAdminBridge, PdsAdminPolicy, ProbeReport, list_pds_admin_audit_for_action,
 };
 use cairn_mod::{RecordActionRequest, spawn_with_pds_admin, storage};
 use sqlx::{Pool, Sqlite};
@@ -762,4 +762,168 @@ async fn revoke_when_no_prior_pds_call_is_safe_noop() {
     assert!(rows.is_empty(), "no PDS calls when bridge is None");
 
     h.writer.shutdown().await.unwrap();
+}
+
+// ===========================================================================
+// #90: probe (com.atproto.server.describeServer)
+// ===========================================================================
+
+/// Realistic-ish describeServer response per bsky-PDS findings.
+fn describeserver_body() -> serde_json::Value {
+    serde_json::json!({
+        "did": "did:web:bsky.example.com",
+        "availableUserDomains": [".example.com"],
+        "inviteCodeRequired": true,
+        "phoneVerificationRequired": false,
+        "links": {
+            "privacyPolicy": "https://example.com/privacy",
+            "termsOfService": "https://example.com/tos"
+        }
+    })
+}
+
+#[tokio::test]
+async fn probe_against_mock_describeserver_returns_ok() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.server.describeServer"))
+        // Per #90's design call: probe sends Basic auth even on
+        // a public endpoint so a misconfigured admin password
+        // surfaces at boot rather than on the first real call.
+        // The mock matches the auth header byte-for-byte.
+        .and(header("authorization", "Basic YWRtaW46aHVudGVyMg=="))
+        .respond_with(ResponseTemplate::new(200).set_body_json(describeserver_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let report: ProbeReport = backend.probe().await.expect("probe succeeds");
+    assert_eq!(report.backend_name, "ozone");
+    assert!(
+        report.pds_url.contains(&server.uri()),
+        "pds_url should reflect the configured base URL: {}",
+        report.pds_url
+    );
+    // v1.7's OzoneBackend doesn't extract a version from
+    // describeServer (bsky-PDS doesn't expose one in the response
+    // shape cairn-mod has been validated against). Pinning so a
+    // future change here is a deliberate decision.
+    assert!(report.detected_version.is_none());
+    assert!(report.capabilities.is_empty());
+}
+
+#[tokio::test]
+async fn probe_with_wrong_credentials_returns_auth_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.server.describeServer"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+            "error": "AuthenticationRequired",
+            "message": "bad password"
+        })))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "wrong");
+    let err = backend
+        .probe()
+        .await
+        .expect_err("401 must surface as an error");
+    match err {
+        cairn_mod::pds_admin::BackendError::Auth(msg) => {
+            assert!(msg.contains("401"));
+            assert!(msg.contains("bad password"));
+        }
+        other => panic!("expected Auth, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn probe_against_unreachable_url_returns_network_error() {
+    // No MockServer started — the URL points at a closed port.
+    // Connect-refused → Network per OzoneBackend::map_reqwest_error.
+    let cfg = OzoneBackendConfig {
+        pds_url: Url::parse("http://127.0.0.1:1").unwrap(),
+        admin_password: AdminPassword::new("hunter2".into()),
+        request_timeout: Duration::from_secs(2),
+    };
+    let backend = OzoneBackend::new(&cfg).unwrap();
+    let err = backend
+        .probe()
+        .await
+        .expect_err("connect-refused must surface as an error");
+    assert!(matches!(
+        err,
+        cairn_mod::pds_admin::BackendError::Network(_)
+    ));
+}
+
+#[tokio::test]
+async fn probe_with_non_json_body_returns_remote_error_invalid_response() {
+    // Operator misconfigures pds_url to point at something that
+    // returns 200 with non-JSON (e.g., an nginx default page,
+    // or a different service entirely). Probe should catch this
+    // as a misconfiguration, not a passable success.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.server.describeServer"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>hello</html>"))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let err = backend
+        .probe()
+        .await
+        .expect_err("non-JSON body must surface as an error");
+    match err {
+        cairn_mod::pds_admin::BackendError::RemoteError { code, message } => {
+            assert_eq!(code, "InvalidResponse");
+            assert!(message.contains("describeServer"));
+        }
+        other => panic!("expected RemoteError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn probe_with_json_array_body_returns_remote_error_invalid_response() {
+    // Edge case: 200 with parseable JSON that ISN'T an object.
+    // describeServer's response shape is documented as an object;
+    // a JSON array (or scalar) isn't a real PDS response either.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.server.describeServer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([1, 2, 3])))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let err = backend
+        .probe()
+        .await
+        .expect_err("non-object JSON must error");
+    assert!(matches!(
+        err,
+        cairn_mod::pds_admin::BackendError::RemoteError { .. }
+    ));
+}
+
+#[tokio::test]
+async fn probe_with_5xx_maps_to_network() {
+    // Transient infra failure on the PDS side; same mapping as
+    // mutating calls per #87's status table.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/xrpc/com.atproto.server.describeServer"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let err = backend.probe().await.expect_err("503 must surface");
+    assert!(matches!(
+        err,
+        cairn_mod::pds_admin::BackendError::Network(_)
+    ));
 }

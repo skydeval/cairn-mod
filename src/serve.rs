@@ -112,6 +112,17 @@ where
         .map_err(|e| CliError::Startup(format!("pds_admin: {e}")))?;
     let pds_admin_bridge = build_pds_admin_bridge(&pds_admin_policy)?;
 
+    // §F23 / §A15 / #90 — startup probe. Runs once before the
+    // writer task spawns so an obviously-misconfigured pds_url or
+    // admin password surfaces at boot rather than on the first
+    // moderation action. Failure does NOT block startup (per
+    // §A15): the operator-facing log line is the entire interface,
+    // and the first real call retries naturally. Skipped when no
+    // bridge was constructed.
+    if let Some(bridge) = pds_admin_bridge.as_ref() {
+        run_pds_admin_startup_probe(bridge).await;
+    }
+
     let writer = crate::writer::spawn_with_pds_admin(
         pool.clone(),
         key,
@@ -342,6 +353,60 @@ fn build_pds_admin_bridge(
         policy: policy.clone(),
         backend,
     }))
+}
+
+/// Run the §A15 / #90 startup probe against the configured
+/// PDS-admin backend.
+///
+/// Logs once at INFO on success and once at WARN/ERROR on
+/// failure — that line is the entire operator interface for
+/// the probe. Returns `()`: per §A15, probe failure does NOT
+/// block startup (the first real call retries; transient
+/// network blips at boot shouldn't gate `cairn serve` from
+/// coming up).
+///
+/// Severity selection mirrors the recordAction-dispatch
+/// convention from `crate::pds_admin::dispatch::log_call_outcome`:
+/// transient variants (`Network`, `RateLimited`) → WARN;
+/// operator-actionable variants (`Auth`, `Validation`,
+/// `RemoteError`, `Unsupported`) → ERROR.
+async fn run_pds_admin_startup_probe(bridge: &crate::pds_admin::PdsAdminBridge) {
+    use crate::pds_admin::BackendError;
+    match bridge.backend.probe().await {
+        Ok(report) => {
+            tracing::info!(
+                backend = report.backend_name,
+                pds_url = %report.pds_url,
+                detected_version = ?report.detected_version,
+                capabilities = ?report.capabilities,
+                "pds_admin probe successful"
+            );
+        }
+        Err(BackendError::Network(e)) => {
+            tracing::warn!(
+                error = %e,
+                "pds_admin probe failed at the network layer; cairn-mod will continue starting (first real call will retry)"
+            );
+        }
+        Err(BackendError::RateLimited {
+            message,
+            retry_after_seconds,
+        }) => {
+            tracing::warn!(
+                error = %message,
+                retry_after_seconds = ?retry_after_seconds,
+                "pds_admin probe rate-limited; cairn-mod will continue starting"
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "pds_admin probe failed: operator-actionable misconfiguration. \
+                 cairn-mod will continue starting; first real call will retry, \
+                 but moderation actions will fail until the underlying issue is fixed."
+            );
+        }
+    }
 }
 
 /// §F1 startup verify (#8). Inline `mod verify` to keep the

@@ -46,7 +46,7 @@ pub use audit::{
     AuditOutcome, PdsAdminAuditRecord, get_pds_admin_audit, list_pds_admin_audit_for_action,
     record_pds_admin_call,
 };
-pub use backend::{BackendActionId, BackendError, BackendInitError, PdsAdminBackend};
+pub use backend::{BackendActionId, BackendError, BackendInitError, PdsAdminBackend, ProbeReport};
 pub use config::{
     ActionMapEntry, AdminPassword, BackendMethod, OzoneBackendConfig, PdsAdminBackendConfig,
     PdsAdminPolicy,

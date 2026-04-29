@@ -187,6 +187,49 @@ pub enum BackendError {
     Validation(String),
 }
 
+/// Metadata returned from a successful backend probe (#90, §A15).
+///
+/// v1.7's surface is intentionally minimal — just enough for
+/// operator-facing startup logs ("your `[pds_admin.ozone]` is
+/// reachable and accepts the configured admin credentials"). v1.8
+/// may grow this into capability negotiation when LocusBackend
+/// lands and the `Locus`/`Ozone` runtime selector needs to know
+/// what each backend supports.
+///
+/// The probe runs once at startup. Failure does not block startup
+/// (per A15); the backend's first real call from the recordAction
+/// dispatch retries naturally. The probe's value is the
+/// fast-feedback loop: an operator who misconfigures
+/// `admin_password_env` learns at boot rather than on the first
+/// actual moderation action.
+#[derive(Debug, Clone)]
+pub struct ProbeReport {
+    /// Stable backend identifier. v1.7 only emits `"ozone"`
+    /// (bsky-PDS); v1.8 will add `"locus"` (Aurora-Locus). Used
+    /// in operator-facing log lines and future v1.8 capability
+    /// dispatch.
+    pub backend_name: &'static str,
+
+    /// PDS endpoint that was probed. The full URL operators see
+    /// in their config; helpful for "wait, we hit which PDS?"
+    /// diagnostics during multi-instance rollouts.
+    pub pds_url: String,
+
+    /// Backend-reported version, if available. **`None` for
+    /// `OzoneBackend` in v1.7** — bsky-PDS's
+    /// `com.atproto.server.describeServer` doesn't expose a
+    /// version field as of the responses cairn-mod has been
+    /// validated against. v1.8's LocusBackend may populate it.
+    pub detected_version: Option<String>,
+
+    /// Free-form capability strings the backend reported.
+    /// **Empty for v1.7.** Reserved for v1.8's capability
+    /// negotiation: `OzoneBackend` would report `"takedown"`,
+    /// `"label-emit"`, etc.; the runtime can then short-circuit
+    /// dispatch entries the backend doesn't claim to support.
+    pub capabilities: Vec<String>,
+}
+
 /// Errors from constructing a backend at startup.
 ///
 /// Distinct from [`BackendError`] (which is per-call): these
@@ -248,11 +291,9 @@ pub enum BackendInitError {
 ///
 /// # Startup probe
 ///
-/// A startup probe method (`probe`) lands in #90 alongside the
-/// `OzoneBackend` implementation. Adding it to the trait now
-/// would force every #86–#89 implementation step to stub it;
-/// cleaner to extend the trait in #90 when the probe semantics
-/// are concrete (per A15).
+/// [`probe`](Self::probe) runs once at server startup (per §A15).
+/// Failure does not block startup — the operator-actionable
+/// signal is logged and the first real call retries.
 #[async_trait]
 pub trait PdsAdminBackend: Send + Sync {
     /// Take down an account at the PDS side. Records an
@@ -338,6 +379,36 @@ pub trait PdsAdminBackend: Send + Sync {
     /// [`apply_label`](Self::apply_label) for `OzoneBackend` in
     /// v1.7.
     async fn negate_label(&self, subject: &Subject, val: &str) -> Result<(), BackendError>;
+
+    /// Probe the configured backend at startup (§A15, #90).
+    ///
+    /// Performs a single non-mutating request to verify the
+    /// backend is reachable and authenticated. Failure is logged
+    /// but does **not** block cairn-mod startup — the PDS-admin
+    /// bridge will retry on the first real call from the
+    /// recordAction dispatch (per §A13's "fail loud, let the
+    /// operator decide" posture).
+    ///
+    /// Implementations should:
+    /// - use a non-mutating endpoint (GET, not POST), so a
+    ///   misconfigured probe never accidentally takes down an
+    ///   account at startup;
+    /// - authenticate exactly as production calls do, so an
+    ///   auth failure here means a real auth failure (not a
+    ///   probe-specific quirk operators have to debug separately);
+    /// - return [`ProbeReport`] with whatever metadata the
+    ///   backend exposes on success — version, capabilities, etc.
+    ///   v1.7 leaves both `Some(version)` and a non-empty
+    ///   capabilities list to v1.8 LocusBackend; v1.7's
+    ///   `OzoneBackend` returns the minimal report ("we reached
+    ///   bsky-PDS at the configured URL with the configured
+    ///   credentials").
+    ///
+    /// v1.7's `OzoneBackend` uses
+    /// `com.atproto.server.describeServer` (per bsky-PDS findings).
+    /// v1.8's `LocusBackend` will use Aurora-Locus's equivalent
+    /// describe endpoint.
+    async fn probe(&self) -> Result<ProbeReport, BackendError>;
 }
 
 #[cfg(test)]

@@ -625,6 +625,12 @@ mod tests {
         ) -> std::result::Result<(), BackendError> {
             unimplemented!()
         }
+
+        async fn probe(
+            &self,
+        ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
+            unimplemented!("RecordingBackend test stub: probe not exercised by dispatch tests")
+        }
     }
 
     fn policy_with_action_map(
@@ -1227,6 +1233,12 @@ mod tests {
             _val: &str,
         ) -> std::result::Result<(), BackendError> {
             unreachable!()
+        }
+
+        async fn probe(
+            &self,
+        ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
+            unreachable!("SuspensionRecordingBackend test stub: probe not exercised here")
         }
     }
 }
