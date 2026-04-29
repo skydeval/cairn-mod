@@ -304,6 +304,24 @@ pub fn format_add_json(result: &AddResult) -> String {
     serde_json::to_string(&body).expect("AddJson serializes")
 }
 
+/// JSON for `add --with-xrpc-callers`. Identical to
+/// [`format_add_json`] when `xrpc_caller_added` is `false`; adds
+/// the boolean flag when `true` so tooling can branch on whether
+/// the second-table write fired.
+pub fn format_add_json_with_xrpc(result: &AddResult, xrpc_caller_added: bool) -> String {
+    let core = format_add_json(result);
+    if !xrpc_caller_added {
+        return core;
+    }
+    // Splice the flag into the JSON object. The base format_add_json
+    // emits a single-object line; we re-parse and re-emit so the
+    // shape stays a single flat object (consumers don't need
+    // structured JSON parsing).
+    let mut v: serde_json::Value = serde_json::from_str(&core).expect("AddJson re-parses");
+    v["xrpc_caller_added"] = serde_json::json!(true);
+    v.to_string()
+}
+
 #[derive(Serialize)]
 struct RemoveJson<'a> {
     action: &'a str,

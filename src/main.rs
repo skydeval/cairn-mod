@@ -11,7 +11,8 @@ use cairn_mod::cli::{
     error::{CliError, code},
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
-    moderator, moderator_action, moderator_pending, operator_login,
+    moderator, moderator_action, moderator_events, moderator_pending, operator_login,
+    pds_admin as cli_pds_admin,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
@@ -126,6 +127,20 @@ enum Command {
     #[command(name = "audit-rebuild")]
     AuditRebuild(AuditRebuildArgs),
 
+    /// Manual escape hatch for the PDS-admin bridge (#87, §F23 /
+    /// §A13). Routes through the canonical recordAction pipeline
+    /// (HTTP-routed; daemon must be up); the writer's post-commit
+    /// dispatch fires the configured backend's takedown_account /
+    /// suspend_account / restore_account call automatically.
+    /// **Does not bypass strike accounting** — manual takedowns
+    /// update strike state the same as policy-driven ones. For a
+    /// no-strike test path, use a dedicated test subject DID.
+    #[command(name = "pds-admin")]
+    PdsAdmin {
+        #[command(subcommand)]
+        sub: PdsAdminSub,
+    },
+
     /// Manage the inbound XRPC gateway's `xrpc_known_callers`
     /// table — moderator DIDs whose proxied
     /// `tools.ozone.moderation.*` calls cairn-mod accepts (#94).
@@ -145,6 +160,87 @@ enum Command {
         #[command(subcommand)]
         sub: XrpcMembershipSub,
     },
+}
+
+/// `cairn pds-admin {takedown, suspend, restore}` (#99).
+#[derive(Debug, Subcommand)]
+enum PdsAdminSub {
+    /// Record a Takedown action and let the writer's post-commit
+    /// dispatch fire the backend's `takedown_account`.
+    Takedown(PdsAdminTakedownArgs),
+    /// Record a temp_suspension (when `--duration` is set) or
+    /// indef_suspension (otherwise) and dispatch
+    /// `suspend_account`.
+    Suspend(PdsAdminSuspendArgs),
+    /// Revoke the most-recent unrevoked takedown / suspension for
+    /// the subject and dispatch `restore_account`. cairn-mod has
+    /// no first-class "restore" action_type — this resolves to a
+    /// `revoke_action` of the most-recent suspension row.
+    Restore(PdsAdminRestoreArgs),
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminTakedownArgs {
+    /// Subject DID.
+    did: String,
+    /// Reason identifier from the operator's `[moderation_reasons]`
+    /// vocabulary. Defaults to the reserved
+    /// `pds-admin-cli` reason code if unset; operators must
+    /// declare that code in `[moderation_reasons]` for the
+    /// default to work.
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator-facing notes recorded on the
+    /// subject_actions row.
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to the TOML config file (used for the
+    /// `[pds_admin].enabled` pre-flight check + the DB path for
+    /// the post-call `pds_admin_audit` lookup). Must point at the
+    /// same config the running `cairn serve` is using.
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// Emit JSON instead of the human one-liner.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminSuspendArgs {
+    did: String,
+    #[arg(long)]
+    reason: Option<String>,
+    /// ISO-8601 duration (e.g. `PT72H`, `P7D`). Required for a
+    /// finite-duration suspension (`temp_suspension`); absent
+    /// produces an indefinite suspension (`indef_suspension`).
+    #[arg(long)]
+    duration: Option<String>,
+    #[arg(long)]
+    notes: Option<String>,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminRestoreArgs {
+    did: String,
+    /// Optional rationale recorded on the
+    /// `subject_actions.revoked_reason` field.
+    #[arg(long)]
+    reason: Option<String>,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 /// Subcommand surface shared by `xrpc-callers` and `xrpc-pdses`.
@@ -510,6 +606,56 @@ enum ModeratorSub {
     /// confirmPendingAction, dismissPendingAction}` admin XRPC
     /// endpoints. Requires a moderator session.
     Pending(ModeratorPendingArgs),
+    /// Operator-tier audit-events view (#99). Direct-DB scan of
+    /// `audit_log` (joined with `subject_actions` for the
+    /// recordAction surface). By default surfaces ALL audit
+    /// actions including cairn-mod-internal events
+    /// (`pending_*`, `retention_sweep`, `xrpc_*` collaboration
+    /// changes, etc.). Pass `--ozone-only` to apply the same
+    /// filter-out policy as
+    /// `tools.ozone.moderation.queryEvents` (#98).
+    Events(ModeratorEventsArgs),
+}
+
+#[derive(Debug, Args)]
+struct ModeratorEventsArgs {
+    /// Filter to events about a specific subject (DID for
+    /// account-level, AT-URI for record-level).
+    #[arg(long)]
+    subject: Option<String>,
+    /// Filter to events by this actor / moderator DID
+    /// (`audit_log.actor_did`).
+    #[arg(long)]
+    actor: Option<String>,
+    /// Filter to a specific `audit_log.action` string
+    /// (e.g. `subject_action_recorded`, `retention_sweep`).
+    #[arg(long = "type")]
+    action_type: Option<String>,
+    /// RFC-3339 lower bound on `audit_log.created_at`.
+    #[arg(long)]
+    from: Option<String>,
+    /// RFC-3339 upper bound.
+    #[arg(long)]
+    to: Option<String>,
+    /// Page size. Capped at 250; default 50.
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Opaque pagination cursor from a prior response.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Apply the gateway endpoint's filter-out policy (#98). When
+    /// passed, the output is identical to what
+    /// `tools.ozone.moderation.queryEvents` would return for the
+    /// same filters.
+    #[arg(long = "ozone-only")]
+    ozone_only: bool,
+    /// Path to the TOML config file (same semantics as `cairn
+    /// serve --config`).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Emit JSON instead of the tabular renderer.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -746,6 +892,19 @@ struct ModeratorAddArgs {
     /// moderator with a different role errors.
     #[arg(long)]
     update_role: bool,
+    /// Also add this DID to `xrpc_known_callers` so the moderator
+    /// can call cairn-mod via proxied XRPC (#94 / §A12). When
+    /// passed, `--by` is required (it's recorded as the
+    /// `added_by_moderator` audit field on the new
+    /// xrpc_known_callers row).
+    #[arg(long, requires = "by")]
+    with_xrpc_callers: bool,
+    /// DID of the operator running this command, recorded as the
+    /// `added_by_moderator` audit field on the
+    /// `xrpc_known_callers` row when `--with-xrpc-callers` is
+    /// passed. Has no effect without `--with-xrpc-callers`.
+    #[arg(long)]
+    by: Option<String>,
     /// Emit JSON instead of a human one-liner.
     #[arg(long)]
     json: bool,
@@ -958,6 +1117,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: ModeratorPendingSub::Dismiss(args),
                 }),
         } => run_moderator_pending_dismiss(args).await,
+        Command::Moderator {
+            sub: ModeratorSub::Events(args),
+        } => run_moderator_events(args).await,
         Command::Audit {
             sub: AuditSub::List(args),
         } => run_audit_list(args).await,
@@ -974,6 +1136,15 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
             sub: TrustChainSub::Show(args),
         } => run_trust_chain_show(args).await,
         Command::AuditRebuild(args) => run_audit_rebuild(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::Takedown(args),
+        } => run_pds_admin_takedown(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::Suspend(args),
+        } => run_pds_admin_suspend(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::Restore(args),
+        } => run_pds_admin_restore(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -998,6 +1169,126 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
 // ===========================================================================
 // XRPC gateway membership CLI dispatch (#94 / §A12)
 // ===========================================================================
+
+// ===========================================================================
+// pds-admin CLI dispatch (#99 / §F23 manual escape hatch)
+// ===========================================================================
+
+async fn run_pds_admin_takedown(args: PdsAdminTakedownArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    cli_pds_admin::verify_pds_admin_enabled(&config)?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+    let session_path = session_path()?;
+    let mut session = session::SessionFile::load(&session_path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let reason = args
+        .reason
+        .unwrap_or_else(|| cli_pds_admin::PDS_ADMIN_DEFAULT_REASON_CODE.to_string());
+
+    let outcome = cli_pds_admin::takedown(
+        &pool,
+        &mut session,
+        &session_path,
+        &args.did,
+        &reason,
+        args.notes,
+        args.cairn_server,
+    )
+    .await?;
+
+    if args.json {
+        println!("{}", cli_pds_admin::format_takedown_json(&outcome));
+    } else {
+        println!("{}", cli_pds_admin::format_takedown_human(&outcome));
+    }
+    Ok(())
+}
+
+async fn run_pds_admin_suspend(args: PdsAdminSuspendArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    cli_pds_admin::verify_pds_admin_enabled(&config)?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+    let session_path = session_path()?;
+    let mut session = session::SessionFile::load(&session_path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let reason = args
+        .reason
+        .unwrap_or_else(|| cli_pds_admin::PDS_ADMIN_DEFAULT_REASON_CODE.to_string());
+
+    let outcome = cli_pds_admin::suspend(
+        &pool,
+        &mut session,
+        &session_path,
+        &args.did,
+        &reason,
+        args.duration,
+        args.notes,
+        args.cairn_server,
+    )
+    .await?;
+
+    if args.json {
+        println!("{}", cli_pds_admin::format_takedown_json(&outcome));
+    } else {
+        println!("{}", cli_pds_admin::format_takedown_human(&outcome));
+    }
+    Ok(())
+}
+
+async fn run_pds_admin_restore(args: PdsAdminRestoreArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    cli_pds_admin::verify_pds_admin_enabled(&config)?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+    let session_path = session_path()?;
+    let mut session = session::SessionFile::load(&session_path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let outcome = cli_pds_admin::restore(
+        &pool,
+        &mut session,
+        &session_path,
+        &args.did,
+        args.reason,
+        args.cairn_server,
+    )
+    .await?;
+
+    if args.json {
+        println!("{}", cli_pds_admin::format_restore_json(&outcome));
+    } else {
+        println!("{}", cli_pds_admin::format_restore_human(&outcome));
+    }
+    Ok(())
+}
+
+async fn run_moderator_events(args: ModeratorEventsArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    let resp = moderator_events::list(
+        &pool,
+        moderator_events::EventsInput {
+            subject: args.subject,
+            actor: args.actor,
+            action_type: args.action_type,
+            from: args.from,
+            to: args.to,
+            limit: args.limit,
+            cursor: args.cursor,
+            ozone_only: args.ozone_only,
+        },
+    )
+    .await?;
+    if args.json {
+        println!("{}", moderator_events::format_json(&resp));
+    } else {
+        println!("{}", moderator_events::format_human(&resp));
+    }
+    Ok(())
+}
 
 async fn run_xrpc_callers_add(args: XrpcMembershipAddArgs) -> Result<(), CliError> {
     let pool = open_pool_from_config(args.config.as_ref()).await?;
@@ -1422,6 +1713,7 @@ async fn open_pool_from_config(
 async fn run_moderator_add(args: ModeratorAddArgs) -> Result<(), CliError> {
     let pool = open_pool_from_config(args.config.as_ref()).await?;
     let json = args.json;
+    let did = args.did.clone();
     let result = moderator::add(
         &pool,
         moderator::AddInput {
@@ -1431,10 +1723,46 @@ async fn run_moderator_add(args: ModeratorAddArgs) -> Result<(), CliError> {
         },
     )
     .await?;
+
+    // --with-xrpc-callers: also add to xrpc_known_callers. The two
+    // adds aren't transactional (the moderators table and
+    // xrpc_known_callers are independent surfaces), but the
+    // composite operation is idempotent at the application layer:
+    // we pre-check `is_known_caller` and skip the second add when
+    // the DID is already an active caller. (Without the pre-check
+    // the second add would fail with a UNIQUE-constraint error.)
+    let xrpc_caller_added = if args.with_xrpc_callers {
+        let by = args
+            .by
+            .as_deref()
+            .expect("clap requires --by when --with-xrpc-callers is set");
+        let already = cairn_mod::xrpc_gateway::is_known_caller(&pool, &did)
+            .await
+            .map_err(|e| CliError::Startup(format!("xrpc_known_callers lookup: {e}")))?;
+        if !already {
+            cairn_mod::xrpc_gateway::add_known_caller(&pool, &did, None, by)
+                .await
+                .map_err(|e| CliError::Startup(format!("xrpc_known_callers add: {e}")))?;
+            true
+        } else {
+            // Already-active caller; treat as success but flag in
+            // the output so operators know nothing changed.
+            false
+        }
+    } else {
+        false
+    };
+
     if json {
-        println!("{}", moderator::format_add_json(&result));
+        println!(
+            "{}",
+            moderator::format_add_json_with_xrpc(&result, xrpc_caller_added)
+        );
     } else {
         println!("{}", moderator::format_add_human(&result));
+        if xrpc_caller_added {
+            println!("also added to xrpc_known_callers");
+        }
     }
     Ok(())
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subject_actions (\n             subject_did, actor_did, action_type, reason_codes,\n             effective_at, strike_value_base, strike_value_applied,\n             was_dampened, strikes_at_time_of_action, created_at,\n             revoked_at, revoked_by_did, revoked_reason\n           )\n           VALUES (?1, ?2, ?3, '[\"spam\"]', ?4, 0, 0, 0, 0, ?4, ?5, ?6, ?7)\n           RETURNING id as \"id!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "caec0180b1a52db8a8b26de7915ff4d843dc299649dd38ec5ce91b371ebf8c73"
+}

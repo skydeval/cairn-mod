@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pds_admin_audit (\n             precipitating_action_id, backend_method, backend_action_id,\n             outcome, error_code, error_message, retry_after_seconds,\n             prev_hash, row_hash, call_started_at, call_completed_at\n           )\n           VALUES (?1, 'takedown_account', 'backend-id-42', 'success',\n                   NULL, NULL, NULL, ?2, ?3, ?4, ?5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "37dc1a97bc07af48ff905942d935e73adb6bd4ed65970a92afc3a96efd000873"
+}

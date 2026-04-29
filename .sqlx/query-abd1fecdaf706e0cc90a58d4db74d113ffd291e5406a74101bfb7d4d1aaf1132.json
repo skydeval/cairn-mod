@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO audit_log (created_at, action, actor_did, target, outcome, reason)\n           VALUES (?1, 'subject_action_revoked', ?2, '1', 'success', '{\"action_id\": 1, \"revoked_reason\": \"mistake\"}')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "abd1fecdaf706e0cc90a58d4db74d113ffd291e5406a74101bfb7d4d1aaf1132"
+}

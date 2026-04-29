@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO subject_actions (\n             subject_did, subject_uri, actor_did, action_type, reason_codes,\n             duration, effective_at, notes, strike_value_base, strike_value_applied,\n             was_dampened, strikes_at_time_of_action, audit_log_id, created_at\n           )\n           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, 0, 0, ?9, ?10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "5d6622a37f3b5fed4b0b99bb8125620be1b580964d0a51895c3140d419abf499"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n             id                       AS \"id!: i64\",\n             precipitating_action_id  AS \"precipitating_action_id!: i64\",\n             backend_method           AS \"backend_method!: String\",\n             backend_action_id,\n             outcome                  AS \"outcome!: String\",\n             error_code,\n             error_message,\n             retry_after_seconds\n           FROM pds_admin_audit\n           WHERE precipitating_action_id = ?1\n           ORDER BY id DESC\n           LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "precipitating_action_id!: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "backend_method!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "backend_action_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "outcome!: String",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_code",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "retry_after_seconds",
+        "ordinal": 7,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "f134a22c80f9b03bb80ce6e06964498f2f117de9bbe733b81227ceabd40b1477"
+}
