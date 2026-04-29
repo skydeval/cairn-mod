@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [xrpc_gateway] `[xrpc_gateway]` config block + module skeleton + 501 catch-all router (#91)
 - [xrpc_gateway] NSID allowlist enum + per-handler dispatch stubs + XRPC-shape 405 envelope (#92)
 - [xrpc_gateway] `XrpcAuthService` + tower middleware: ATProto service-auth JWT verification (ES256K, claim validation; replay deferred to #94) (#93)
+- [xrpc_gateway] Replay cache + `xrpc_known_callers` / `xrpc_trusted_pdses` membership tables + middleware composition + CLI subcommands; audit-verify extended to walk 4 tables (#94)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).

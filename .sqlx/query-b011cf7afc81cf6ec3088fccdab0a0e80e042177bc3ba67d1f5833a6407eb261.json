@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT added_by_moderator, added_at, revoked_at FROM xrpc_trusted_pdses\n             WHERE did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "added_by_moderator",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b011cf7afc81cf6ec3088fccdab0a0e80e042177bc3ba67d1f5833a6407eb261"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT row_hash, added_at FROM xrpc_trusted_pdses\n         ORDER BY added_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "2966a2e933bd82d6f7391ff6a75b78cbf98cfd67751ab0bb5a97979ea4be66ee"
+}

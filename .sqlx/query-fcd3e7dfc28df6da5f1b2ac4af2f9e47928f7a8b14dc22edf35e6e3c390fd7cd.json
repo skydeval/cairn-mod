@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT added_by_moderator, added_at, revoked_at FROM xrpc_known_callers\n             WHERE did = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "added_by_moderator",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "fcd3e7dfc28df6da5f1b2ac4af2f9e47928f7a8b14dc22edf35e6e3c390fd7cd"
+}

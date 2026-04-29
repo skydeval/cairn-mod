@@ -134,3 +134,35 @@ pub fn build_service() -> Arc<XrpcAuthService> {
         fixed_clock(),
     ))
 }
+
+/// Spin up an in-memory test pool, seed it with [`ISSUER_DID`] as
+/// BOTH a known caller and a trusted PDS, and return the pool.
+/// The dual seed lets membership-gated tests pass regardless of
+/// whether the request targets `tools.ozone.*` (known-caller path)
+/// or `createReport` (trusted-pds path) — pre-#94 router tests
+/// don't differentiate.
+///
+/// Tests that specifically exercise the membership middleware's
+/// allow / deny branches build a custom pool seeded differently.
+pub async fn build_test_pool() -> sqlx::Pool<sqlx::Sqlite> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("xrpc-gateway-test.db");
+    let pool = crate::storage::open(&path).await.unwrap();
+    Box::leak(Box::new(dir));
+
+    let m_did = "did:plc:test_moderator";
+    crate::xrpc_gateway::add_known_caller(&pool, ISSUER_DID, Some("test"), m_did)
+        .await
+        .unwrap();
+    crate::xrpc_gateway::add_trusted_pds(&pool, ISSUER_DID, Some("test"), m_did)
+        .await
+        .unwrap();
+    pool
+}
+
+/// Build a fresh [`XrpcReplayCache`] for tests.
+pub fn build_replay_cache() -> Arc<crate::xrpc_gateway::XrpcReplayCache> {
+    Arc::new(crate::xrpc_gateway::XrpcReplayCache::new(
+        Duration::from_secs(90),
+    ))
+}

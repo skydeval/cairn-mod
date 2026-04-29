@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT row_hash, added_at FROM xrpc_known_callers\n         ORDER BY added_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "row_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "031d15054e76f00465f035c7b9f2da50fc52b2e341c054bdd5cd965f124e44fd"
+}

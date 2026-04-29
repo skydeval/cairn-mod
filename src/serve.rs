@@ -240,13 +240,21 @@ where
             gateway_cfg.clone(),
             did_resolver.clone(),
         ));
+        let xrpc_replay_cache = Arc::new(crate::xrpc_gateway::XrpcReplayCache::new(
+            gateway_cfg.replay_cache_ttl,
+        ));
         tracing::info!(
             service_did = %gateway_cfg.service_did,
             clock_skew_tolerance_seconds = gateway_cfg.clock_skew_tolerance.as_secs(),
             replay_cache_ttl_seconds = gateway_cfg.replay_cache_ttl.as_secs(),
-            "xrpc_gateway enabled: routes mounted at /xrpc/* (auth wired; replay cache + handler bodies pending #94/#95)"
+            "xrpc_gateway enabled: routes mounted at /xrpc/* (auth + membership + replay all wired; handler bodies pending #95-#98)"
         );
-        router = router.merge(crate::xrpc_gateway::build_router(gateway_cfg, xrpc_auth));
+        router = router.merge(crate::xrpc_gateway::build_router(
+            gateway_cfg,
+            xrpc_auth,
+            pool.clone(),
+            xrpc_replay_cache,
+        ));
     }
 
     // Step 6: bind the HTTP listener. MUST come after step 3 — see

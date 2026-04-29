@@ -125,6 +125,66 @@ enum Command {
     /// is a no-op success.
     #[command(name = "audit-rebuild")]
     AuditRebuild(AuditRebuildArgs),
+
+    /// Manage the inbound XRPC gateway's `xrpc_known_callers`
+    /// table — moderator DIDs whose proxied
+    /// `tools.ozone.moderation.*` calls cairn-mod accepts (#94).
+    /// Direct DB; no HTTP. CLI-only management per §A12.
+    #[command(name = "xrpc-callers")]
+    XrpcCallers {
+        #[command(subcommand)]
+        sub: XrpcMembershipSub,
+    },
+
+    /// Manage the inbound XRPC gateway's `xrpc_trusted_pdses`
+    /// table — PDS DIDs whose forwarded
+    /// `com.atproto.moderation.createReport` calls cairn-mod
+    /// accepts (#94).
+    #[command(name = "xrpc-pdses")]
+    XrpcPdses {
+        #[command(subcommand)]
+        sub: XrpcMembershipSub,
+    },
+}
+
+/// Subcommand surface shared by `xrpc-callers` and `xrpc-pdses`.
+#[derive(Debug, Subcommand)]
+enum XrpcMembershipSub {
+    Add(XrpcMembershipAddArgs),
+    Revoke(XrpcMembershipRevokeArgs),
+    List(XrpcMembershipListArgs),
+}
+
+#[derive(Debug, Args)]
+struct XrpcMembershipAddArgs {
+    did: String,
+    #[arg(long)]
+    note: Option<String>,
+    /// DID of the moderator running the command (recorded as
+    /// `added_by_moderator`).
+    #[arg(long)]
+    by: String,
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct XrpcMembershipRevokeArgs {
+    did: String,
+    /// DID of the moderator running the command (recorded as
+    /// `revoked_by_moderator`).
+    #[arg(long)]
+    by: String,
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct XrpcMembershipListArgs {
+    #[arg(long)]
+    include_revoked: bool,
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -914,6 +974,100 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
             sub: TrustChainSub::Show(args),
         } => run_trust_chain_show(args).await,
         Command::AuditRebuild(args) => run_audit_rebuild(args).await,
+        Command::XrpcCallers {
+            sub: XrpcMembershipSub::Add(args),
+        } => run_xrpc_callers_add(args).await,
+        Command::XrpcCallers {
+            sub: XrpcMembershipSub::Revoke(args),
+        } => run_xrpc_callers_revoke(args).await,
+        Command::XrpcCallers {
+            sub: XrpcMembershipSub::List(args),
+        } => run_xrpc_callers_list(args).await,
+        Command::XrpcPdses {
+            sub: XrpcMembershipSub::Add(args),
+        } => run_xrpc_pdses_add(args).await,
+        Command::XrpcPdses {
+            sub: XrpcMembershipSub::Revoke(args),
+        } => run_xrpc_pdses_revoke(args).await,
+        Command::XrpcPdses {
+            sub: XrpcMembershipSub::List(args),
+        } => run_xrpc_pdses_list(args).await,
+    }
+}
+
+// ===========================================================================
+// XRPC gateway membership CLI dispatch (#94 / §A12)
+// ===========================================================================
+
+async fn run_xrpc_callers_add(args: XrpcMembershipAddArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    cairn_mod::xrpc_gateway::add_known_caller(&pool, &args.did, args.note.as_deref(), &args.by)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    println!("added xrpc_known_caller: {} (by {})", args.did, args.by);
+    Ok(())
+}
+
+async fn run_xrpc_callers_revoke(args: XrpcMembershipRevokeArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    cairn_mod::xrpc_gateway::revoke_known_caller(&pool, &args.did, &args.by)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    println!("revoked xrpc_known_caller: {} (by {})", args.did, args.by);
+    Ok(())
+}
+
+async fn run_xrpc_callers_list(args: XrpcMembershipListArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    let rows = cairn_mod::xrpc_gateway::list_known_callers(&pool, args.include_revoked)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    print_membership_rows(&rows);
+    Ok(())
+}
+
+async fn run_xrpc_pdses_add(args: XrpcMembershipAddArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    cairn_mod::xrpc_gateway::add_trusted_pds(&pool, &args.did, args.note.as_deref(), &args.by)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    println!("added xrpc_trusted_pds: {} (by {})", args.did, args.by);
+    Ok(())
+}
+
+async fn run_xrpc_pdses_revoke(args: XrpcMembershipRevokeArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    cairn_mod::xrpc_gateway::revoke_trusted_pds(&pool, &args.did, &args.by)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    println!("revoked xrpc_trusted_pds: {} (by {})", args.did, args.by);
+    Ok(())
+}
+
+async fn run_xrpc_pdses_list(args: XrpcMembershipListArgs) -> Result<(), CliError> {
+    let pool = open_pool_from_config(args.config.as_ref()).await?;
+    let rows = cairn_mod::xrpc_gateway::list_trusted_pdses(&pool, args.include_revoked)
+        .await
+        .map_err(|e| CliError::Startup(e.to_string()))?;
+    print_membership_rows(&rows);
+    Ok(())
+}
+
+fn print_membership_rows(rows: &[cairn_mod::xrpc_gateway::MembershipRow]) {
+    if rows.is_empty() {
+        println!("(no rows)");
+        return;
+    }
+    for r in rows {
+        let status = match r.revoked_at {
+            None => "active".to_string(),
+            Some(t) => format!("revoked@{t}"),
+        };
+        let note = r.note.as_deref().unwrap_or("-");
+        println!(
+            "{} {status} added@{} by {} note={note}",
+            r.did, r.added_at, r.added_by_moderator
+        );
     }
 }
 

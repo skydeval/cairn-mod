@@ -81,6 +81,7 @@ use crate::audit::hash::{
     AuditRowForHashing, GENESIS_PREV_HASH, compute_audit_row_hash, parse_stored_hash,
 };
 use crate::pds_admin::audit::{PdsAdminAuditRowForHashing, compute_pds_admin_audit_row_hash};
+use crate::xrpc_gateway::membership::recompute_membership_row_hash;
 
 /// Which table a divergent row lives in. Lets operators correlate
 /// the divergence id back to the right SQL table.
@@ -91,6 +92,12 @@ pub enum AuditTable {
     AuditLog,
     /// §F23 pds_admin_audit — the v1.7-added chain (#85, #87).
     PdsAdminAudit,
+    /// §F23 inbound xrpc_gateway membership — moderator DIDs
+    /// authorized for proxied `tools.ozone.*` calls (#94).
+    XrpcKnownCallers,
+    /// §F23 inbound xrpc_gateway membership — PDS DIDs
+    /// authorized to forward `createReport` calls (#94).
+    XrpcTrustedPdses,
 }
 
 impl AuditTable {
@@ -101,6 +108,8 @@ impl AuditTable {
         match self {
             Self::AuditLog => "audit_log",
             Self::PdsAdminAudit => "pds_admin_audit",
+            Self::XrpcKnownCallers => "xrpc_known_callers",
+            Self::XrpcTrustedPdses => "xrpc_trusted_pdses",
         }
     }
 }
@@ -143,6 +152,14 @@ pub enum VerifyOutcome {
         /// `0` for pre-#87 deployments and operators with
         /// `[pds_admin].enabled = false`.
         pds_admin_audit_rows: i64,
+        /// Total `xrpc_known_callers` rows seen during the walk.
+        /// Added in #94. `0` when `[xrpc_gateway]` is disabled
+        /// or no callers have been added.
+        xrpc_known_callers_rows: i64,
+        /// Total `xrpc_trusted_pdses` rows seen during the walk
+        /// (#94). Same defaulting as
+        /// [`Self::Verified::xrpc_known_callers_rows`].
+        xrpc_trusted_pdses_rows: i64,
     },
     /// First-divergence report. Walking halts once this is detected.
     Divergence {
@@ -184,21 +201,44 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
     // ("not in scope").
     let audit_log_rows = read_audit_log_rows(pool).await?;
     let pds_admin_rows = read_pds_admin_audit_rows(pool).await?;
+    let xrpc_known_callers_rows = read_xrpc_known_callers_rows(pool).await?;
+    let xrpc_trusted_pdses_rows = read_xrpc_trusted_pdses_rows(pool).await?;
 
-    if audit_log_rows.is_empty() && pds_admin_rows.is_empty() {
+    if audit_log_rows.is_empty()
+        && pds_admin_rows.is_empty()
+        && xrpc_known_callers_rows.is_empty()
+        && xrpc_trusted_pdses_rows.is_empty()
+    {
         return Ok(VerifyOutcome::Empty);
     }
 
     let audit_log_count = audit_log_rows.len() as i64;
     let pds_admin_count = pds_admin_rows.len() as i64;
+    let xrpc_known_callers_count = xrpc_known_callers_rows.len() as i64;
+    let xrpc_trusted_pdses_count = xrpc_trusted_pdses_rows.len() as i64;
 
-    let mut entries: Vec<UnifiedEntry> =
-        Vec::with_capacity(audit_log_rows.len() + pds_admin_rows.len());
+    let mut entries: Vec<UnifiedEntry> = Vec::with_capacity(
+        audit_log_rows.len()
+            + pds_admin_rows.len()
+            + xrpc_known_callers_rows.len()
+            + xrpc_trusted_pdses_rows.len(),
+    );
     entries.extend(audit_log_rows.into_iter().map(UnifiedEntry::AuditLog));
     entries.extend(pds_admin_rows.into_iter().map(UnifiedEntry::PdsAdmin));
+    entries.extend(
+        xrpc_known_callers_rows
+            .into_iter()
+            .map(UnifiedEntry::XrpcKnownCaller),
+    );
+    entries.extend(
+        xrpc_trusted_pdses_rows
+            .into_iter()
+            .map(UnifiedEntry::XrpcTrustedPds),
+    );
     entries.sort_by(unified_chain_cmp);
 
-    let total_rows = audit_log_count + pds_admin_count;
+    let total_rows =
+        audit_log_count + pds_admin_count + xrpc_known_callers_count + xrpc_trusted_pdses_count;
     let mut running_prev_hash: [u8; 32] = GENESIS_PREV_HASH;
     let mut attested_rows: i64 = 0;
     let mut pre_attestation_rows: i64 = 0;
@@ -269,6 +309,8 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
         attestation_starts_at_row,
         audit_log_rows: audit_log_count,
         pds_admin_audit_rows: pds_admin_count,
+        xrpc_known_callers_rows: xrpc_known_callers_count,
+        xrpc_trusted_pdses_rows: xrpc_trusted_pdses_count,
     })
 }
 
@@ -304,11 +346,32 @@ struct PdsAdminAuditRow {
     row_hash: Vec<u8>,
 }
 
+/// Owned `xrpc_known_callers` / `xrpc_trusted_pdses` row data.
+/// Same shape between the two tables; the variant tag is what
+/// distinguishes them in [`UnifiedEntry`]. Matches
+/// `recompute_membership_row_hash`'s input shape.
+struct XrpcMembershipRow {
+    /// Per-table id surrogate. Membership tables use `did` as
+    /// the primary key; the verify walker uses a synthesized id
+    /// (the position in the table's ORDER BY scan) so the
+    /// `Divergence::row_id` field carries something stable.
+    /// Since `did` is `String` and the divergence struct's
+    /// `row_id` is `i64`, we use a row index here.
+    rowid: i64,
+    did: String,
+    note: Option<String>,
+    added_by_moderator: String,
+    added_at: i64,
+    row_hash: Vec<u8>,
+}
+
 /// One entry in the unified audit chain. The variant determines
 /// which row-shape canonicalization applies during recomputation.
 enum UnifiedEntry {
     AuditLog(AuditLogRow),
     PdsAdmin(PdsAdminAuditRow),
+    XrpcKnownCaller(XrpcMembershipRow),
+    XrpcTrustedPds(XrpcMembershipRow),
 }
 
 impl UnifiedEntry {
@@ -316,6 +379,8 @@ impl UnifiedEntry {
         match self {
             Self::AuditLog(_) => AuditTable::AuditLog,
             Self::PdsAdmin(_) => AuditTable::PdsAdminAudit,
+            Self::XrpcKnownCaller(_) => AuditTable::XrpcKnownCallers,
+            Self::XrpcTrustedPds(_) => AuditTable::XrpcTrustedPdses,
         }
     }
 
@@ -323,36 +388,36 @@ impl UnifiedEntry {
         match self {
             Self::AuditLog(r) => r.id,
             Self::PdsAdmin(r) => r.id,
+            Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => r.rowid,
         }
     }
 
     /// The chain-ordering timestamp. `audit_log.created_at` for
     /// AuditLog entries; `pds_admin_audit.call_completed_at` for
-    /// PdsAdmin entries — matching #85's
-    /// `read_latest_chain_hash`.
+    /// PdsAdmin entries; `xrpc_*.added_at` for the membership
+    /// entries — matching the
+    /// [`crate::audit::append::read_latest_chain_hash`] tie-break
+    /// rules.
     fn timestamp(&self) -> i64 {
         match self {
             Self::AuditLog(r) => r.created_at,
             Self::PdsAdmin(r) => r.call_completed_at,
+            Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => r.added_at,
         }
     }
 
     /// `Some(row_hash)` for attested rows; `None` for pre-v1.3
     /// `audit_log` rows that haven't been backfilled by
-    /// `cairn audit-rebuild`. `pds_admin_audit` rows are always
-    /// attested (NOT NULL on the column per migration 0006).
+    /// `cairn audit-rebuild`. The other tables' hash columns
+    /// are NOT NULL per their migrations.
     fn row_hash(&self) -> Option<&[u8]> {
         match self {
             Self::AuditLog(r) => r.row_hash.as_deref(),
             Self::PdsAdmin(r) => Some(&r.row_hash),
+            Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => Some(&r.row_hash),
         }
     }
 
-    /// Recompute this row's hash using the running prev_hash
-    /// from the walker. Each variant uses its own
-    /// canonicalization (matching the function the row was
-    /// inserted with — #85's pair of `compute_*_row_hash`
-    /// functions).
     fn recompute_row_hash(&self, prev_hash: &[u8; 32]) -> Result<[u8; 32], crate::error::Error> {
         match self {
             Self::AuditLog(r) => compute_audit_row_hash(
@@ -381,18 +446,27 @@ impl UnifiedEntry {
                     call_completed_at: r.call_completed_at,
                 },
             ),
+            Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => recompute_membership_row_hash(
+                prev_hash,
+                &r.did,
+                r.note.as_deref(),
+                &r.added_by_moderator,
+                r.added_at,
+            ),
         }
     }
 
-    /// Tie-break priority within a single timestamp.
-    /// `audit_log` comes before `pds_admin_audit` per #85's
-    /// `>=` rule (which treats `pds_admin_audit` as the
-    /// tie-winning chain head, i.e. inserted-after-or-at-the-same-
-    /// time as the `audit_log` predecessor).
+    /// Tie-break priority within a single timestamp. Mirrors the
+    /// [`crate::audit::append::read_latest_chain_hash`] order:
+    /// `audit_log` (0) < `pds_admin_audit` (1) <
+    /// `xrpc_known_callers` (2) < `xrpc_trusted_pdses` (3).
+    /// Higher priority = "later in chain" on ties.
     fn table_priority(&self) -> u8 {
         match self {
             Self::AuditLog(_) => 0,
             Self::PdsAdmin(_) => 1,
+            Self::XrpcKnownCaller(_) => 2,
+            Self::XrpcTrustedPds(_) => 3,
         }
     }
 }
@@ -430,6 +504,56 @@ async fn read_audit_log_rows(pool: &Pool<Sqlite>) -> Result<Vec<AuditLogRow>, Cl
             target_cid: r.target_cid,
             outcome: r.outcome,
             reason: r.reason,
+            row_hash: r.row_hash,
+        })
+        .collect())
+}
+
+async fn read_xrpc_known_callers_rows(
+    pool: &Pool<Sqlite>,
+) -> Result<Vec<XrpcMembershipRow>, CliError> {
+    let rows = sqlx::query!(
+        "SELECT did, note, added_by_moderator, added_at, row_hash
+         FROM xrpc_known_callers
+         ORDER BY added_at ASC, did ASC"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| CliError::Startup(format!("audit verify scan xrpc_known_callers: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| XrpcMembershipRow {
+            rowid: i as i64,
+            did: r.did,
+            note: r.note,
+            added_by_moderator: r.added_by_moderator,
+            added_at: r.added_at,
+            row_hash: r.row_hash,
+        })
+        .collect())
+}
+
+async fn read_xrpc_trusted_pdses_rows(
+    pool: &Pool<Sqlite>,
+) -> Result<Vec<XrpcMembershipRow>, CliError> {
+    let rows = sqlx::query!(
+        "SELECT did, note, added_by_moderator, added_at, row_hash
+         FROM xrpc_trusted_pdses
+         ORDER BY added_at ASC, did ASC"
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| CliError::Startup(format!("audit verify scan xrpc_trusted_pdses: {e}")))?;
+    Ok(rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| XrpcMembershipRow {
+            rowid: i as i64,
+            did: r.did,
+            note: r.note,
+            added_by_moderator: r.added_by_moderator,
+            added_at: r.added_at,
             row_hash: r.row_hash,
         })
         .collect())
@@ -483,6 +607,8 @@ pub fn format_human(outcome: &VerifyOutcome) -> String {
             attestation_starts_at_row,
             audit_log_rows,
             pds_admin_audit_rows,
+            xrpc_known_callers_rows,
+            xrpc_trusted_pdses_rows,
         } => {
             let mut s = String::new();
             let _ = writeln!(
@@ -491,7 +617,8 @@ pub fn format_human(outcome: &VerifyOutcome) -> String {
             );
             let _ = writeln!(
                 s,
-                "  audit_log: {audit_log_rows} row(s); pds_admin_audit: {pds_admin_audit_rows} row(s)"
+                "  audit_log: {audit_log_rows} row(s); pds_admin_audit: {pds_admin_audit_rows} row(s); \
+                 xrpc_known_callers: {xrpc_known_callers_rows} row(s); xrpc_trusted_pdses: {xrpc_trusted_pdses_rows} row(s)"
             );
             if *pre_attestation_rows > 0 {
                 let _ = writeln!(
@@ -683,6 +810,8 @@ mod tests {
                 attestation_starts_at_row,
                 audit_log_rows,
                 pds_admin_audit_rows,
+                xrpc_known_callers_rows,
+                xrpc_trusted_pdses_rows,
             } => {
                 assert_eq!(total_rows, 2);
                 assert_eq!(attested_rows, 2);
@@ -693,6 +822,8 @@ mod tests {
                     pds_admin_audit_rows, 0,
                     "pre-#87 deployment has no pds_admin_audit rows"
                 );
+                assert_eq!(xrpc_known_callers_rows, 0);
+                assert_eq!(xrpc_trusted_pdses_rows, 0);
             }
             other => panic!("expected Verified, got {other:?}"),
         }
@@ -943,6 +1074,8 @@ mod tests {
                 attestation_starts_at_row,
                 audit_log_rows,
                 pds_admin_audit_rows,
+                xrpc_known_callers_rows,
+                xrpc_trusted_pdses_rows,
             } => {
                 assert_eq!(total_rows, 5);
                 assert_eq!(attested_rows, 2);
@@ -950,6 +1083,8 @@ mod tests {
                 assert_eq!(attestation_starts_at_row, Some(4));
                 assert_eq!(audit_log_rows, 4);
                 assert_eq!(pds_admin_audit_rows, 1);
+                assert_eq!(xrpc_known_callers_rows, 0);
+                assert_eq!(xrpc_trusted_pdses_rows, 0);
             }
             other => panic!("expected Verified, got {other:?}"),
         }
@@ -995,6 +1130,8 @@ mod tests {
             attestation_starts_at_row: Some(4),
             audit_log_rows: 8,
             pds_admin_audit_rows: 2,
+            xrpc_known_callers_rows: 0,
+            xrpc_trusted_pdses_rows: 0,
         });
         assert!(verified.contains("7 attested"));
         assert!(verified.contains("of 10"));
@@ -1011,6 +1148,8 @@ mod tests {
             attestation_starts_at_row: None,
             audit_log_rows: 5,
             pds_admin_audit_rows: 0,
+            xrpc_known_callers_rows: 0,
+            xrpc_trusted_pdses_rows: 0,
         });
         assert!(!no_horizon.contains("horizon"), "no horizon line when None");
         assert!(!no_horizon.contains("skipped"), "no skipped line when 0");
@@ -1046,6 +1185,8 @@ mod tests {
             attestation_starts_at_row: None,
             audit_log_rows: 3,
             pds_admin_audit_rows: 2,
+            xrpc_known_callers_rows: 0,
+            xrpc_trusted_pdses_rows: 0,
         });
         assert!(s.contains(r#""outcome":"verified""#), "got: {s}");
         assert!(

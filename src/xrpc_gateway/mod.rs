@@ -28,8 +28,10 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod membership;
 pub mod middleware;
 pub mod nsid;
+pub mod replay;
 pub mod router;
 
 /// Shared test fixtures for the xrpc_gateway module's auth +
@@ -44,5 +46,10 @@ pub(crate) mod test_fixtures;
 pub use auth::{XrpcAuthClaims, XrpcAuthService};
 pub use config::{XrpcGatewayConfig, XrpcGatewayConfigToml};
 pub use error::{XrpcAuthError, XrpcGatewayError};
+pub use membership::{
+    MembershipRow, add_known_caller, add_trusted_pds, is_known_caller, is_trusted_pds,
+    list_known_callers, list_trusted_pdses, revoke_known_caller, revoke_trusted_pds,
+};
 pub use nsid::{Nsid, extract_nsid_from_request_uri};
+pub use replay::{ReplayCheck, XrpcReplayCache};
 pub use router::build_router;

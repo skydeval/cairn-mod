@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT did, note, added_by_moderator, added_at, row_hash\n         FROM xrpc_known_callers\n         ORDER BY added_at ASC, did ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "did",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "note",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_by_moderator",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "row_hash",
+        "ordinal": 4,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1112c810a8267f8ba1e9aa18369b1dbab8a85d01bbc6c484fee7e65fa6280a30"
+}

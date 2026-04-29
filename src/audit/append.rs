@@ -165,62 +165,172 @@ async fn perform_append(conn: &mut SqliteConnection, row: &AuditRowForAppend) ->
     Ok(id)
 }
 
-/// Read the latest stored `row_hash` across the unified chain
-/// (audit_log + pds_admin_audit, since #85 / v1.7), skipping pre-v1.3
-/// audit_log rows that have NULL hashes. Tie-breaks on insertion
-/// timestamp: `audit_log.created_at` vs `pds_admin_audit.call_completed_at`,
-/// later wins. Returns [`GENESIS_PREV_HASH`] when both tables are empty
-/// (or audit_log only contains pre-v1.3 NULL rows and pds_admin_audit
-/// is empty).
+/// Read the latest stored `row_hash` across the unified chain.
 ///
-/// This produces the trust-horizon semantic: the v1.3 chain is rooted
-/// at GENESIS regardless of whether `cairn audit-rebuild` has run, and
-/// extends through whichever pds_admin_audit row chains in next.
+/// Walks four tables since #94 / v1.7: `audit_log` (#39),
+/// `pds_admin_audit` (#85 / §F23), `xrpc_known_callers` and
+/// `xrpc_trusted_pdses` (#94 / §F23 inbound). Skips pre-v1.3
+/// `audit_log` rows that have NULL hashes. Returns
+/// [`GENESIS_PREV_HASH`] when all four tables are empty (or
+/// `audit_log` only contains pre-v1.3 NULL rows and the other
+/// three are empty).
 ///
-/// `pub(crate)` so the `pds_admin_audit` append helper in
-/// [`crate::pds_admin::audit`] can share the same chain-tip read.
+/// # Tie-break
+///
+/// When multiple candidate rows share the latest timestamp, the
+/// chain tip is the one with the highest **table priority**:
+///
+/// | Table | Priority |
+/// |-------|----------|
+/// | `audit_log` | 0 |
+/// | `pds_admin_audit` | 1 |
+/// | `xrpc_known_callers` | 2 |
+/// | `xrpc_trusted_pdses` | 3 |
+///
+/// Higher priority = "newer in the chain" on ties. Mirrored by
+/// `cairn audit verify`'s walker (#88, extended in #94). The
+/// pairing keeps the read and the walker consistent so the
+/// chain has a single canonical ordering.
+///
+/// **Monotonicity caveat:** if a low-priority row inserts AFTER
+/// a high-priority row at the same millisecond timestamp, the
+/// priority-based tie-break treats the high-priority row as the
+/// chain tip (not the actually-most-recently-inserted low-
+/// priority row), and the next chained row would skip the low-
+/// priority one. The `xrpc_*` write paths in #94 enforce
+/// strict-monotonic timestamps to sidestep this; the existing
+/// `audit_log` + `pds_admin_audit` paths rely on the writer task's
+/// natural sub-millisecond gap between writes (ms-resolution
+/// timestamps tied across these two tables are rare in practice).
+///
+/// `pub(crate)` so the `pds_admin_audit` (#85) and `xrpc_*`
+/// (#94) append helpers can share the same chain-tip read.
 pub(crate) async fn read_latest_chain_hash(conn: &mut SqliteConnection) -> Result<[u8; 32]> {
-    let audit_log_latest = sqlx::query!(
+    let candidates = read_chain_tip_candidates(&mut *conn).await?;
+    Ok(select_chain_tip(&candidates).unwrap_or(GENESIS_PREV_HASH))
+}
+
+/// Borrowed candidate row across the four chain tables. Each
+/// variant carries the row's chain-ordering timestamp and the
+/// stored `row_hash` (or `None` for pre-v1.3 audit_log rows that
+/// haven't been backfilled by `cairn audit-rebuild`).
+#[derive(Debug, Clone)]
+struct ChainTipCandidate {
+    /// Chain-ordering timestamp (epoch-ms).
+    timestamp: i64,
+    /// Stable per-table priority (see `read_latest_chain_hash`).
+    priority: u8,
+    /// Stored row_hash. `None` only for pre-v1.3 audit_log rows.
+    row_hash: Option<Vec<u8>>,
+}
+
+async fn read_chain_tip_candidates(conn: &mut SqliteConnection) -> Result<Vec<ChainTipCandidate>> {
+    let mut out = Vec::with_capacity(4);
+
+    let audit_log = sqlx::query!(
         "SELECT row_hash, created_at FROM audit_log
          WHERE row_hash IS NOT NULL
          ORDER BY id DESC LIMIT 1"
     )
     .fetch_optional(&mut *conn)
     .await
-    .map_err(|e| Error::Signing(format!("audit prev_hash read: {e}")))?;
+    .map_err(|e| Error::Signing(format!("audit_log prev_hash read: {e}")))?;
+    if let Some(r) = audit_log {
+        out.push(ChainTipCandidate {
+            timestamp: r.created_at,
+            priority: 0,
+            row_hash: r.row_hash,
+        });
+    }
 
-    let pds_admin_latest = sqlx::query!(
+    let pds_admin = sqlx::query!(
         "SELECT row_hash, call_completed_at FROM pds_admin_audit
          ORDER BY id DESC LIMIT 1"
     )
     .fetch_optional(&mut *conn)
     .await
     .map_err(|e| Error::Signing(format!("pds_admin_audit prev_hash read: {e}")))?;
+    if let Some(r) = pds_admin {
+        out.push(ChainTipCandidate {
+            timestamp: r.call_completed_at,
+            priority: 1,
+            row_hash: Some(r.row_hash),
+        });
+    }
 
-    match (audit_log_latest, pds_admin_latest) {
-        (None, None) => Ok(GENESIS_PREV_HASH),
-        (Some(a), None) => match a.row_hash {
-            Some(bytes) => parse_stored_hash(&bytes),
-            None => Ok(GENESIS_PREV_HASH),
-        },
-        (None, Some(p)) => parse_stored_hash(&p.row_hash),
-        (Some(a), Some(p)) => {
-            // Both tables have rows. Compare insertion timestamps;
-            // the later one is the chain tip. audit_log's row may
-            // still be a pre-v1.3 NULL — guard the unwrap.
-            let a_hash = a.row_hash;
-            match a_hash {
-                None => parse_stored_hash(&p.row_hash),
-                Some(bytes) => {
-                    if p.call_completed_at >= a.created_at {
-                        parse_stored_hash(&p.row_hash)
-                    } else {
-                        parse_stored_hash(&bytes)
-                    }
+    let known_callers = sqlx::query!(
+        "SELECT row_hash, added_at FROM xrpc_known_callers
+         ORDER BY added_at DESC LIMIT 1"
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| Error::Signing(format!("xrpc_known_callers prev_hash read: {e}")))?;
+    if let Some(r) = known_callers {
+        out.push(ChainTipCandidate {
+            timestamp: r.added_at,
+            priority: 2,
+            row_hash: Some(r.row_hash),
+        });
+    }
+
+    let trusted_pdses = sqlx::query!(
+        "SELECT row_hash, added_at FROM xrpc_trusted_pdses
+         ORDER BY added_at DESC LIMIT 1"
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| Error::Signing(format!("xrpc_trusted_pdses prev_hash read: {e}")))?;
+    if let Some(r) = trusted_pdses {
+        out.push(ChainTipCandidate {
+            timestamp: r.added_at,
+            priority: 3,
+            row_hash: Some(r.row_hash),
+        });
+    }
+
+    Ok(out)
+}
+
+/// Read the maximum chain-ordering timestamp across all four
+/// chain tables, in epoch-ms. Returns `None` when all four are
+/// empty.
+///
+/// Used by the #94 `xrpc_*` write paths to enforce strict-
+/// monotonic chain timestamps:
+/// `added_at = max(epoch_ms_now(), max_existing + 1)`. This
+/// sidesteps the priority-tie-break monotonicity caveat
+/// documented on [`read_latest_chain_hash`] for chain extensions
+/// that originate outside the writer task (CLI inserts).
+pub(crate) async fn read_latest_chain_timestamp_ms(
+    conn: &mut SqliteConnection,
+) -> Result<Option<i64>> {
+    let candidates = read_chain_tip_candidates(&mut *conn).await?;
+    Ok(candidates.iter().map(|c| c.timestamp).max())
+}
+
+/// Pick the chain tip from a set of candidates, applying the
+/// `(timestamp DESC, priority DESC)` rule. Returns `None` if no
+/// candidate has a non-NULL `row_hash` (caller defaults to
+/// `GENESIS_PREV_HASH`).
+fn select_chain_tip(candidates: &[ChainTipCandidate]) -> Option<[u8; 32]> {
+    let mut best: Option<&ChainTipCandidate> = None;
+    for c in candidates {
+        if c.row_hash.is_none() {
+            continue;
+        }
+        match best {
+            None => best = Some(c),
+            Some(b) => {
+                if c.timestamp > b.timestamp
+                    || (c.timestamp == b.timestamp && c.priority > b.priority)
+                {
+                    best = Some(c);
                 }
             }
         }
     }
+    let bytes = best?.row_hash.as_ref()?;
+    parse_stored_hash(bytes).ok()
 }
 
 #[cfg(test)]

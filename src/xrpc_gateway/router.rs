@@ -44,11 +44,15 @@ use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use serde::Serialize;
+use sqlx::{Pool, Sqlite};
 
 use crate::xrpc_gateway::Nsid;
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
-use crate::xrpc_gateway::middleware::xrpc_auth_middleware;
+use crate::xrpc_gateway::middleware::{
+    xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
+};
+use crate::xrpc_gateway::replay::XrpcReplayCache;
 
 /// Build the inbound XRPC gateway router.
 ///
@@ -71,11 +75,67 @@ use crate::xrpc_gateway::middleware::xrpc_auth_middleware;
 /// so it runs BEFORE NSID dispatch — auth failures short-circuit
 /// at the layer boundary; cryptographically-valid-but-mismatched
 /// JWTs never reach the (still-stub) handlers.
-pub fn build_router(config: XrpcGatewayConfig, auth_service: Arc<XrpcAuthService>) -> Router {
-    build_routes_only(config).layer(axum::middleware::from_fn_with_state(
-        auth_service,
-        xrpc_auth_middleware,
-    ))
+pub fn build_router(
+    config: XrpcGatewayConfig,
+    auth_service: Arc<XrpcAuthService>,
+    pool: Pool<Sqlite>,
+    replay_cache: Arc<XrpcReplayCache>,
+) -> Router {
+    // Layer composition order is **security-load-bearing**. Per
+    // §A8.1: auth runs first (innermost), membership second,
+    // replay third (outermost). axum's `Layer` composition is
+    // LIFO — the layer applied LAST in code runs FIRST in the
+    // request path... wait, that's the opposite. Let's be
+    // explicit:
+    //
+    // axum docs: "applying a `Layer` to a `Router` wraps the
+    // router; the wrapping layer runs FIRST when the request
+    // arrives." So `.layer(A).layer(B)` means B runs first
+    // (outer), then A (inner).
+    //
+    // We want: auth → membership → replay (auth runs first).
+    // So apply in reverse: layer(auth) first, then layer(membership),
+    // then layer(replay). Replay is the outer-most and runs LAST
+    // — which is what we want, since only fully-authorized
+    // requests should consume cache slots.
+    //
+    // Wait that contradicts itself. Let me re-derive.
+    //
+    // Actually axum's behavior: `.layer(L)` wraps `R` such that
+    // `L` is the outer service. When a request arrives, it hits
+    // `L` first; `L` calls `next.run(req)` which delegates to
+    // `R`. So the layer applied LAST in code is called LAST
+    // around the inner. Multiple `.layer` calls compose:
+    //
+    //     R.layer(A)      -> A wraps R
+    //     R.layer(A).layer(B) -> B wraps (A wraps R)
+    //
+    // Request flow: B → A → R. So B (outermost) runs first.
+    //
+    // To get auth → membership → replay → handler order:
+    //     handler        = R
+    //     R.layer(replay)  -> replay wraps R; replay runs first
+    //                         (we DON'T want this)
+    //
+    // We want auth FIRST, so auth must be the outermost wrap:
+    //     R.layer(replay).layer(membership).layer(auth)
+    //
+    // Reading: handler R is wrapped by replay, then by membership,
+    // then by auth. Request hits auth first; auth → membership
+    // → replay → handler. ✓
+    build_routes_only(config)
+        .layer(axum::middleware::from_fn_with_state(
+            replay_cache,
+            xrpc_replay_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            pool,
+            xrpc_membership_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_service,
+            xrpc_auth_middleware,
+        ))
 }
 
 /// The router's NSID routes + fallbacks **without** the auth
@@ -479,7 +539,9 @@ mod tests {
     /// Spin up the full authenticated router + return its base URL.
     async fn spawn_authed() -> String {
         let auth = fx::build_service();
-        let router = build_router(fx::fixture_config(), auth);
+        let pool = fx::build_test_pool().await;
+        let cache = fx::build_replay_cache();
+        let router = build_router(fx::fixture_config(), auth, pool, cache);
         spawn_for_test(router).await
     }
 
@@ -653,6 +715,287 @@ mod tests {
         assert_eq!(
             body.get("error").and_then(|v| v.as_str()),
             Some("ExpiredToken")
+        );
+    }
+
+    // ===========================================================================
+    // #94: membership + replay middleware integration tests
+    // ===========================================================================
+    //
+    // The full layered router exercises auth → membership → replay
+    // → handler. Each test below sets up a pool + replay cache to
+    // target a specific layer's branch.
+
+    use crate::xrpc_gateway::{
+        XrpcReplayCache, add_known_caller, add_trusted_pds, revoke_known_caller,
+    };
+    use std::time::Duration as StdDuration;
+
+    /// Build a router with a custom pool (i.e. caller controls
+    /// membership-table seeds) but the standard auth + replay
+    /// fixtures.
+    async fn spawn_with_pool(pool: sqlx::Pool<sqlx::Sqlite>) -> String {
+        let auth = fx::build_service();
+        let cache = fx::build_replay_cache();
+        let router = build_router(fx::fixture_config(), auth, pool, cache);
+        spawn_for_test(router).await
+    }
+
+    /// Empty in-memory pool (no rows in either membership table).
+    async fn empty_pool() -> sqlx::Pool<sqlx::Sqlite> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xrpc-test-empty.db");
+        let pool = crate::storage::open(&path).await.unwrap();
+        Box::leak(Box::new(dir));
+        pool
+    }
+
+    #[tokio::test]
+    async fn known_caller_in_table_can_call_emit_event() {
+        // Issuer is in xrpc_known_callers. emitEvent reaches the
+        // handler stub (501).
+        let pool = empty_pool().await;
+        add_known_caller(&pool, fx::ISSUER_DID, Some("test"), "did:plc:m")
+            .await
+            .unwrap();
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 501);
+    }
+
+    #[tokio::test]
+    async fn unknown_caller_emit_event_returns_403() {
+        // Issuer NOT in xrpc_known_callers. emitEvent → 403.
+        let pool = empty_pool().await;
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("AccountTakedown")
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_pds_can_call_create_report() {
+        // Issuer is in xrpc_trusted_pdses. createReport reaches
+        // the handler stub (501).
+        let pool = empty_pool().await;
+        add_trusted_pds(&pool, fx::ISSUER_DID, Some("test"), "did:plc:m")
+            .await
+            .unwrap();
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("com.atproto.moderation.createReport"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/com.atproto.moderation.createReport"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 501);
+    }
+
+    #[tokio::test]
+    async fn untrusted_pds_create_report_returns_403() {
+        let pool = empty_pool().await;
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("com.atproto.moderation.createReport"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/com.atproto.moderation.createReport"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+    }
+
+    #[tokio::test]
+    async fn cross_table_isolation_trusted_pds_cannot_call_emit_event() {
+        // The same DID as a trusted PDS is NOT a known caller.
+        // Trying to call emitEvent (which checks
+        // xrpc_known_callers) → 403. Correct trust separation:
+        // PDS-trust and user-trust are different.
+        let pool = empty_pool().await;
+        add_trusted_pds(&pool, fx::ISSUER_DID, None, "did:plc:m")
+            .await
+            .unwrap();
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+    }
+
+    #[tokio::test]
+    async fn revoked_known_caller_returns_403() {
+        let pool = empty_pool().await;
+        add_known_caller(&pool, fx::ISSUER_DID, None, "did:plc:m")
+            .await
+            .unwrap();
+        revoke_known_caller(&pool, fx::ISSUER_DID, "did:plc:m")
+            .await
+            .unwrap();
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 403);
+    }
+
+    #[tokio::test]
+    async fn replay_second_request_with_same_jti_returns_400_expiredtoken() {
+        // Membership-allowed caller; valid JWT; but replayed.
+        // First call: 501 (passes through to handler stub).
+        // Second call (same jti): 400 ExpiredToken.
+        let pool = empty_pool().await;
+        add_known_caller(&pool, fx::ISSUER_DID, None, "did:plc:m")
+            .await
+            .unwrap();
+        let url = spawn_with_pool(pool).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+
+        let res1 = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res1.status().as_u16(), 501, "first call passes through");
+
+        let res2 = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res2.status().as_u16(), 400, "replay must short-circuit");
+        let body: serde_json::Value = res2.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("ExpiredToken")
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_order_unauthorized_request_does_not_pollute_replay_cache() {
+        // Composition order is security-load-bearing: an
+        // unauthenticated request should NEVER reach the replay
+        // cache. Verify by sending a no-auth request and then a
+        // valid request with the same (eventually-known) jti —
+        // the valid one should succeed, proving the cache was
+        // never touched by the unauthorized one.
+        let pool = empty_pool().await;
+        add_known_caller(&pool, fx::ISSUER_DID, None, "did:plc:m")
+            .await
+            .unwrap();
+        let auth = fx::build_service();
+        let cache = Arc::new(XrpcReplayCache::new(StdDuration::from_secs(90)));
+        let router = build_router(fx::fixture_config(), auth, pool, cache.clone());
+        let url = spawn_for_test(router).await;
+
+        // No auth header → 401. Cache untouched.
+        let res = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status().as_u16(), 401);
+
+        // Now valid request with whatever jti from a fresh JWT.
+        // Should succeed (cache had no entry from the bad request).
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+        let res2 = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res2.status().as_u16(), 501);
+    }
+
+    #[tokio::test]
+    async fn layer_order_unauthorized_membership_does_not_pollute_replay_cache() {
+        // Same defense for the membership layer: an
+        // authenticated-but-not-authorized caller's jti should
+        // NEVER end up in the replay cache. Otherwise a future
+        // operator who adds the caller to xrpc_known_callers
+        // would see their first request rejected as a "replay".
+        let pool = empty_pool().await; // empty: caller not in any table
+        let url = spawn_with_pool(pool.clone()).await;
+        let jwt = fx::build_jwt(
+            &fx::valid_claims("tools.ozone.moderation.emitEvent"),
+            "ES256K",
+        );
+
+        // Membership rejects → 403. Cache untouched.
+        let res1 = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res1.status().as_u16(), 403);
+
+        // Now operator adds the caller. With the same jti the
+        // request should now succeed — cache wasn't poisoned.
+        add_known_caller(&pool, fx::ISSUER_DID, None, "did:plc:m")
+            .await
+            .unwrap();
+        let res2 = client()
+            .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
+            .header("authorization", auth_header(&jwt))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res2.status().as_u16(),
+            501,
+            "after grant, same jti should pass through (cache wasn't poisoned)"
         );
     }
 

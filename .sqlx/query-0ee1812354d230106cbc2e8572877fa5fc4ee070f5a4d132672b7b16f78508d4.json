@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT did, note, added_by_moderator, added_at, revoked_at, revoked_by_moderator\n             FROM xrpc_trusted_pdses ORDER BY added_at ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "did",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "note",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_by_moderator",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "added_at",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "revoked_by_moderator",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0ee1812354d230106cbc2e8572877fa5fc4ee070f5a4d132672b7b16f78508d4"
+}
