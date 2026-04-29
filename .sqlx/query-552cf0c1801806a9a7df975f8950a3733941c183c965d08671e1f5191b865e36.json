@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO reports (\n             created_at, reported_by, reason_type, reason,\n             subject_type, subject_did, status\n           )\n           VALUES ('2026-04-29T12:00:00.000Z', 'did:plc:reporter', 'com.atproto.moderation.defs#reasonSpam', NULL, 'account', ?1, 'pending')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "552cf0c1801806a9a7df975f8950a3733941c183c965d08671e1f5191b865e36"
+}

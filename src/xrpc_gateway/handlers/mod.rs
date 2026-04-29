@@ -17,6 +17,8 @@ use crate::writer::WriterHandle;
 
 pub mod create_report;
 pub mod emit_event;
+pub mod projections;
+pub mod query_statuses;
 
 /// Shared state every gateway handler receives via `Extension`.
 ///
@@ -42,4 +44,12 @@ pub struct XrpcGatewayState {
     /// lookups that don't mutate state (e.g., finding the action
     /// row to revoke).
     pub pool: Pool<Sqlite>,
+    /// cairn-mod's labeler service DID — same value
+    /// `[xrpc_gateway].service_did` resolves to. Read handlers
+    /// (#97 / #98) use this as the `labels.src` filter when
+    /// projecting the active-label set per subject; without it,
+    /// labels emitted by other labelers (against the same subject
+    /// DID via cairn-mod's PDS) would leak into cairn-mod's
+    /// status views.
+    pub service_did: String,
 }

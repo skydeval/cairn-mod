@@ -50,7 +50,7 @@ use sqlx::{Pool, Sqlite};
 use crate::xrpc_gateway::Nsid;
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
-use crate::xrpc_gateway::handlers::{XrpcGatewayState, create_report, emit_event};
+use crate::xrpc_gateway::handlers::{XrpcGatewayState, create_report, emit_event, query_statuses};
 use crate::xrpc_gateway::middleware::{
     xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
 };
@@ -205,8 +205,14 @@ async fn handle_emit_event(
     emit_event::handler(state, claims, body).await
 }
 
-async fn handle_query_statuses() -> Response {
-    method_not_implemented_response(Nsid::ToolsOzoneModerationQueryStatuses.as_path_segment())
+// `tools.ozone.moderation.queryStatuses` — body in
+// [`crate::xrpc_gateway::handlers::query_statuses`] (#97).
+async fn handle_query_statuses(
+    state: Extension<XrpcGatewayState>,
+    claims: Extension<crate::xrpc_gateway::XrpcAuthClaims>,
+    params: axum::extract::Query<query_statuses::QueryStatusesParams>,
+) -> Response {
+    query_statuses::handler(state, claims, params).await
 }
 
 async fn handle_query_events() -> Response {
@@ -350,20 +356,15 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_nsids_return_501_with_correct_method() {
-        // emitEvent and createReport are excluded post-#95/#96:
-        // their handlers are real bodies that require
-        // `Extension<XrpcGatewayState>` + `Extension<XrpcAuthClaims>`
-        // from the layered router. build_routes_only does not
-        // provide those, so they would 500 here. Through-the-
-        // router shape tests for those NSIDs live in the
-        // integration test files (tests/xrpc_gateway_emit_event.rs
-        // and tests/xrpc_gateway_create_report.rs) and the layered
-        // tests below.
+        // emitEvent / createReport / queryStatuses are excluded
+        // post-#95/#96/#97: their handlers are real bodies that
+        // require Extension state that build_routes_only doesn't
+        // provide. Through-the-router shape tests for those
+        // NSIDs live in the integration test files. queryEvents
+        // is the only remaining 501 stub.
         let url = spawn_for_test(build_routes_only(fixture_config())).await;
-        let cases: &[(reqwest::Method, &str)] = &[
-            (reqwest::Method::GET, "tools.ozone.moderation.queryStatuses"),
-            (reqwest::Method::GET, "tools.ozone.moderation.queryEvents"),
-        ];
+        let cases: &[(reqwest::Method, &str)] =
+            &[(reqwest::Method::GET, "tools.ozone.moderation.queryEvents")];
         for (method, nsid) in cases {
             let res = client()
                 .request(method.clone(), format!("{url}/xrpc/{nsid}"))
@@ -515,12 +516,13 @@ mod tests {
         // `code` field) is a deliberate decision made through
         // this test.
         //
-        // Uses queryStatuses (still a 501 stub through #96) since
-        // createReport / emitEvent now require Extension state
-        // that build_routes_only doesn't provide.
+        // Uses queryEvents (the only remaining 501 stub through
+        // #97) since createReport / emitEvent / queryStatuses now
+        // require Extension state that build_routes_only doesn't
+        // provide.
         let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let res = client()
-            .get(format!("{url}/xrpc/tools.ozone.moderation.queryStatuses"))
+            .get(format!("{url}/xrpc/tools.ozone.moderation.queryEvents"))
             .send()
             .await
             .unwrap();

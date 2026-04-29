@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT l1.val AS \"val!: String\"\n           FROM labels l1\n           WHERE l1.src = ?1 AND l1.uri = ?2\n             AND l1.seq = (\n                 SELECT MAX(l2.seq) FROM labels l2\n                 WHERE l2.src = l1.src AND l2.uri = l1.uri AND l2.val = l1.val\n             )\n             AND l1.neg = 0\n           ORDER BY l1.val ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "val!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e81c615a4311b2f2c0ff0bf754f3e90b3ff8be07be13868b1797ab29b208a18d"
+}

@@ -252,6 +252,7 @@ where
         let xrpc_handler_state = crate::xrpc_gateway::XrpcGatewayState {
             writer: writer.clone(),
             pool: pool.clone(),
+            service_did: gateway_cfg.service_did.clone(),
         };
         router = router.merge(crate::xrpc_gateway::build_router(
             gateway_cfg,

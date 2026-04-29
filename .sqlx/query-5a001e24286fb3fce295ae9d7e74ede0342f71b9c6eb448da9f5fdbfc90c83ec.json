@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(created_at) AS \"last_reported_at: String\"\n                   FROM reports\n                   WHERE subject_did = ?1 AND subject_uri IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_reported_at: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5a001e24286fb3fce295ae9d7e74ede0342f71b9c6eb448da9f5fdbfc90c83ec"
+}

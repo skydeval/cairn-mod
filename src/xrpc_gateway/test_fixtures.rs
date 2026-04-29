@@ -209,7 +209,11 @@ pub async fn build_handler_state(
     )
     .await
     .expect("spawn test writer");
-    crate::xrpc_gateway::XrpcGatewayState { writer, pool }
+    crate::xrpc_gateway::XrpcGatewayState {
+        writer,
+        pool,
+        service_did: SERVICE_DID.to_string(),
+    }
 }
 
 /// Build a [`crate::moderation::reasons::ReasonVocabulary`] containing

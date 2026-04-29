@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n                     id              AS \"id!: i64\",\n                     action_type     AS \"action_type!: String\",\n                     actor_did       AS \"actor_did!: String\",\n                     notes,\n                     revoked_at,\n                     created_at      AS \"created_at!: i64\"\n                   FROM subject_actions\n                   WHERE subject_did = ?1 AND subject_uri = ?2\n                   ORDER BY id ASC",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "action_type!: String",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did!: String",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "notes",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "revoked_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at!: i64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "257b168654e070731ecc70e95eda281920cf6e97fdcd3fb222db3a111f94ff37"
+}

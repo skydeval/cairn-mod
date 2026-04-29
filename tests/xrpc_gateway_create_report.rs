@@ -168,6 +168,7 @@ async fn spawn(seed: SeedAs) -> Harness {
     let state = XrpcGatewayState {
         writer,
         pool: pool.clone(),
+        service_did: SERVICE_DID.to_string(),
     };
 
     let router =
