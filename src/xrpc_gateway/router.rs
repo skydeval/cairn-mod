@@ -47,10 +47,11 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use sqlx::{Pool, Sqlite};
 
-use crate::xrpc_gateway::Nsid;
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
-use crate::xrpc_gateway::handlers::{XrpcGatewayState, create_report, emit_event, query_statuses};
+use crate::xrpc_gateway::handlers::{
+    XrpcGatewayState, create_report, emit_event, query_events, query_statuses,
+};
 use crate::xrpc_gateway::middleware::{
     xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
 };
@@ -126,7 +127,8 @@ pub fn build_router(
     // Reading: handler R is wrapped by replay, then by membership,
     // then by auth. Request hits auth first; auth → membership
     // → replay → handler. ✓
-    build_routes_only(config)
+    let _ = config; // reserved for future-cycle config plumbing
+    routes()
         .layer(Extension(handler_state))
         .layer(axum::middleware::from_fn_with_state(
             replay_cache,
@@ -142,17 +144,19 @@ pub fn build_router(
         ))
 }
 
-/// The router's NSID routes + fallbacks **without** the auth
-/// middleware. Used by:
-/// - The public [`build_router`], which wraps this with the auth
-///   layer for production.
-/// - Tests of the post-auth router shape (501/405/fallback
-///   behavior) that don't want the auth layer in the way.
+/// The bare per-NSID routes + fallbacks. Inlined into
+/// [`build_router`] (which wraps this with auth + membership +
+/// replay middleware + the `XrpcGatewayState` `Extension` layer
+/// the handlers extract from).
 ///
-/// `pub(crate)` so the in-crate tests can construct the inner
-/// router without bringing up the auth surface; production callers
-/// always go through [`build_router`].
-pub(crate) fn build_routes_only(_config: XrpcGatewayConfig) -> Router {
+/// Pre-#98 this surface was exposed as `build_routes_only` for
+/// in-crate tests of the no-middleware shape (501/405/fallback
+/// behavior). After #98, every handler requires `XrpcGatewayState`
+/// from the layered router, so the no-middleware variant is no
+/// longer testable in isolation. The remaining test surface lives
+/// in `tests/xrpc_gateway_*.rs` (full-stack) and the in-crate
+/// router tests below (full-stack with fixture state).
+fn routes() -> Router {
     Router::new()
         .route(
             "/xrpc/com.atproto.moderation.createReport",
@@ -215,8 +219,14 @@ async fn handle_query_statuses(
     query_statuses::handler(state, claims, params).await
 }
 
-async fn handle_query_events() -> Response {
-    method_not_implemented_response(Nsid::ToolsOzoneModerationQueryEvents.as_path_segment())
+// `tools.ozone.moderation.queryEvents` — body in
+// [`crate::xrpc_gateway::handlers::query_events`] (#98).
+async fn handle_query_events(
+    state: Extension<XrpcGatewayState>,
+    claims: Extension<crate::xrpc_gateway::XrpcAuthClaims>,
+    params: axum::extract::Query<query_events::QueryEventsParams>,
+) -> Response {
+    query_events::handler(state, claims, params).await
 }
 
 // ===========================================================================
@@ -325,17 +335,7 @@ struct XrpcErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use tokio::net::TcpListener;
-
-    fn fixture_config() -> XrpcGatewayConfig {
-        XrpcGatewayConfig {
-            enabled: true,
-            service_did: "did:web:cairn.example.com".into(),
-            clock_skew_tolerance: Duration::from_secs(30),
-            replay_cache_ttl: Duration::from_secs(90),
-        }
-    }
 
     /// Bind the router to a local ephemeral port and return the
     /// reqwest base URL. Same pattern admin_labels.rs uses.
@@ -352,46 +352,17 @@ mod tests {
         reqwest::Client::new()
     }
 
-    // ====== Allowlisted NSIDs return 501 on the correct method =====
-
-    #[tokio::test]
-    async fn allowlisted_nsids_return_501_with_correct_method() {
-        // emitEvent / createReport / queryStatuses are excluded
-        // post-#95/#96/#97: their handlers are real bodies that
-        // require Extension state that build_routes_only doesn't
-        // provide. Through-the-router shape tests for those
-        // NSIDs live in the integration test files. queryEvents
-        // is the only remaining 501 stub.
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
-        let cases: &[(reqwest::Method, &str)] =
-            &[(reqwest::Method::GET, "tools.ozone.moderation.queryEvents")];
-        for (method, nsid) in cases {
-            let res = client()
-                .request(method.clone(), format!("{url}/xrpc/{nsid}"))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(res.status().as_u16(), 501, "{nsid} via {method}");
-            let body: serde_json::Value = res.json().await.unwrap();
-            assert_eq!(
-                body.get("error").and_then(|v| v.as_str()),
-                Some("MethodNotImplemented"),
-                "{nsid}"
-            );
-            assert!(
-                body.get("message")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|m| m.contains(*nsid)),
-                "{nsid}: envelope message should name the NSID"
-            );
-        }
-    }
-
     // ====== Wrong method on a known NSID returns 405 =====
 
     #[tokio::test]
     async fn wrong_method_on_known_nsid_returns_405_envelope() {
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
+        // Post-#98: build_routes_only is retired. These tests run
+        // through the full layered router (spawn_authed); the
+        // wrong-method case requires a valid JWT since the auth
+        // middleware runs before route matching for allowlisted
+        // NSIDs. The MethodRouter's per-route fallback fires
+        // post-auth + post-membership + post-replay.
+        let url = spawn_authed().await;
         // POST-only NSIDs hit with GET; GET-only NSIDs hit with POST.
         let cases: &[(reqwest::Method, &str)] = &[
             (reqwest::Method::GET, "com.atproto.moderation.createReport"),
@@ -402,9 +373,17 @@ mod tests {
             ),
             (reqwest::Method::POST, "tools.ozone.moderation.queryEvents"),
         ];
-        for (method, nsid) in cases {
+        for (i, (method, nsid)) in cases.iter().enumerate() {
+            // The fx::valid_claims fixture hardcodes jti to
+            // "jti-fixture-1"; vary per iteration so the replay
+            // middleware doesn't reject the second-and-onwards
+            // requests as duplicates.
+            let mut claims = fx::valid_claims(nsid);
+            claims["jti"] = serde_json::json!(format!("jti-wrong-method-{i}"));
+            let jwt = fx::build_jwt(&claims, "ES256K");
             let res = client()
                 .request(method.clone(), format!("{url}/xrpc/{nsid}"))
+                .header("authorization", auth_header(&jwt))
                 .send()
                 .await
                 .unwrap();
@@ -428,7 +407,11 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_nsid_returns_501_via_fallback() {
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
+        // Post-#98: layered router. Auth / membership / replay
+        // middleware all pass through requests whose URI doesn't
+        // match an allowlisted NSID — no auth header needed for
+        // these tests.
+        let url = spawn_authed().await;
         for nsid in [
             "tools.ozone.moderation.somethingElse",
             "tools.ozone.moderation.emitEventV2",
@@ -464,7 +447,7 @@ mod tests {
         // path match is also case-sensitive (axum 0.8 default),
         // so capitalized variants do NOT route to the named
         // handler — they hit the unknown-NSID fallback instead.
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
+        let url = spawn_authed().await;
         let res = client()
             .post(format!("{url}/xrpc/tools.ozone.moderation.EmitEvent"))
             .send()
@@ -496,7 +479,7 @@ mod tests {
         // composes the gateway with .merge(...) against other
         // routers that handle their own paths; this test pins the
         // standalone-router behavior for unit-level confidence.
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
+        let url = spawn_authed().await;
         let res = client().get(format!("{url}/health")).send().await.unwrap();
         assert_eq!(res.status().as_u16(), 501);
         let body: serde_json::Value = res.json().await.unwrap();
@@ -516,13 +499,12 @@ mod tests {
         // `code` field) is a deliberate decision made through
         // this test.
         //
-        // Uses queryEvents (the only remaining 501 stub through
-        // #97) since createReport / emitEvent / queryStatuses now
-        // require Extension state that build_routes_only doesn't
-        // provide.
-        let url = spawn_for_test(build_routes_only(fixture_config())).await;
+        // Routes through the unknown-NSID fallback (auth /
+        // membership / replay middleware all pass through unknown
+        // NSIDs, so no JWT is needed).
+        let url = spawn_authed().await;
         let res = client()
-            .get(format!("{url}/xrpc/tools.ozone.moderation.queryEvents"))
+            .post(format!("{url}/xrpc/com.example.unknown"))
             .send()
             .await
             .unwrap();

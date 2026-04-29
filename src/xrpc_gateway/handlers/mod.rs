@@ -18,6 +18,7 @@ use crate::writer::WriterHandle;
 pub mod create_report;
 pub mod emit_event;
 pub mod projections;
+pub mod query_events;
 pub mod query_statuses;
 
 /// Shared state every gateway handler receives via `Extension`.
