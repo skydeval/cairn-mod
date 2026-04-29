@@ -1286,6 +1286,251 @@ The v1.6 contribution is policy automation: rule declaration, threshold-crossing
 - **Webhook-driven pending creation** (v1.8+ if demand) — v1.6's pendings come exclusively from operator-declared threshold-crossing rules. External automated systems wanting to queue pendings (e.g., a third-party classifier) would land their own pending rows via a future endpoint.
 - **Policy-rule audit reports** (v1.8+ if demand) — operator-facing analytics: "how often did rule X fire? what's the confirm-vs-dismiss rate?" The data is in `audit_log` + `pending_policy_actions` already; aggregate views are a follow-on.
 
+### F23. PDS-side enforcement bridge & inbound XRPC gateway (v1.7)
+
+Two new subsystems share cairn-mod's existing storage / audit / label / recordAction layers but otherwise sit in distinct module trees: an **outbound** `pds_admin` bridge that calls into the operator's PDS after a moderation action records, and an **inbound** `xrpc_gateway` that accepts proxied `tools.ozone.*` calls and forwarded `com.atproto.moderation.createReport` from the operator's PDS or its users' clients. v1.7 ships bsky-PDS support only; the `PdsAdminBackend` trait abstraction reserves the path for Aurora-Locus (v1.8) and any future Rust-PDS without the operator caring which is in the loop. The architectural contract: every PDS-side enforcement event hash-chains into the same audit log as cairn-mod's existing actions and labels, every inbound recordAction lands through the canonical §F20-F22 pipeline, and the two halves share storage but are otherwise decoupled — operators running v1.7 with `[pds_admin]` and `[xrpc_gateway]` both omitted (or both `enabled = false`) get unchanged v1.6 behavior. The architectural-decisions doc at `.design-notes/v1_7-architectural-decisions.md` captures the A1-A15 reasoning trail behind every design call below.
+
+#### F23.0. Compatibility frame
+
+cairn-mod's value proposition is being the moderation service that doesn't care which PDS the operator brought. Today's audience is bsky-PDS (the spec steward, where new ATProto extensions land first) but the trait abstraction preserves the path for Aurora-Locus, future cairn-pds, and any other Rust-PDS that adopts the `tools.ozone.*` proxy convention. The temporal asymmetry is acknowledged: bsky-PDS's extensions are cheap to adopt; other PDSes diverge in places, and cairn-mod absorbs those divergences as adapter code without operator-visible churn. Divergences may close as ecosystems mature; the trait abstraction is what makes that convergence non-disruptive.
+
+The two-half framing — outbound `pds_admin` (cairn-mod calls into the operator's PDS) and inbound `xrpc_gateway` (the operator's PDS or its clients call into cairn-mod) — is the durable architectural shape. Treating these as one "backend abstraction" would force the trait into incoherent shape: outbound is a narrow set of mutation methods aimed at one PDS, inbound is a closed-loop authorization gate aimed at multiple proxied caller-sets. The two share `audit_log` (§F10), the recordAction pipeline (§F20-F22), and the label distribution surface (§F4); they share nothing else.
+
+#### F23.1. Outbound: `pds_admin` bridge
+
+The `PdsAdminBackend` trait is the abstraction point. Five methods:
+
+```rust
+async fn takedown_account(&self, did: &str, reason: &str, notes: Option<&str>)
+    -> Result<BackendActionId, BackendError>;
+async fn suspend_account(&self, did: &str, reason: &str, duration_days: Option<u32>, notes: Option<&str>)
+    -> Result<BackendActionId, BackendError>;
+async fn restore_account(&self, did: &str, prior_action_id: &BackendActionId, reason: &str)
+    -> Result<(), BackendError>;
+async fn apply_label(&self, subject: &Subject, val: &str, expires_days: Option<u32>)
+    -> Result<(), BackendError>;
+async fn negate_label(&self, subject: &Subject, val: &str)
+    -> Result<(), BackendError>;
+```
+
+**Five methods, deliberately.** Aurora-Locus exposes ~73 admin endpoints; targeting all of them is a v1.10+ concern. The five above cover what cairn-mod's existing strike / label / policy machinery (§F20-F22) actually produces. Adding methods is forward-compatible; removing them is breaking. **`negate_label` not `remove_label`** because Aurora-Locus's label model is bitemporal (accumulates with negation rows); naming the method `remove_label` would misrepresent what it means on Locus when v1.8 adds the impl. **`BackendActionId` is an opaque wrapper, not a string.** Aurora-Locus's `moderation_id` semantic could change; bsky-PDS's `updateSubjectStatus` doesn't return an id at all. Wrapping decouples cairn-mod's audit log from any specific backend's identifier shape.
+
+The `OzoneBackend` implementation calls `com.atproto.admin.updateSubjectStatus` on the configured bsky-PDS using **HTTP Basic with the operator's PDS admin password — not service-auth.** bsky-PDS's `tools.ozone.*` routes are *proxied to a configured Ozone host* — and cairn-mod **is** the Ozone-host on the receiving side; forwarding to itself would loop. The actually-implemented account-state mutation path on bsky-PDS is `com.atproto.admin.updateSubjectStatus` (POST, admin Basic), which survives as the maintenance surface for operators reaching into account state directly. Operator-facing implication: `[pds_admin.ozone]` carries `pds_url` + `admin_password_env`. **No service DID, no signing key, no JWT secret on the outbound side.**
+
+`OzoneBackend::apply_label` and `negate_label` return `BackendError::Unsupported`. cairn-mod's `subscribeLabels` (§F4) is *the* label distribution surface — subscribers including the Bluesky AppView consume labels from there directly. `OzoneBackend` calling `applyLabel` on the upstream PDS would be redundant in the bsky-PDS world (the labels arrive via subscription anyway) and architecturally wrong (it would create a duplicate emission path with its own audit-trail divergence). Reframe: labels are cairn-mod's outbound surface to the *network*; PDS-admin calls are cairn-mod's outbound surface to the *operator's account-state*. Two protocols, two audiences, no overlap. The `[pds_admin.action_map]` for the Ozone backend specifies only takedown / suspend / restore mappings; `warning` and `note` map to `"skip"`. Labels stay cairn-mod-native.
+
+The action-map config block mirrors §F21.1's `[label_emission]` table convention — operators who configured label emission in v1.5 already understand the "action type → backend method" mental model. See §F23.6 for the full block.
+
+**Audit-chain integration (§F10).** Every outbound `OzoneBackend` call writes a `pds_admin_audit` row that hash-chains into the unified audit chain alongside `audit_log`. The chain entry references both the cairn-mod-side action ID (the precipitating `recordAction` row) and the backend acknowledgment (success / failure / any returned identifier). This is the third observable surface alongside actions and labels — same observability discipline applies (§4.2 disclosure 5). **Failure-mode posture: fail loud, audit the failure, leave cairn-mod-side state committed.** If the backend call fails after the cairn-mod-side action committed, cairn-mod's view of reality and the PDS's view diverge until manual reconciliation. The operator decides — automatic retry is a v1.8 concern that wants real operator feedback to ground retry policy / backoff / dead-letter handling.
+
+**Startup probe.** At `cairn serve` startup, `OzoneBackend` issues a single non-mutating `GET /xrpc/com.atproto.server.describeServer` and logs the result. Failure does not block startup; success is logged at INFO with the detected PDS version. v1.8 evolves this into a typed `BackendCapabilities` return — capability negotiation when multiple backends require runtime routing — but v1.7's probe-as-side-effect is the operator-visible "your `[pds_admin.ozone].pds_url` is reachable and the admin password works" signal at boot.
+
+#### F23.2. Inbound: `xrpc_gateway`
+
+A new top-level module (`src/xrpc_gateway/`) sibling to the existing handler tree, with its own router. Separation is non-negotiable: the auth model is fundamentally different (ES256K user-signed JWTs minted by upstream PDSes on behalf of their users, not the existing service-auth shape from registered moderators). Co-locating would cross-pollinate auth code in ways that are hard to audit.
+
+The four v1.7 inbound NSIDs:
+
+| NSID | Method | Auth shape | Lands in |
+|------|--------|------------|----------|
+| `com.atproto.moderation.createReport` | POST | PDS-signed service-auth | Existing report inbox (§F11) |
+| `tools.ozone.moderation.emitEvent` | POST | User-signed service-auth | Existing recordAction pipeline (§F20) |
+| `tools.ozone.moderation.queryStatuses` | GET | User-signed service-auth | Read-only over moderation state (projected from `subject_actions` + `labels` + `reports`) |
+| `tools.ozone.moderation.queryEvents` | GET | User-signed service-auth | Read-only over audit log (projected from `audit_log` + `subject_actions`) |
+
+**The NSID allowlist is a hard-coded Rust enum, not config.** bsky-PDS does **zero NSID validation** before proxying — whatever the client puts in the URL is stamped verbatim into the JWT's `lxm` claim and forwarded. cairn-mod is the entire validation layer for proxied calls. Hard-coding the allowlist in code is defense-in-depth: an operator misconfiguration cannot accidentally widen the surface to NSIDs that were never reasoned about during cairn-mod's design. New NSIDs require a code change + recompile + redeploy. This is the right tradeoff for v1.7's tight surface (four endpoints); reconsider for v1.10+ as the surface grows toward full Ozone parity.
+
+Unrecognized NSIDs return **501 `MethodNotImplemented`** with the standard XRPC error envelope `{"error": "...", "message": "..."}` — the same shape bsky-PDS uses for stub-only handlers. This makes cairn-mod indistinguishable from a stock Ozone instance with stub-only handlers; no fingerprinting via distinctive error shapes. Method mismatches on allowlisted NSIDs (e.g., GET on `createReport`) return 405 `MethodNotAllowed` with the same envelope shape.
+
+bsky-PDS is the upstream that proxies these calls today. Future Rust-PDSes are expected to support the same `tools.ozone.*` proxy model and will work transparently with cairn-mod's gateway when they do.
+
+#### F23.3. Service-auth verification (`XrpcAuthService`)
+
+`XrpcAuthService` is a sibling to the existing `AuthContext` (§5.2), not an extension. Different security domain: `AuthContext` verifies JWTs from registered moderators (cairn-mod's labeler is the audience); `XrpcAuthService` verifies JWTs from arbitrary upstream PDSes and their users (cairn-mod's `xrpc_gateway` is the audience). The verification primitives — JWT parsing, ES256K signature check, DID resolution — are reused; the error taxonomy and HTTP status mapping fork.
+
+Verification rules per request:
+
+1. **Algorithm allowlist:** `alg === "ES256K"`. Reject anything else, especially `none` and HMAC algorithms.
+2. **Signature verification:** resolve `iss` → DID document → `#atproto` verification method → secp256k1 public key. Verify ECDSA signature against canonical JWT input.
+3. **Audience binding:** `aud` must equal `[xrpc_gateway].service_did`.
+4. **Method binding:** `lxm` must equal the request URL's NSID **and** be on the v1.7 allowlist (§F23.2). This is the only protection against NSID confusion since bsky-PDS doesn't pre-validate.
+5. **Expiry:** `exp > now`, with clock-skew tolerance ≤ 30 seconds. Observed JWT TTL on bsky-PDS is 60 seconds; tight tolerance is appropriate.
+6. **Replay defense:** `(iss, jti)` deduplicated over a 90-second window via the in-memory replay cache.
+
+The replay cache is **in-memory, single-instance, single-process.** cairn-mod restarts clear the cache. Single-instance scope is correct for v1.7's deployment model (single binary + SQLite, §F13); multi-instance replay coordination is enterprise-tier and deferred. The 90-second window covers the observed 60s TTL plus 30s clock-skew tolerance. Replay-detected requests return 400 `ExpiredToken` (matching bsky-PDS / ATProto convention for "credential is no longer accepted") rather than a more-specific `Replayed` code; minimal information leakage in wire envelopes.
+
+The replay middleware composes alongside auth and membership in a security-load-bearing layer order: **auth → membership → replay → handler.** Unauthenticated requests don't reach the membership table; unauthorized callers don't reach the replay cache. A would-be operator who later adds an attacker's DID to `xrpc_known_callers` won't see the attacker's first request rejected as a "replay" because the cache was never poisoned.
+
+#### F23.4. Trust tables: known callers vs trusted PDSes
+
+Two distinct tables answer two cryptographically distinct authorization questions:
+
+- **`xrpc_known_callers`** — moderator DIDs whose **proxied `tools.ozone.*` calls via their upstream PDS** cairn-mod accepts. The verification path: bsky-PDS's user mints a service-auth JWT (signed with their `#atproto` key); cairn-mod's auth middleware verifies the signature; the membership middleware checks the DID against this table.
+- **`xrpc_trusted_pdses`** — PDS DIDs whose **forwarded `com.atproto.moderation.createReport` calls** cairn-mod accepts. Per bsky-PDS findings §4.3, the PDS itself signs the forwarded request (the JWT's `iss` is the PDS, not the reporting user); the request body's `reportedBy` field carries the user's DID as an assertion the PDS makes on behalf of the user.
+
+Two tables, not one — a moderator's DID and their PDS's DID are different cryptographic identities with different authorities. Conflating them would create a confused trust model.
+
+Distinct from the existing `moderators` table (§5.2). `moderators` controls direct service-auth calls to cairn-mod (CLI, admin XRPC); `xrpc_known_callers` controls proxied calls from upstream PDSes. The two tables overlap heavily in practice — a moderator who uses bsky.app as their client routes through bsky-PDS proxy; the same moderator using `cairn moderator action` routes directly. The `cairn moderator add --with-xrpc-callers` convenience flag handles the common case in one CLI invocation (§F23.7).
+
+`xrpc_trusted_pdses` represents a real **trust-boundary expansion** vs. the existing report intake (§F11), which authenticates each reporter directly via service-auth. Per the threat-model entry §4.9: operator-trusted upstream PDSes are transitively trusted to assert the identity of users they forward reports for. A compromised or malicious upstream PDS could submit reports under arbitrary user DIDs. Mitigation: only add upstream PDSes operators trust the operation of; removing a PDS from the table immediately stops accepting forwarded reports from it (the membership check runs per request).
+
+**CLI-only management for v1.7.** Bootstrap problem: the XRPC admin endpoints (§F12) are themselves auth'd via cairn-mod's existing service-auth, which is the same path being extended in §F23.3. Granting the first XRPC caller via XRPC is circular. CLI-only for v1.7; XRPC management of these tables deferred to v1.8 or v1.9.
+
+#### F23.5. Inbound action integration + projection policy
+
+When `tools.ozone.moderation.emitEvent` arrives, the gateway translates the wire event into a cairn-mod-internal `recordAction` call (per A14: "one canonical action-recording path"). Strike accounting, decay, label emission per `[label_emission]`, policy automation per `[policy_automation]`, and the new `pds_admin` bridge all apply uniformly — the XRPC gateway is a transport layer feeding the existing pipeline; it must not maintain a parallel state model.
+
+Event-type subset for v1.7:
+
+| Ozone event type | Maps to cairn-mod action |
+|------------------|--------------------------|
+| `modEventLabel` | recordAction(`warning`) with `reason_codes = createLabelVals` |
+| `modEventTakedown` | recordAction(`takedown`) — or recordAction(`temp_suspension`) when `durationInHours` is set |
+| `modEventReverseTakedown` | revoke_action of the most-recent unrevoked takedown for the subject |
+| `modEventComment` | recordAction(`note`) with `notes = comment` |
+
+Other event types (`modEventEscalate`, `modEventResolveAppeal`, `modEventMute`, `modEventEmail`) return 400 `InvalidRequest` naming the unsupported `$type`. They land in v1.8+ alongside review-queue and team-management features.
+
+**Defense-in-depth on `createdBy`.** The wire shape carries a `createdBy` DID; cairn-mod enforces `createdBy == claims.iss`. The auth middleware already proved who the caller is; the wire field is preserved for Ozone-client compatibility but `claims.iss` is the authoritative actor.
+
+When `com.atproto.moderation.createReport` arrives (PDS-signed per §F23.4), it lands in the existing `reports` table for the §F11 / §F12 / §F17 resolution surface to handle unchanged. The lexicon's `reasonType` is stored verbatim — cairn-mod's `reports.reason_type` already uses lexicon `$type` strings, no translation table needed. The `reportedBy` field is taken verbatim from the request body (transitively trusted per §F23.4).
+
+**Projection policy for the read endpoints.** The two read NSIDs project cairn-mod's internal data model into Ozone's read-side wire shapes. The translation logic lives in `src/xrpc_gateway/handlers/projections/` as pure functions; the field-by-field decisions are surfaceable in one file per endpoint.
+
+`queryStatuses` projects (subject_actions + labels + reports) → `subjectStatusView`:
+
+| Ozone field | cairn-mod source | Notes |
+|---|---|---|
+| `id` | `subject_actions.id` of the most-recent action | cairn-mod has no "status row" concept; the most-recent action's id is a stable per-subject identifier within a deployment |
+| `subject` | `subject_did` + optional `subject_uri` | `repoRef` for account-level, `strongRef` for record-level |
+| `subjectBlobCids` | not tracked | Always empty `[]` |
+| `updatedAt` | most-recent action's `created_at` | RFC-3339 Z |
+| `createdAt` | earliest action's `created_at` | RFC-3339 Z |
+| `reviewState` | constant `tools.ozone.moderation.defs#reviewClosed` | cairn-mod has no review-state lifecycle |
+| `comment` | most-recent action's `notes` | Optional |
+| `lastReviewedBy` | most-recent action's `actor_did` | DID |
+| `lastReviewedAt` | most-recent action's `created_at` | Same value as `updatedAt` for v1.7 |
+| `lastReportedAt` | `MAX(reports.created_at)` for the subject | RFC-3339 already (the reports table stores it as TEXT) |
+| `takendown` | EXISTS unrevoked takedown action_type | Note: cairn-mod has no `reverse_takedown` action_type — revocation sets `revoked_at` on the original row; the fold is a row-level test |
+| `appealed` | constant `false` | No appeal flow in v1.7 |
+| `tags` | active label vals (most-recent-per-`(uri, val)` has `neg = 0`, `src = service_did`) | Same active-label semantic as `crate::server::strike_state::load_active_labels` |
+
+`queryEvents` projects (audit_log joined with subject_actions) → `modEventView`. **cairn-mod-internal audit entries are filtered out** — the Ozone surface only sees the moderator-facing subset; operators retain full visibility via `cairn moderator events` (§F23.7) and `cairn audit verify`.
+
+Filtered-out audit actions (10, plus `pds_admin_audit` rows):
+
+`label_applied`, `label_negated` (admin-direct label emission, not action-driven); `pending_policy_action_confirmed`, `pending_policy_action_dismissed` (policy automation, cairn-mod-specific); `report_resolved`, `reporter_flagged`, `reporter_unflagged` (report-resolution surface); `retention_sweep` (operational, no subject); `service_record_published`, `service_record_unpublished` (deployment lifecycle). `pds_admin_audit` rows live in a sibling table and never surface here.
+
+Surfaced (Ozone-eligible) mapping:
+
+| cairn-mod row | Ozone event `$type` | Notes |
+|---|---|---|
+| `subject_action_recorded` (action_type=warning) | `modEventLabel` | `createLabelVals` = the action's `reason_codes` |
+| `subject_action_recorded` (action_type=note) | `modEventComment` | `comment` = the action's `notes` |
+| `subject_action_recorded` (action_type=takedown) | `modEventTakedown` | No `durationInHours` |
+| `subject_action_recorded` (action_type=temp_suspension) | `modEventTakedown` | `durationInHours` parsed from the action's `duration` (ISO-8601, typically `PT{h}H`) |
+| `subject_action_recorded` (action_type=indef_suspension) | `modEventTakedown` | No `durationInHours` (Ozone has no separate indefinite-suspension wire shape) |
+| `subject_action_revoked` (revoked takedown / suspension) | `modEventReverseTakedown` | `comment` = the revocation audit's `revoked_reason` |
+| `subject_action_revoked` (revoked warning / note) | (filter out) | Ozone has no "reverse comment" / "reverse label" event |
+
+Documented limitations operators should understand: `subjectBlobCids` is always empty (cairn-mod doesn't track blob CIDs); `appealed` is always `false` (no appeal flow); `reviewState` is always `#reviewClosed`; `strongRef.cid` is omitted on record-level subjects (cairn-mod doesn't store action-time CIDs — documented v1.7 lexicon non-conformance, resolution deferred to a future cycle).
+
+#### F23.6. Operator config
+
+Two new top-level config blocks. Both default to `enabled = false` (or absent → disabled), so operators upgrading from v1.6 see no behavior change.
+
+```toml
+[pds_admin]
+enabled = true
+# v1.7 ships only ozone; v1.8 introduces backend = "ozone" | "locus"
+
+[pds_admin.ozone]
+pds_url = "https://bsky.example.com"
+admin_password_env = "CAIRN_BSKY_ADMIN_PW"
+
+# Per-action-type mapping. Same shape convention as §F21.1's [label_emission].
+[pds_admin.action_map]
+takedown         = "takedown_account"
+indef_suspension = "takedown_account"   # bsky-PDS conflates these via updateSubjectStatus
+temp_suspension  = "suspend_account"
+warning          = "skip"
+note             = "skip"
+
+[xrpc_gateway]
+enabled = true
+service_did = "did:web:cairn.example.com"
+replay_cache_ttl_seconds = 90
+clock_skew_tolerance_seconds = 30
+```
+
+**Per-backend subsection (`[pds_admin.ozone]`), not flat.** v1.8's `[pds_admin.locus]` will need different keys (JWT secret env var instead of admin password). Establishing the subsection convention now means v1.8 doesn't refactor the config schema. **`_env` suffix convention for secrets** — env var indirection rather than TOML literals; secrets are operator-specific deploy-time values that don't belong in checked-in config. The `[policy_automation]` rule names embed vocabulary in TOML, but secrets aren't vocabulary.
+
+**No `backend = ...` selector in v1.7.** With one backend, the selector would be vestigial. v1.8 introduces it cleanly when there's a second option. Mutual-exclusion rationale: the PDS itself is the community boundary; an operator running both Aurora-Locus and bsky-PDS is running two communities and should run two cairn-mod instances. Operators with multiple PDSes in one community (e.g., Locus federation) all point to the same cairn-mod, which is inbound-multi-tenancy, not outbound-multi-backend.
+
+#### F23.7. Operator-tier CLI surface
+
+Five commands (the §A12 surface plus #99's two additions):
+
+| Command | Purpose |
+|---------|---------|
+| `cairn pds-admin {takedown,suspend,restore} <did>` | Manual escape hatch for the PDS-admin bridge. HTTP-routed via the canonical recordAction / revokeAction admin XRPC; the writer's post-commit dispatch fires the configured backend automatically. **Does not bypass strike accounting** — manual takedowns update strike state the same as policy-driven ones. Pre-flights `[pds_admin].enabled` and surfaces the resulting `pds_admin_audit` outcome. |
+| `cairn xrpc-callers {add,revoke,list} <did>` | Manage `xrpc_known_callers`. Direct DB; CLI-only per §F23.4. Revocation is irreversible at the row level — the row's `revoked_at` flips and stays; re-add of the same DID writes a new row. |
+| `cairn xrpc-pdses {add,revoke,list} <did>` | Manage `xrpc_trusted_pdses`. Same shape and posture as `xrpc-callers`. |
+| `cairn moderator add <did> --with-xrpc-callers` | Convenience flag that adds the moderator DID to `xrpc_known_callers` in the same invocation. `--by` records the operator running the command. Idempotent at the application layer (pre-checks `is_known_caller` to skip the duplicate add). Plain `cairn moderator add` is unchanged. |
+| `cairn moderator events [--ozone-only]` | Operator-tier audit-events view that mirrors `tools.ozone.moderation.queryEvents` (§F23.5) but exposes the FULL cairn-mod audit_log vocabulary. Default mode renders Ozone-eligible rows in projected `modEventView` shape and cairn-mod-internal rows in a generic shape, intermixed in chronological order. **`--ozone-only` is the canonical bridge between operator-tier and Ozone-tier views** — operators wanting to verify "what an external moderator sees through `queryEvents`" pass `--ozone-only` and compare. |
+
+The "manual escape hatch vs production path" distinction is durable vocabulary worth carrying forward. Production path is policy automation + label emission firing the bridge automatically; the CLI is the one-off operator escalation surface and the Phase B verification surface.
+
+#### F23.8. Reserved reason codes
+
+Three reserved reason codes operators must declare in `[moderation_reasons]` (or fail at first use):
+
+| Reason code | Surface | Fires when |
+|---|---|---|
+| `policy-threshold` | `[policy_automation]` rules | Operator omits `reason_codes` on a rule; the resolver substitutes this default. Pre-v1.7 (§F22.1). |
+| `xrpc-gateway-default` | `xrpc_gateway` inbound `emitEvent` | Inbound `modEventTakedown` / `modEventComment` / `modEventReverseTakedown` events that don't carry natural `reason_codes` (only `modEventLabel` provides them via `createLabelVals`). |
+| `pds-admin-cli` | `cairn pds-admin {takedown,suspend}` | Manual escalations where the operator omits `--reason`. |
+
+All three are hyphenated per the §F22.1 reason-code naming convention (`[a-z0-9-]`). Operators not declaring a reserved code will see the underlying surface fail with `ReasonNotFound` on first use; the failure is loud and operator-actionable. Operators wanting to override behavior pass an explicit `--reason` (CLI) or `createLabelVals` (gateway) argument.
+
+#### F23.9. Operator-facing invariants
+
+The accumulated v1.7 invariants operators must understand to deploy and operate the new surfaces correctly:
+
+- **Audit chain ordering invariant.** The unified hash chain across `audit_log`, `pds_admin_audit`, `xrpc_known_callers`, `xrpc_trusted_pdses` requires monotonic timestamps. cairn-mod's writer produces these naturally. **Manual table inserts or out-of-order backfills fork the chain** and cause `cairn audit verify` to report divergence at the first mis-ordered row.
+- **Strict-monotonic timestamp enforcement on collaboration tables.** CLI write operations on `xrpc_known_callers` / `xrpc_trusted_pdses` use `added_at = max(epoch_ms_now(), max_existing_chain_ts + 1)` to prevent same-millisecond chain collisions. Two CLI invocations within the same wall-clock millisecond produce strictly-increasing timestamps; the prev_hash chain stays well-defined.
+- **Suspension duration encoding.** `OzoneBackend::suspend_account` encodes `duration_days` into the bsky-PDS `takedown.ref` field via the `cairn-mod:action_id=N:reason=R:duration_days=D` schema. Sub-day durations (e.g., `PT12H`) round to 0 days in this encoding — the bsky-PDS `ref` field is forensic-readable text only, and cairn-mod-side suspension state (`expires_at` epoch-ms) is the canonical source. This is forensic-readability only; cairn-mod-side enforcement is unaffected.
+- **`strongRef.cid` omission.** Record-level subjects in `subjectStatusView` and `modEventView` omit `cid` because cairn-mod doesn't track action-time CIDs on `subject_actions`. Documented v1.7 lexicon non-conformance; resolution requires schema work and is deferred to a future cycle.
+- **Replay cache scope.** In-memory, per-process, single-instance. cairn-mod restarts clear the cache. A running attacker's previously-replayed JWT becomes acceptable again post-restart, until the JWT's own `exp` passes (60s on bsky-PDS). Multi-instance replay coordination is enterprise-tier and deferred. Single-instance is the v1.7 deployment model (§F13).
+- **Filter-out policy on `queryEvents`.** External Ozone clients see only the Ozone-eligible subset of cairn-mod's audit log (§F23.5). Operators wanting the full view use `cairn moderator events` (without `--ozone-only`); the CLI surface and `cairn audit verify` remain the operator-tier views over the complete chain.
+
+#### F23.10. Patterns established for v1.8+
+
+Patterns from v1.7 that v1.8's LocusBackend (and beyond) inherit:
+
+- **The `PdsAdminBackend` trait is the abstraction point.** `LocusBackend` implements the same trait; `[pds_admin]` gains a `backend = "ozone" | "locus"` selector and a `[pds_admin.locus]` subsection.
+- **The "manual escape hatch vs production path" vocabulary** for outbound surfaces. v1.8 docs should reuse the distinction; the CLI's `cairn pds-admin` namespace works for any backend without renaming.
+- **The "operator-tier vs Ozone-tier" CLI/gateway split.** v1.8's LocusBackend doesn't change this; the `xrpc_gateway` surface stays bsky-PDS-shape regardless of which backend serves the outbound side.
+- **Constants pinned by length-asserts.** `OZONE_ELIGIBLE_ACTIONS.len() == 2`, `ACCEPTED_REASON_TYPES.len() == 6`, `XRPC_GATEWAY_DEFAULT_REASON_CODE == "xrpc-gateway-default"` — pinned tests force a deliberate decision when expanding the surface. Carry the pattern into v1.8.
+- **Projection submodule pattern for read endpoints.** `src/xrpc_gateway/handlers/projections/` holds pure-function field-by-field translations from cairn-mod's internal model to Ozone's wire shapes. v1.8+ inbound read NSIDs slot in as sibling modules; the design-heavy decisions stay surfaceable in one file per endpoint.
+
+#### F23.11. Cross-references
+
+- **§4.9** — new threat-model entry for transitive trust of upstream PDSes for `reportedBy` claims (§F23.4 / A10).
+- **§4.2 disclosure 5** — PDS-side enforcement is a third observable surface alongside actions and labels; same observability discipline.
+- **§5.2** — the existing service-auth path. `XrpcAuthService` is sibling, not extension.
+- **§F4** — `subscribeLabels` is *the* label distribution surface; `OzoneBackend::apply_label` returns `Unsupported` to preserve that boundary.
+- **§F10** — audit_log; `pds_admin_audit` (#85) and `xrpc_known_callers` / `xrpc_trusted_pdses` (#94) all hash-chain into the unified chain. `cairn audit verify` walks all four tables in chain order (#88).
+- **§F11** — report intake. Inbound `createReport` lands in the existing inbox; resolution flow is unchanged.
+- **§F12** — admin XRPC surface. cairn-mod's existing admin endpoints are unchanged by v1.7; `xrpc_known_callers` / `xrpc_trusted_pdses` are CLI-only per §A12 (XRPC management deferred).
+- **§F17** — CLI report-resolution surface. Unchanged; consumes inbound-forwarded reports the same as user-direct ones.
+- **§F18** — operator-tier audit log CLI. `cairn moderator events` (§F23.7) is a peer surface — both walk audit_log; the events command focuses on the moderation-event projection surface, the audit command on the raw chain.
+- **§F20-F22** — recordAction / label emission / policy automation pipelines. Inbound `emitEvent` flows through unchanged (§A14).
+- **§F21.1** — `[label_emission]` table convention. `[pds_admin.action_map]` mirrors the same operator mental model.
+- **§F22.1** — reason-code naming convention (`[a-z0-9-]`, no underscores). All v1.7 reserved reason codes follow it.
+- **§18 future roadmap** — v1.7 entry marked done; v1.8+ trajectory restated below.
+- **§A1-§A15 architectural decisions** — `.design-notes/v1_7-architectural-decisions.md` captures the decision substrate that produced everything above. Future-cycle work (LocusBackend, multi-backend selection, capability negotiation, XRPC management of collaboration tables) references the deferred-decisions list at the bottom of that file.
+
 ## 8. Lexicons
 
 cairn-mod defines custom lexicons in `lexicons/tools/cairn/admin/*.json`.
