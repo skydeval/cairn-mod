@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_type, actor_did FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "actor_did",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "95d616e30937bd8890751e394c8f9aa8e36269935b5c0d13f39d3b401c3eae83"
+}

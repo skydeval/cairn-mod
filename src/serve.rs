@@ -249,11 +249,16 @@ where
             replay_cache_ttl_seconds = gateway_cfg.replay_cache_ttl.as_secs(),
             "xrpc_gateway enabled: routes mounted at /xrpc/* (auth + membership + replay all wired; handler bodies pending #95-#98)"
         );
+        let xrpc_handler_state = crate::xrpc_gateway::XrpcGatewayState {
+            writer: writer.clone(),
+            pool: pool.clone(),
+        };
         router = router.merge(crate::xrpc_gateway::build_router(
             gateway_cfg,
             xrpc_auth,
             pool.clone(),
             xrpc_replay_cache,
+            xrpc_handler_state,
         ));
     }
 

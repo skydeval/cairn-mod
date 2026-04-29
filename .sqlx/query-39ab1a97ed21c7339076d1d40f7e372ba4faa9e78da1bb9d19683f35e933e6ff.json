@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_type, duration FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "duration",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "39ab1a97ed21c7339076d1d40f7e372ba4faa9e78da1bb9d19683f35e933e6ff"
+}

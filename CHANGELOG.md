@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [xrpc_gateway] NSID allowlist enum + per-handler dispatch stubs + XRPC-shape 405 envelope (#92)
 - [xrpc_gateway] `XrpcAuthService` + tower middleware: ATProto service-auth JWT verification (ES256K, claim validation; replay deferred to #94) (#93)
 - [xrpc_gateway] Replay cache + `xrpc_known_callers` / `xrpc_trusted_pdses` membership tables + middleware composition + CLI subcommands; audit-verify extended to walk 4 tables (#94)
+- [xrpc_gateway] `tools.ozone.moderation.emitEvent` handler body: dispatches `modEventLabel` / `modEventTakedown` / `modEventReverseTakedown` / `modEventComment` into the canonical `record_action` / `revoke_action` pipeline (§A14). Enforces `createdBy == claims.iss` per §A8.1 defense-in-depth. Reserved `xrpc-gateway-default` reason code documented for events without natural `reason_codes` (operators must declare in `[moderation_reasons]`). Unsupported `$type` values (Ozone has many beyond cairn-mod's four) return 400 `InvalidRequest` naming the unsupported type. (#95)
 
 ### Fixed
 - `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).

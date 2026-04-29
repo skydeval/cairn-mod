@@ -38,6 +38,7 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{Method, StatusCode};
@@ -49,6 +50,7 @@ use sqlx::{Pool, Sqlite};
 use crate::xrpc_gateway::Nsid;
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
+use crate::xrpc_gateway::handlers::{XrpcGatewayState, emit_event};
 use crate::xrpc_gateway::middleware::{
     xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
 };
@@ -80,6 +82,7 @@ pub fn build_router(
     auth_service: Arc<XrpcAuthService>,
     pool: Pool<Sqlite>,
     replay_cache: Arc<XrpcReplayCache>,
+    handler_state: XrpcGatewayState,
 ) -> Router {
     // Layer composition order is **security-load-bearing**. Per
     // §A8.1: auth runs first (innermost), membership second,
@@ -124,6 +127,7 @@ pub fn build_router(
     // then by auth. Request hits auth first; auth → membership
     // → replay → handler. ✓
     build_routes_only(config)
+        .layer(Extension(handler_state))
         .layer(axum::middleware::from_fn_with_state(
             replay_cache,
             xrpc_replay_middleware,
@@ -185,8 +189,14 @@ async fn handle_create_report() -> Response {
     method_not_implemented_response(Nsid::ComAtprotoModerationCreateReport.as_path_segment())
 }
 
-async fn handle_emit_event() -> Response {
-    method_not_implemented_response(Nsid::ToolsOzoneModerationEmitEvent.as_path_segment())
+// `tools.ozone.moderation.emitEvent` — body in
+// [`crate::xrpc_gateway::handlers::emit_event`] (#95).
+async fn handle_emit_event(
+    state: Extension<XrpcGatewayState>,
+    claims: Extension<crate::xrpc_gateway::XrpcAuthClaims>,
+    body: axum::body::Bytes,
+) -> Response {
+    emit_event::handler(state, claims, body).await
 }
 
 async fn handle_query_statuses() -> Response {
@@ -334,10 +344,16 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_nsids_return_501_with_correct_method() {
+        // emitEvent is excluded post-#95: its handler is a real
+        // body that requires `Extension<XrpcGatewayState>` +
+        // `Extension<XrpcAuthClaims>` from the layered router.
+        // build_routes_only does not provide those, so emitEvent
+        // would 500 here. Through-the-router emitEvent shape tests
+        // live in the integration test file `tests/xrpc_gateway_emit_event.rs`
+        // and the layered tests below.
         let url = spawn_for_test(build_routes_only(fixture_config())).await;
         let cases: &[(reqwest::Method, &str)] = &[
             (reqwest::Method::POST, "com.atproto.moderation.createReport"),
-            (reqwest::Method::POST, "tools.ozone.moderation.emitEvent"),
             (reqwest::Method::GET, "tools.ozone.moderation.queryStatuses"),
             (reqwest::Method::GET, "tools.ozone.moderation.queryEvents"),
         ];
@@ -541,7 +557,8 @@ mod tests {
         let auth = fx::build_service();
         let pool = fx::build_test_pool().await;
         let cache = fx::build_replay_cache();
-        let router = build_router(fx::fixture_config(), auth, pool, cache);
+        let state = fx::build_handler_state(pool.clone()).await;
+        let router = build_router(fx::fixture_config(), auth, pool, cache, state);
         spawn_for_test(router).await
     }
 
@@ -609,7 +626,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_jwt_for_known_nsid_reaches_handler_stub_501() {
+    async fn valid_jwt_for_known_nsid_reaches_handler_with_empty_body_returns_400() {
+        // Post-#95: emitEvent has a real handler. Empty body parses
+        // as malformed JSON; handler returns 400 InvalidRequest.
+        // Pre-#95 this used to assert 501 from the stub; the test
+        // still proves "auth passed and the request reached the
+        // handler", just with a different shape.
         let url = spawn_authed().await;
         let jwt = fx::build_jwt(
             &fx::valid_claims("tools.ozone.moderation.emitEvent"),
@@ -621,13 +643,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        // Auth passes, request reaches the handler, handler is
-        // still a #92 stub returning MethodNotImplemented.
-        assert_eq!(res.status().as_u16(), 501);
+        assert_eq!(res.status().as_u16(), 400);
         let body: serde_json::Value = res.json().await.unwrap();
         assert_eq!(
             body.get("error").and_then(|v| v.as_str()),
-            Some("MethodNotImplemented")
+            Some("InvalidRequest")
         );
     }
 
@@ -737,7 +757,8 @@ mod tests {
     async fn spawn_with_pool(pool: sqlx::Pool<sqlx::Sqlite>) -> String {
         let auth = fx::build_service();
         let cache = fx::build_replay_cache();
-        let router = build_router(fx::fixture_config(), auth, pool, cache);
+        let state = fx::build_handler_state(pool.clone()).await;
+        let router = build_router(fx::fixture_config(), auth, pool, cache, state);
         spawn_for_test(router).await
     }
 
@@ -752,8 +773,11 @@ mod tests {
 
     #[tokio::test]
     async fn known_caller_in_table_can_call_emit_event() {
-        // Issuer is in xrpc_known_callers. emitEvent reaches the
-        // handler stub (501).
+        // Issuer is in xrpc_known_callers. emitEvent passes
+        // membership and reaches the handler. With an empty body
+        // the handler returns 400 InvalidRequest (post-#95); the
+        // important assertion is that membership did NOT
+        // short-circuit at 403.
         let pool = empty_pool().await;
         add_known_caller(&pool, fx::ISSUER_DID, Some("test"), "did:plc:m")
             .await
@@ -769,7 +793,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(res.status().as_u16(), 501);
+        assert_eq!(res.status().as_u16(), 400);
     }
 
     #[tokio::test]
@@ -884,8 +908,12 @@ mod tests {
     #[tokio::test]
     async fn replay_second_request_with_same_jti_returns_400_expiredtoken() {
         // Membership-allowed caller; valid JWT; but replayed.
-        // First call: 501 (passes through to handler stub).
-        // Second call (same jti): 400 ExpiredToken.
+        // First call: passes through to the handler. Body is empty
+        // so the handler returns 400 InvalidRequest (post-#95) —
+        // but the replay cache is updated regardless because the
+        // middleware records the jti BEFORE handing off to the
+        // handler. Second call (same jti): 400 ExpiredToken from
+        // the replay middleware.
         let pool = empty_pool().await;
         add_known_caller(&pool, fx::ISSUER_DID, None, "did:plc:m")
             .await
@@ -902,7 +930,12 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(res1.status().as_u16(), 501, "first call passes through");
+        assert_eq!(res1.status().as_u16(), 400, "first call reaches handler");
+        let body1: serde_json::Value = res1.json().await.unwrap();
+        assert_eq!(
+            body1.get("error").and_then(|v| v.as_str()),
+            Some("InvalidRequest")
+        );
 
         let res2 = client()
             .post(format!("{url}/xrpc/tools.ozone.moderation.emitEvent"))
@@ -932,7 +965,8 @@ mod tests {
             .unwrap();
         let auth = fx::build_service();
         let cache = Arc::new(XrpcReplayCache::new(StdDuration::from_secs(90)));
-        let router = build_router(fx::fixture_config(), auth, pool, cache.clone());
+        let state = fx::build_handler_state(pool.clone()).await;
+        let router = build_router(fx::fixture_config(), auth, pool, cache.clone(), state);
         let url = spawn_for_test(router).await;
 
         // No auth header → 401. Cache untouched.
@@ -955,7 +989,14 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(res2.status().as_u16(), 501);
+        // 400 InvalidRequest (handler reached) — cache wasn't
+        // poisoned by the prior 401. ExpiredToken would mean replay.
+        assert_eq!(res2.status().as_u16(), 400);
+        let body: serde_json::Value = res2.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InvalidRequest")
+        );
     }
 
     #[tokio::test]
@@ -992,10 +1033,18 @@ mod tests {
             .send()
             .await
             .unwrap();
+        // Post-#95: handler returns 400 InvalidRequest for an
+        // empty body. The important assertion is "not 400
+        // ExpiredToken" — that would indicate a poisoned cache.
         assert_eq!(
             res2.status().as_u16(),
-            501,
+            400,
             "after grant, same jti should pass through (cache wasn't poisoned)"
+        );
+        let body: serde_json::Value = res2.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("InvalidRequest")
         );
     }
 

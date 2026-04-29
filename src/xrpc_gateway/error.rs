@@ -59,6 +59,29 @@ pub enum XrpcGatewayError {
         /// HTTP method the request actually used.
         method: String,
     },
+
+    /// Handler-level rejection of a structurally-parsed request:
+    /// malformed JSON body, unsupported event subtype, `createdBy`
+    /// not equal to `claims.iss`, a Takedown reversal targeting a
+    /// subject with no active takedown, etc. Caller gets a 400
+    /// envelope with code `InvalidRequest`; the carried message is
+    /// the operator-facing detail.
+    ///
+    /// Per #95 (and following), this variant is per-handler-flavored
+    /// — the gateway's auth / membership / replay layers have their
+    /// own variants ([`XrpcAuthError`], membership's wire envelope)
+    /// and don't surface as `InvalidRequest`.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+
+    /// Catch-all for handler-internal failures the operator can't
+    /// fix from the call site (writer task shut down, DB query
+    /// failure, JSON serialization of the response envelope, etc).
+    /// Caller gets a 500 envelope with code `InternalServerError`;
+    /// cairn-mod logs the underlying cause at ERROR for operator
+    /// triage.
+    #[error("internal server error")]
+    InternalServerError,
 }
 
 /// Errors from inbound JWT verification (#93, §A8).

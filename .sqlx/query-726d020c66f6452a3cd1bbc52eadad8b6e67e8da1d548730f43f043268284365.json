@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT action_type, notes FROM subject_actions WHERE id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "action_type",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "notes",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "726d020c66f6452a3cd1bbc52eadad8b6e67e8da1d548730f43f043268284365"
+}

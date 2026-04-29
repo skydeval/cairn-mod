@@ -166,3 +166,77 @@ pub fn build_replay_cache() -> Arc<crate::xrpc_gateway::XrpcReplayCache> {
         Duration::from_secs(90),
     ))
 }
+
+/// Build an [`crate::xrpc_gateway::XrpcGatewayState`] suitable for
+/// through-the-router tests. Spawns a writer task with disposable
+/// defaults so `record_action` / `revoke_action` calls execute
+/// against a real SQLite pool.
+///
+/// `pool` should typically come from [`build_test_pool`] (or
+/// another caller-controlled pool when the test wants to seed
+/// membership tables specifically). Vocabulary is built via the
+/// same `Config::from_value` round-trip that
+/// `crate::moderation::strike::tests::vocab_with` uses, with
+/// [`crate::xrpc_gateway::XRPC_GATEWAY_DEFAULT_REASON_CODE`] +
+/// "spam" + "harassment" preloaded so the gateway handler's
+/// fallback reason resolves and the integration tests can map
+/// label vals 1:1.
+pub async fn build_handler_state(
+    pool: sqlx::Pool<sqlx::Sqlite>,
+) -> crate::xrpc_gateway::XrpcGatewayState {
+    let priv_bytes = hex::decode(TEST_PRIV_HEX).unwrap();
+    let key = crate::signing_key::SigningKey::from_bytes(priv_bytes.try_into().unwrap());
+
+    let reason_vocabulary = test_vocab(&[
+        crate::xrpc_gateway::XRPC_GATEWAY_DEFAULT_REASON_CODE,
+        "spam",
+        "harassment",
+    ]);
+    let strike_policy = crate::moderation::policy::StrikePolicy::defaults();
+    let label_emission_policy = crate::labels::policy::LabelEmissionPolicy::defaults();
+    let policy_automation_policy = crate::policy::automation::PolicyAutomationPolicy::defaults();
+
+    let writer = crate::writer::spawn(
+        pool.clone(),
+        key,
+        SERVICE_DID.to_string(),
+        None,
+        crate::server::RetentionConfig::default(),
+        reason_vocabulary,
+        strike_policy,
+        label_emission_policy,
+        policy_automation_policy,
+    )
+    .await
+    .expect("spawn test writer");
+    crate::xrpc_gateway::XrpcGatewayState { writer, pool }
+}
+
+/// Build a [`crate::moderation::reasons::ReasonVocabulary`] containing
+/// `entries` (each becomes a non-severe weight-1 entry). Goes through
+/// `Config::from_config` so the parser path is exercised — same shape
+/// `crate::moderation::strike::tests::vocab_with` uses.
+fn test_vocab(entries: &[&str]) -> crate::moderation::reasons::ReasonVocabulary {
+    let map: serde_json::Map<String, serde_json::Value> = entries
+        .iter()
+        .map(|id| {
+            (
+                (*id).to_string(),
+                serde_json::json!({
+                    "base_weight": 1,
+                    "severe": false,
+                    "description": "test fixture",
+                }),
+            )
+        })
+        .collect();
+    let v = serde_json::json!({
+        "service_did": SERVICE_DID,
+        "service_endpoint": "https://labeler.example",
+        "db_path": "/var/lib/cairn/cairn.db",
+        "signing_key_path": "/etc/cairn/signing-key.hex",
+        "moderation_reasons": serde_json::Value::Object(map),
+    });
+    let cfg: crate::config::Config = serde_json::from_value(v).expect("test config deserializes");
+    crate::moderation::reasons::ReasonVocabulary::from_config(&cfg).expect("test vocab")
+}

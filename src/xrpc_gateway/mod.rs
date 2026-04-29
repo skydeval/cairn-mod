@@ -28,6 +28,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod handlers;
 pub mod membership;
 pub mod middleware;
 pub mod nsid;
@@ -46,6 +47,8 @@ pub(crate) mod test_fixtures;
 pub use auth::{XrpcAuthClaims, XrpcAuthService};
 pub use config::{XrpcGatewayConfig, XrpcGatewayConfigToml};
 pub use error::{XrpcAuthError, XrpcGatewayError};
+pub use handlers::XrpcGatewayState;
+pub use handlers::emit_event::XRPC_GATEWAY_DEFAULT_REASON_CODE;
 pub use membership::{
     MembershipRow, add_known_caller, add_trusted_pds, is_known_caller, is_trusted_pds,
     list_known_callers, list_trusted_pdses, revoke_known_caller, revoke_trusted_pds,
