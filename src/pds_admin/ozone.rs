@@ -395,24 +395,152 @@ impl PdsAdminBackend for OzoneBackend {
         ))
     }
 
+    /// Implements `com.atproto.admin.updateSubjectStatus` per
+    /// bsky-PDS findings §6.1, structurally identical to
+    /// [`Self::takedown_account`].
+    ///
+    /// bsky-PDS has no separate "suspend" endpoint — suspension is
+    /// expressed as a takedown that the operator (or cairn-mod's
+    /// future deferred-execution layer in v1.8) lifts via
+    /// [`Self::restore_account`] when the duration elapses. v1.7
+    /// does NOT auto-lift; the operator runs `cairn moderator
+    /// revoke <action_id>` (which fires
+    /// [`crate::pds_admin::dispatch::dispatch_after_revoke_action`])
+    /// manually.
+    ///
+    /// `duration_days` is encoded in the `ref` field so an
+    /// operator inspecting the bsky-PDS admin queue can
+    /// distinguish a temp suspension from an indefinite one:
+    /// - `Some(n)` → `duration_days={n}` (temp_suspension)
+    /// - `None`    → `duration_days=indef` (indef_suspension; same
+    ///   wire effect as takedown but the cairn-mod-side action_type
+    ///   is preserved for forensics)
     async fn suspend_account(
         &self,
-        _did: &str,
-        _reason: &str,
-        _duration_days: Option<u32>,
-        _notes: Option<&str>,
-        _precipitating_action_id: i64,
+        did: &str,
+        reason: &str,
+        duration_days: Option<u32>,
+        notes: Option<&str>,
+        precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError> {
-        unimplemented!("OzoneBackend::suspend_account lands in chainlink #88")
+        let _ = notes;
+        let url = self.xrpc_url("com.atproto.admin.updateSubjectStatus")?;
+
+        let duration_token = match duration_days {
+            Some(n) => format!("{n}"),
+            None => "indef".to_string(),
+        };
+        let body = serde_json::json!({
+            "subject": {
+                "$type": "com.atproto.admin.defs#repoRef",
+                "did": did,
+            },
+            "takedown": {
+                "applied": true,
+                "ref": format!(
+                    "cairn-mod:action_id={precipitating_action_id}:reason={reason}:duration_days={duration_token}"
+                ),
+            },
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, self.basic_auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(synthesize_action_id(did, precipitating_action_id));
+        }
+
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(parse_retry_after_seconds);
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        Err(map_status_to_backend_error(
+            status,
+            &body_bytes,
+            retry_after,
+        ))
     }
 
+    /// Implements `com.atproto.admin.updateSubjectStatus` with
+    /// `takedown.applied = false` to lift a prior takedown or
+    /// suspension.
+    ///
+    /// `prior_action_id` is the [`BackendActionId`] from the
+    /// original takedown / suspend call (synthesized by the
+    /// crate-internal `synthesize_action_id` helper at the time,
+    /// format `ozone:{did}:{precipitating_action_id}`). Encoded in the
+    /// `ref` field for cross-system traceability — it lets an
+    /// operator inspecting the bsky-PDS admin queue see "this
+    /// restore corresponds to that earlier takedown."
+    /// bsky-PDS itself doesn't track prior takedown ids; the
+    /// parameter is purely for cairn-mod's forensic audit log
+    /// + operator-readable bsky-PDS context.
+    ///
+    /// # Idempotent restore
+    ///
+    /// bsky-PDS's actual behavior on already-restored accounts
+    /// is **unconfirmed** as of #89 — the wiremock tests cover
+    /// both 200 (idempotent success) and 400 (Conflict) paths.
+    /// Phase B verification against staging will surface which
+    /// is the real-world response; if 400-Conflict is the actual
+    /// shape, the dispatch path's WARN-and-continue posture is
+    /// already operator-friendly (the audit row records the
+    /// conflict and operators see "tried to lift; was already
+    /// lifted" — which is a benign discrepancy).
     async fn restore_account(
         &self,
-        _did: &str,
-        _prior_action_id: &BackendActionId,
-        _reason: &str,
+        did: &str,
+        prior_action_id: &BackendActionId,
+        reason: &str,
     ) -> Result<(), BackendError> {
-        unimplemented!("OzoneBackend::restore_account lands in chainlink #88")
+        let url = self.xrpc_url("com.atproto.admin.updateSubjectStatus")?;
+
+        let body = serde_json::json!({
+            "subject": {
+                "$type": "com.atproto.admin.defs#repoRef",
+                "did": did,
+            },
+            "takedown": {
+                "applied": false,
+                "ref": format!(
+                    "cairn-mod:restore:prior_action_id={}:reason={reason}",
+                    prior_action_id.as_str()
+                ),
+            },
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, self.basic_auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(parse_retry_after_seconds);
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        Err(map_status_to_backend_error(
+            status,
+            &body_bytes,
+            retry_after,
+        ))
     }
 
     /// Returns [`BackendError::Unsupported`] — bsky-PDS does not
@@ -612,23 +740,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[should_panic(expected = "OzoneBackend::suspend_account lands in chainlink #88")]
-    async fn suspend_account_panics_pointing_at_issue_88() {
-        let backend = fixture_backend("https://bsky.example.com");
-        let _ = backend
-            .suspend_account("did:plc:abc", "spam", Some(7), None, 1)
-            .await;
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "OzoneBackend::restore_account lands in chainlink #88")]
-    async fn restore_account_panics_pointing_at_issue_88() {
-        let backend = fixture_backend("https://bsky.example.com");
-        let _ = backend
-            .restore_account("did:plc:abc", &BackendActionId::new("prior-1"), "rehab")
-            .await;
-    }
+    // (Per #89: the should_panic tests for suspend_account /
+    // restore_account were removed when those bodies landed.
+    // Their wire-shape verification now lives in the wiremock
+    // integration tests in `tests/ozone_backend.rs`.)
 
     // ===== Helper unit tests (#87) =====
 

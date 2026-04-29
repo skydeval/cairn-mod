@@ -51,6 +51,9 @@ pub use config::{
     ActionMapEntry, AdminPassword, BackendMethod, OzoneBackendConfig, PdsAdminBackendConfig,
     PdsAdminPolicy,
 };
-pub use dispatch::{DispatchContext, PdsAdminBridge, dispatch_after_record_action};
+pub use dispatch::{
+    DispatchContext, PdsAdminBridge, RevokeDispatchContext, dispatch_after_record_action,
+    dispatch_after_revoke_action,
+};
 pub use ozone::OzoneBackend;
 pub use types::Subject;

@@ -99,6 +99,13 @@ pub struct DispatchContext<'a> {
     /// artifact; bsky-PDS's `takedown.ref` field is for
     /// cross-system tracking, not narrative content).
     pub notes: Option<&'a str>,
+    /// ISO-8601 duration string from the recordAction request
+    /// (e.g. `P7D`, `PT24H`). Required for `temp_suspension`,
+    /// rejected for everything else by the recorder. The
+    /// dispatch parses this into `duration_days` for
+    /// `suspend_account`'s wire encoding (#89). `None` for
+    /// non-temp_suspension actions.
+    pub duration_iso: Option<&'a str>,
 }
 
 /// Dispatch the post-recordAction PDS-admin call (if any).
@@ -158,6 +165,29 @@ pub async fn dispatch_after_record_action(
 
     let reason = ctx.reason_codes.first().map(String::as_str).unwrap_or("");
 
+    // Duration plumbing for SuspendAccount (#89). For other
+    // methods, duration_days is meaningless and ignored.
+    // Parse failures here are logged and dispatched as None
+    // (the suspension still goes through, but bsky-PDS's
+    // operator-visible ref field will say `duration_days=indef`
+    // which is wrong-but-safe — the cairn-mod-side action is
+    // still a temp_suspension; reconciliation is the operator's).
+    let duration_days = match (method, ctx.duration_iso) {
+        (BackendMethod::SuspendAccount, Some(iso)) => match parse_duration_iso_to_days(iso) {
+            Ok(days) => Some(days),
+            Err(e) => {
+                tracing::error!(
+                    action_id = ctx.action_id,
+                    duration_iso = iso,
+                    error = %e,
+                    "pds_admin: failed to parse temp_suspension duration; dispatching with duration_days=indef (cairn-mod-side action is still temp_suspension)"
+                );
+                None
+            }
+        },
+        _ => None,
+    };
+
     let started_at = crate::writer::epoch_ms_now();
     let call_result = invoke_backend_method(
         bridge.backend.as_ref(),
@@ -165,6 +195,7 @@ pub async fn dispatch_after_record_action(
         ctx.subject_did,
         reason,
         ctx.notes,
+        duration_days,
         ctx.action_id,
     )
     .await;
@@ -210,17 +241,17 @@ pub async fn dispatch_after_record_action(
 /// even for unit-result methods — those return a synthesized
 /// "ignored" id that the caller drops via `returns_action_id()`.
 ///
-/// In v1.7 only `TakedownAccount` reaches here as an
-/// implemented method; `SuspendAccount` panics via
-/// `unimplemented!()` until #88 lands its body. The
-/// non-record-action methods (`RestoreAccount`, `ApplyLabel`,
-/// `NegateLabel`) are filtered out before we get here.
+/// `duration_days` is honored only by `SuspendAccount`; the
+/// other methods ignore it (TakedownAccount has no duration
+/// concept; the `RestoreAccount` / label methods are filtered
+/// out by the caller).
 async fn invoke_backend_method(
     backend: &dyn PdsAdminBackend,
     method: BackendMethod,
     did: &str,
     reason: &str,
     notes: Option<&str>,
+    duration_days: Option<u32>,
     action_id: i64,
 ) -> std::result::Result<BackendActionId, BackendError> {
     match method {
@@ -230,15 +261,8 @@ async fn invoke_backend_method(
                 .await
         }
         BackendMethod::SuspendAccount => {
-            // duration_days is not yet plumbed from
-            // RecordActionRequest.duration_iso → days here; #88
-            // lands the parsing alongside the suspend_account
-            // body. The unimplemented!() in OzoneBackend means
-            // this path panics in #87's intermediate state, which
-            // is acceptable per the prompt: "no one will trigger
-            // suspend before #88 lands."
             backend
-                .suspend_account(did, reason, None, notes, action_id)
+                .suspend_account(did, reason, duration_days, notes, action_id)
                 .await
         }
         BackendMethod::RestoreAccount | BackendMethod::ApplyLabel | BackendMethod::NegateLabel => {
@@ -249,6 +273,168 @@ async fn invoke_backend_method(
                  dispatch_after_record_action should have filtered it"
             )
         }
+    }
+}
+
+/// Parse an ISO-8601 duration string into days, rounded down.
+///
+/// Reuses [`crate::writer::parse_iso8601_duration`] (the same
+/// parser the recorder validates `RecordActionRequest.duration_iso`
+/// with at the input boundary) so cairn-mod has one source of
+/// truth for "what duration shapes are acceptable."
+///
+/// Sub-day suspensions (e.g. `PT12H`) round down to 0 days. The
+/// bsky-PDS `ref` field then encodes `duration_days=0`, which
+/// is operator-visible signal but not protocol-meaningful (the
+/// suspension lift is still cairn-mod-driven, not bsky-PDS-driven,
+/// so the day-rounding doesn't affect when the lift fires).
+/// Non-day-aligned operator config is uncommon enough to punt on.
+///
+/// Returns `Err(crate::error::Error::Signing(_))` for malformed
+/// input (matches the parser's existing error type), or for
+/// durations exceeding `u32::MAX` days (~11.7 million years —
+/// nonsense in practice but handled cleanly).
+pub(crate) fn parse_duration_iso_to_days(iso: &str) -> crate::error::Result<u32> {
+    let secs = crate::writer::parse_iso8601_duration(iso)?;
+    let days = secs / 86_400;
+    u32::try_from(days).map_err(|_| {
+        crate::error::Error::Signing(format!("duration {iso:?}: {days} days exceeds u32::MAX"))
+    })
+}
+
+// ===========================================================================
+// Revoke-action dispatch (#89)
+// ===========================================================================
+
+/// Snapshot of a revoke-action commit the PDS-admin restore
+/// dispatch needs.
+#[derive(Debug, Clone, Copy)]
+pub struct RevokeDispatchContext<'a> {
+    /// `subject_actions(id)` of the action being revoked. Used
+    /// both for the audit-row FK (the restore call's
+    /// `precipitating_action_id` is the original action's id —
+    /// "show me everything cairn-mod tried to do on the PDS for
+    /// this action" returns the takedown AND the restore in
+    /// chain order) AND for looking up the prior backend call.
+    pub action_id: i64,
+    /// Subject DID of the action being revoked.
+    pub subject_did: &'a str,
+    /// Optional revocation rationale from the moderator. Encoded
+    /// in the backend's `ref` field for cross-system traceability;
+    /// empty string when absent.
+    pub revoke_reason: Option<&'a str>,
+}
+
+/// Dispatch the post-revokeAction PDS-admin call (if any).
+///
+/// Looks up the prior `pds_admin_audit` row for the action
+/// being revoked — specifically, the most recent `success`-outcome
+/// row with a non-NULL `backend_action_id`. If found, fires
+/// [`PdsAdminBackend::restore_account`] against that
+/// `BackendActionId`. If not found (action was never propagated
+/// to the PDS, or the original call failed), logs a warning and
+/// skips — there's nothing on the PDS side to undo.
+///
+/// Same failure semantics as
+/// [`dispatch_after_record_action`]: log loudly, audit-record,
+/// don't propagate. The cairn-mod-side revocation has already
+/// committed by this point.
+pub async fn dispatch_after_revoke_action(
+    bridge: Option<&PdsAdminBridge>,
+    pool: &Pool<Sqlite>,
+    ctx: RevokeDispatchContext<'_>,
+) {
+    let Some(bridge) = bridge else {
+        return;
+    };
+    if !bridge.policy.enabled {
+        return;
+    }
+
+    // Look up prior PDS-side calls for this action. The
+    // list_pds_admin_audit_for_action API returns rows in chain
+    // order (call_completed_at ASC, ties broken on id ASC); we
+    // want the most recent success.
+    let prior_calls =
+        match crate::pds_admin::list_pds_admin_audit_for_action(pool, ctx.action_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    action_id = ctx.action_id,
+                    "pds_admin revoke dispatch: pds_admin_audit lookup failed; \
+                     skipping restore (cairn-mod-side revocation is committed)"
+                );
+                return;
+            }
+        };
+    let prior = prior_calls
+        .iter()
+        .rev()
+        .find(|r| {
+            r.outcome == crate::pds_admin::AuditOutcome::Success && r.backend_action_id.is_some()
+        })
+        .cloned();
+
+    let Some(prior) = prior else {
+        tracing::warn!(
+            action_id = ctx.action_id,
+            "pds_admin revoke dispatch: no prior successful PDS call for this action; \
+             skipping restore (action was never propagated to PDS, or original call \
+             failed). cairn-mod-side revocation remains committed."
+        );
+        return;
+    };
+
+    // SAFETY: the find predicate above guaranteed Some.
+    let prior_action_id = prior
+        .backend_action_id
+        .expect("filter retains only rows with backend_action_id = Some");
+    let reason = ctx.revoke_reason.unwrap_or("");
+
+    let started_at = crate::writer::epoch_ms_now();
+    let call_result = bridge
+        .backend
+        .restore_account(ctx.subject_did, &prior_action_id, reason)
+        .await;
+    let completed_at = crate::writer::epoch_ms_now();
+
+    log_call_outcome(
+        BackendMethod::RestoreAccount,
+        ctx.action_id,
+        ctx.subject_did,
+        &call_result,
+    );
+
+    // Project Result<(), BackendError> into the unified
+    // Result<Option<BackendActionId>, BackendError> shape.
+    // restore_account is a unit-result method, so success carries
+    // no new BackendActionId — the audit row's backend_action_id
+    // column is None (the prior_action_id is preserved in the
+    // ref field on the wire, but the audit row's column refers to
+    // the call's RETURN value, not its input).
+    let unified: std::result::Result<Option<BackendActionId>, BackendError> = match call_result {
+        Ok(()) => Ok(None),
+        Err(e) => Err(e),
+    };
+
+    if let Err(e) = record_pds_admin_call(
+        pool,
+        ctx.action_id,
+        BackendMethod::RestoreAccount,
+        unified,
+        started_at,
+        completed_at,
+    )
+    .await
+    {
+        tracing::error!(
+            error = %e,
+            action_id = ctx.action_id,
+            method = BackendMethod::RestoreAccount.as_wire_str(),
+            "pds_admin audit insert failed for restore call; cairn-mod-side revocation \
+             remains committed"
+        );
     }
 }
 
@@ -495,6 +681,7 @@ mod tests {
             subject_did: did,
             reason_codes: reasons,
             notes: None,
+            duration_iso: None,
         }
     }
 
@@ -660,5 +847,386 @@ mod tests {
         };
         dispatch_after_record_action(Some(&bridge), &pool, ctx(action_id, "did:plc:s")).await;
         assert!(backend.calls().is_empty());
+    }
+
+    // ===== ISO-8601 → days parsing (#89) =====
+
+    #[test]
+    fn parse_duration_iso_to_days_handles_known_formats() {
+        // ISO-8601 day-aligned forms cover the v1.7 production
+        // range. Reuse cases the recorder's parser already
+        // exercises so any divergence between the two sites
+        // surfaces here.
+        assert_eq!(parse_duration_iso_to_days("P7D").unwrap(), 7);
+        assert_eq!(parse_duration_iso_to_days("P1W").unwrap(), 7);
+        assert_eq!(parse_duration_iso_to_days("P14D").unwrap(), 14);
+        assert_eq!(parse_duration_iso_to_days("P30D").unwrap(), 30);
+    }
+
+    #[test]
+    fn parse_duration_iso_to_days_rounds_sub_day_down() {
+        // Sub-day suspensions round down to 0. Matches the
+        // doc-comment's "sub-day → 0 days" contract; operators
+        // wanting hour-resolution suspensions are an edge case
+        // v1.7 punts on.
+        assert_eq!(parse_duration_iso_to_days("PT12H").unwrap(), 0);
+        assert_eq!(parse_duration_iso_to_days("PT30M").unwrap(), 0);
+        assert_eq!(parse_duration_iso_to_days("PT1S").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_duration_iso_to_days_rejects_malformed() {
+        assert!(parse_duration_iso_to_days("not a duration").is_err());
+        assert!(parse_duration_iso_to_days("7D").is_err()); // missing P prefix
+        assert!(parse_duration_iso_to_days("P").is_err()); // empty
+        assert!(parse_duration_iso_to_days("P1Y").is_err()); // years not supported per recorder
+    }
+
+    // ===== SuspendAccount dispatch with duration plumbing (#89) =====
+
+    fn temp_suspension_ctx<'a>(
+        action_id: i64,
+        did: &'a str,
+        iso: Option<&'a str>,
+    ) -> DispatchContext<'a> {
+        static REASONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let reasons = REASONS.get_or_init(|| vec!["spam".into()]);
+        DispatchContext {
+            action_id,
+            action_type: ActionType::TempSuspension,
+            subject_did: did,
+            reason_codes: reasons,
+            notes: None,
+            duration_iso: iso,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_suspend_with_duration_passes_days_to_backend() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = SuspensionRecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::TempSuspension,
+            ActionMapEntry::Method(BackendMethod::SuspendAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            temp_suspension_ctx(action_id, "did:plc:s", Some("P7D")),
+        )
+        .await;
+
+        let calls = backend.suspend_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].duration_days, Some(7));
+        assert_eq!(calls[0].did, "did:plc:s");
+    }
+
+    #[tokio::test]
+    async fn dispatch_suspend_with_no_duration_passes_none() {
+        // IndefSuspension or unparseable → None passed through.
+        // (The recorder requires temp_suspension to have a
+        // duration, but the ActionMapEntry could route an
+        // IndefSuspension here in practice.)
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = SuspensionRecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::IndefSuspension,
+            ActionMapEntry::Method(BackendMethod::SuspendAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        let mut indef_ctx = ctx(action_id, "did:plc:s");
+        indef_ctx.action_type = ActionType::IndefSuspension;
+        dispatch_after_record_action(Some(&bridge), &pool, indef_ctx).await;
+
+        let calls = backend.suspend_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].duration_days, None);
+    }
+
+    #[tokio::test]
+    async fn dispatch_suspend_with_malformed_duration_logs_and_passes_none() {
+        // Per #89's design: parse failure falls through with
+        // duration_days=None rather than aborting the dispatch.
+        // The cairn-mod-side action is still committed; the
+        // bsky-PDS ref will say `duration_days=indef` which is
+        // wrong-but-safe.
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = SuspensionRecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::TempSuspension,
+            ActionMapEntry::Method(BackendMethod::SuspendAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            temp_suspension_ctx(action_id, "did:plc:s", Some("not-a-duration")),
+        )
+        .await;
+
+        let calls = backend.suspend_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].duration_days, None,
+            "malformed duration → None (logged at error level)"
+        );
+    }
+
+    // ===== Revoke dispatch (#89) =====
+
+    #[tokio::test]
+    async fn revoke_dispatch_noop_when_bridge_none() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        dispatch_after_revoke_action(
+            None,
+            &pool,
+            RevokeDispatchContext {
+                action_id,
+                subject_did: "did:plc:s",
+                revoke_reason: None,
+            },
+        )
+        .await;
+        let count: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM pds_admin_audit")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn revoke_dispatch_skips_when_no_prior_pds_call() {
+        // The action was never propagated to the PDS (no
+        // pds_admin_audit row); revoke has nothing to undo.
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = SuspensionRecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, BTreeMap::new()),
+            backend: backend.clone(),
+        };
+        dispatch_after_revoke_action(
+            Some(&bridge),
+            &pool,
+            RevokeDispatchContext {
+                action_id,
+                subject_did: "did:plc:s",
+                revoke_reason: Some("oops"),
+            },
+        )
+        .await;
+        assert!(
+            backend.restore_calls.lock().unwrap().is_empty(),
+            "no prior call → no restore"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_dispatch_calls_restore_with_prior_action_id() {
+        // Setup: pretend a takedown succeeded for action_id by
+        // writing the audit row directly. Then dispatch_revoke
+        // should pick up that BackendActionId and pass it to
+        // restore_account.
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+
+        crate::pds_admin::record_pds_admin_call(
+            &pool,
+            action_id,
+            BackendMethod::TakedownAccount,
+            Ok(Some(BackendActionId::new("ozone:did:plc:s:42"))),
+            10,
+            20,
+        )
+        .await
+        .unwrap();
+
+        let backend = SuspensionRecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, BTreeMap::new()),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_revoke_action(
+            Some(&bridge),
+            &pool,
+            RevokeDispatchContext {
+                action_id,
+                subject_did: "did:plc:s",
+                revoke_reason: Some("manual lift"),
+            },
+        )
+        .await;
+
+        // Snapshot + drop the mutex guard before the next await
+        // (clippy::await_holding_lock is enforced as -D warnings).
+        let snapshot = {
+            let restores = backend.restore_calls.lock().unwrap();
+            restores
+                .iter()
+                .map(|r| (r.did.clone(), r.prior_id.clone(), r.reason.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, "did:plc:s");
+        assert_eq!(snapshot[0].1, "ozone:did:plc:s:42");
+        assert_eq!(snapshot[0].2, "manual lift");
+
+        // The restore call's audit row landed.
+        let rows = crate::pds_admin::list_pds_admin_audit_for_action(&pool, action_id)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "takedown + restore audit rows");
+        assert_eq!(rows[1].backend_method, BackendMethod::RestoreAccount);
+        assert_eq!(rows[1].outcome, crate::pds_admin::AuditOutcome::Success);
+        assert!(rows[1].backend_action_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_dispatch_skips_when_prior_call_failed() {
+        // Prior call recorded as Network failure (no
+        // backend_action_id) — revoke has no id to refer to,
+        // logs a warning and skips.
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        crate::pds_admin::record_pds_admin_call(
+            &pool,
+            action_id,
+            BackendMethod::TakedownAccount,
+            Err(BackendError::Network("dns".into())),
+            10,
+            20,
+        )
+        .await
+        .unwrap();
+
+        let backend = SuspensionRecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, BTreeMap::new()),
+            backend: backend.clone(),
+        };
+        dispatch_after_revoke_action(
+            Some(&bridge),
+            &pool,
+            RevokeDispatchContext {
+                action_id,
+                subject_did: "did:plc:s",
+                revoke_reason: None,
+            },
+        )
+        .await;
+        assert!(
+            backend.restore_calls.lock().unwrap().is_empty(),
+            "no successful prior → no restore"
+        );
+    }
+
+    // Test backend that records suspend AND restore calls. Used
+    // by the SuspendAccount + revoke tests above.
+    struct SuspensionRecordingBackend {
+        suspend_calls: Mutex<Vec<RecordedSuspend>>,
+        restore_calls: Mutex<Vec<RecordedRestore>>,
+    }
+
+    #[derive(Debug)]
+    struct RecordedSuspend {
+        did: String,
+        duration_days: Option<u32>,
+    }
+
+    #[derive(Debug)]
+    struct RecordedRestore {
+        did: String,
+        prior_id: String,
+        reason: String,
+    }
+
+    impl SuspensionRecordingBackend {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                suspend_calls: Mutex::new(Vec::new()),
+                restore_calls: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PdsAdminBackend for SuspensionRecordingBackend {
+        async fn takedown_account(
+            &self,
+            _did: &str,
+            _reason: &str,
+            _notes: Option<&str>,
+            _id: i64,
+        ) -> std::result::Result<BackendActionId, BackendError> {
+            unreachable!("test backend does not stub takedown")
+        }
+
+        async fn suspend_account(
+            &self,
+            did: &str,
+            _reason: &str,
+            duration_days: Option<u32>,
+            _notes: Option<&str>,
+            id: i64,
+        ) -> std::result::Result<BackendActionId, BackendError> {
+            self.suspend_calls.lock().unwrap().push(RecordedSuspend {
+                did: did.to_string(),
+                duration_days,
+            });
+            Ok(BackendActionId::new(format!("ozone:{did}:{id}")))
+        }
+
+        async fn restore_account(
+            &self,
+            did: &str,
+            prior_action_id: &BackendActionId,
+            reason: &str,
+        ) -> std::result::Result<(), BackendError> {
+            self.restore_calls.lock().unwrap().push(RecordedRestore {
+                did: did.to_string(),
+                prior_id: prior_action_id.as_str().to_string(),
+                reason: reason.to_string(),
+            });
+            Ok(())
+        }
+
+        async fn apply_label(
+            &self,
+            _subject: &Subject,
+            _val: &str,
+            _expires_days: Option<u32>,
+        ) -> std::result::Result<(), BackendError> {
+            unreachable!()
+        }
+
+        async fn negate_label(
+            &self,
+            _subject: &Subject,
+            _val: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unreachable!()
+        }
     }
 }

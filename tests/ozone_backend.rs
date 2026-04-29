@@ -403,3 +403,363 @@ async fn recordaction_without_pds_admin_bridge_is_unchanged() {
     );
     h.writer.shutdown().await.unwrap();
 }
+
+// ===========================================================================
+// #89: suspend_account + restore_account wire-protocol tests
+// ===========================================================================
+
+#[tokio::test]
+async fn suspend_account_with_duration_encodes_days_in_ref() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).expect("body is JSON");
+            let r = body
+                .get("takedown")
+                .and_then(|t| t.get("ref"))
+                .and_then(|v| v.as_str())
+                .unwrap();
+            assert!(
+                r.contains("duration_days=14"),
+                "ref must encode duration_days=14: {r}"
+            );
+            assert!(
+                r.contains("action_id=42"),
+                "ref must encode action_id=42: {r}"
+            );
+            assert_eq!(
+                body.get("takedown")
+                    .and_then(|t| t.get("applied"))
+                    .and_then(|v| v.as_bool()),
+                Some(true)
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let id = backend
+        .suspend_account(SUBJECT_DID, "spam", Some(14), None, 42)
+        .await
+        .expect("suspend succeeds");
+    assert_eq!(id.as_str(), format!("ozone:{SUBJECT_DID}:42"));
+}
+
+#[tokio::test]
+async fn suspend_account_without_duration_encodes_indef() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let r = body
+                .get("takedown")
+                .and_then(|t| t.get("ref"))
+                .and_then(|v| v.as_str())
+                .unwrap();
+            assert!(
+                r.contains("duration_days=indef"),
+                "ref must encode duration_days=indef: {r}"
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    backend
+        .suspend_account(SUBJECT_DID, "spam", None, None, 42)
+        .await
+        .expect("suspend succeeds");
+}
+
+#[tokio::test]
+async fn restore_account_sends_applied_false_with_prior_id_in_ref() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let takedown = body.get("takedown").unwrap();
+            assert_eq!(
+                takedown.get("applied").and_then(|v| v.as_bool()),
+                Some(false),
+                "restore must send applied=false"
+            );
+            let r = takedown.get("ref").and_then(|v| v.as_str()).unwrap();
+            assert!(
+                r.contains("prior_action_id=ozone:") && r.contains(":42"),
+                "ref must encode prior_action_id: {r}"
+            );
+            assert!(
+                r.contains("reason=manual lift"),
+                "ref must encode reason: {r}"
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let prior = cairn_mod::pds_admin::BackendActionId::new(format!("ozone:{SUBJECT_DID}:42"));
+    backend
+        .restore_account(SUBJECT_DID, &prior, "manual lift")
+        .await
+        .expect("restore succeeds against 200");
+}
+
+#[tokio::test]
+async fn restore_account_idempotent_path_returns_ok_on_200() {
+    // bsky-PDS's actual response on already-restored accounts is
+    // unconfirmed as of #89 (Phase B verification will tell). The
+    // 200 path is the idempotent-friendly outcome; pin it.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let prior = cairn_mod::pds_admin::BackendActionId::new("ozone:x:1");
+    let res = backend.restore_account(SUBJECT_DID, &prior, "rehab").await;
+    assert!(res.is_ok());
+}
+
+#[tokio::test]
+async fn restore_account_conflict_path_maps_to_remote_error() {
+    // The other plausible bsky-PDS response: 400 with an
+    // "InvalidRequest" envelope explaining the account isn't
+    // currently taken down. Doesn't contain "subject" or "did"
+    // wording, so it falls through to RemoteError per #87's
+    // status-mapping table (not Validation).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": "InvalidRequest",
+            "message": "account is not currently taken down"
+        })))
+        .mount(&server)
+        .await;
+
+    let backend = ozone_backend_against(&server.uri(), "hunter2");
+    let prior = cairn_mod::pds_admin::BackendActionId::new("ozone:x:1");
+    let err = backend
+        .restore_account(SUBJECT_DID, &prior, "rehab")
+        .await
+        .expect_err("400 must produce an error");
+    assert!(matches!(
+        err,
+        cairn_mod::pds_admin::BackendError::RemoteError { .. }
+    ));
+}
+
+// ===========================================================================
+// End-to-end recordAction(temp_suspension) → suspend_account
+// ===========================================================================
+
+fn temp_suspension_request(duration_iso: &str) -> RecordActionRequest {
+    RecordActionRequest {
+        subject: SUBJECT_DID.into(),
+        actor_did: MODERATOR_DID.into(),
+        action_type: ActionType::TempSuspension,
+        reason_codes: vec!["spam".into()],
+        duration_iso: Some(duration_iso.into()),
+        notes: Some("repeat offender".into()),
+        report_ids: vec![],
+    }
+}
+
+fn temp_suspension_action_map() -> BTreeMap<ActionType, ActionMapEntry> {
+    let mut m = BTreeMap::new();
+    m.insert(
+        ActionType::TempSuspension,
+        ActionMapEntry::Method(BackendMethod::SuspendAccount),
+    );
+    m
+}
+
+async fn build_harness_with_action_map(
+    server_uri: Option<&str>,
+    action_map: BTreeMap<ActionType, ActionMapEntry>,
+) -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cairn.db");
+    let pool = storage::open(&path).await.unwrap();
+
+    let pds_admin = server_uri.map(|uri| {
+        let cfg = OzoneBackendConfig {
+            pds_url: Url::parse(uri).unwrap(),
+            admin_password: AdminPassword::new("hunter2".into()),
+            request_timeout: Duration::from_secs(5),
+        };
+        let backend: Arc<dyn PdsAdminBackend> = Arc::new(OzoneBackend::new(&cfg).unwrap());
+
+        PdsAdminBridge {
+            policy: PdsAdminPolicy {
+                enabled: true,
+                backend: None,
+                action_map,
+            },
+            backend,
+        }
+    });
+
+    let writer = spawn_with_pds_admin(
+        pool.clone(),
+        cairn_mod::SigningKey::from_bytes(hex::decode(TEST_PRIV_HEX).unwrap().try_into().unwrap()),
+        SERVICE_DID.to_string(),
+        None,
+        cairn_mod::RetentionConfig::default(),
+        cairn_mod::ReasonVocabulary::defaults(),
+        cairn_mod::StrikePolicy::defaults(),
+        cairn_mod::LabelEmissionPolicy::defaults(),
+        cairn_mod::PolicyAutomationPolicy::defaults(),
+        pds_admin,
+    )
+    .await
+    .unwrap();
+
+    Harness {
+        _dir: dir,
+        pool,
+        writer,
+    }
+}
+
+#[tokio::test]
+async fn recordaction_temp_suspension_passes_duration_days_to_pds() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).expect("body is JSON");
+            let r = body
+                .get("takedown")
+                .and_then(|t| t.get("ref"))
+                .and_then(|v| v.as_str())
+                .unwrap();
+            assert!(
+                r.contains("duration_days=7"),
+                "P7D should plumb to duration_days=7: {r}"
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = build_harness_with_action_map(Some(&server.uri()), temp_suspension_action_map()).await;
+    let recorded = h
+        .writer
+        .record_action(temp_suspension_request("P7D"))
+        .await
+        .expect("temp_suspension recordAction succeeds");
+
+    let rows = list_pds_admin_audit_for_action(&h.pool, recorded.action_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, AuditOutcome::Success);
+    assert_eq!(rows[0].backend_method, BackendMethod::SuspendAccount);
+
+    h.writer.shutdown().await.unwrap();
+}
+
+// ===========================================================================
+// End-to-end revoke → restore_account
+// ===========================================================================
+
+#[tokio::test]
+async fn revoke_after_takedown_fires_restore_call_and_audits_it() {
+    let server = MockServer::start().await;
+    // First mock: takedown (applied=true) → 200.
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .and(wiremock::matchers::body_string_contains("\"applied\":true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // Second mock: restore (applied=false) → 200, asserting prior
+    // action id is preserved in ref.
+    Mock::given(method("POST"))
+        .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
+        .and(wiremock::matchers::body_string_contains(
+            "\"applied\":false",
+        ))
+        .respond_with(|req: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let r = body
+                .get("takedown")
+                .and_then(|t| t.get("ref"))
+                .and_then(|v| v.as_str())
+                .unwrap();
+            assert!(
+                r.contains("prior_action_id=ozone:"),
+                "restore ref must carry prior_action_id: {r}"
+            );
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let h = build_harness(Some(&server.uri())).await;
+    let recorded = h.writer.record_action(takedown_request()).await.unwrap();
+
+    h.writer
+        .revoke_action(cairn_mod::RevokeActionRequest {
+            action_id: recorded.action_id,
+            revoked_by_did: MODERATOR_DID.into(),
+            revoked_reason: Some("manual lift".into()),
+        })
+        .await
+        .expect("revoke succeeds");
+
+    let rows = list_pds_admin_audit_for_action(&h.pool, recorded.action_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "takedown + restore audit rows");
+    assert_eq!(rows[0].backend_method, BackendMethod::TakedownAccount);
+    assert_eq!(rows[0].outcome, AuditOutcome::Success);
+    assert!(rows[0].backend_action_id.is_some());
+    assert_eq!(rows[1].backend_method, BackendMethod::RestoreAccount);
+    assert_eq!(rows[1].outcome, AuditOutcome::Success);
+    assert!(
+        rows[1].backend_action_id.is_none(),
+        "restore is unit-result"
+    );
+
+    h.writer.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn revoke_when_no_prior_pds_call_is_safe_noop() {
+    // Bridge is None → recordAction doesn't fire a PDS call,
+    // revoke doesn't fire a restore. Audit table stays empty.
+    let h = build_harness(None).await;
+    let recorded = h.writer.record_action(takedown_request()).await.unwrap();
+
+    h.writer
+        .revoke_action(cairn_mod::RevokeActionRequest {
+            action_id: recorded.action_id,
+            revoked_by_did: MODERATOR_DID.into(),
+            revoked_reason: None,
+        })
+        .await
+        .expect("revoke succeeds without bridge");
+
+    let rows = list_pds_admin_audit_for_action(&h.pool, recorded.action_id)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "no PDS calls when bridge is None");
+
+    h.writer.shutdown().await.unwrap();
+}

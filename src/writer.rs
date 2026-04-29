@@ -2568,6 +2568,10 @@ impl Writer {
         // the caller; the cairn-mod-side action stays committed
         // regardless of PDS-side outcome (per §A13's "fail loud,
         // let the operator decide" posture).
+        //
+        // duration_iso is plumbed through #89 so SuspendAccount's
+        // dispatch path can encode duration_days in the bsky-PDS
+        // ref field. Other action types ignore it.
         crate::pds_admin::dispatch::dispatch_after_record_action(
             self.pds_admin.as_ref(),
             &self.pool,
@@ -2577,6 +2581,7 @@ impl Writer {
                 subject_did: &subject_did,
                 reason_codes: &req.reason_codes,
                 notes: req.notes.as_deref(),
+                duration_iso: req.duration_iso.as_deref(),
             },
         )
         .await;
@@ -2775,6 +2780,23 @@ impl Writer {
         for event in negation_events {
             let _ = self.broadcast_tx.send(event);
         }
+
+        // §F23 / §A13 post-revoke PDS-admin dispatch (#89). Looks
+        // up the action's prior pds_admin_audit row (the takedown
+        // / suspension call); if a successful one exists, fires
+        // restore_account. Same fail-loud posture as the
+        // recordAction dispatch — the cairn-mod-side revocation
+        // stays committed regardless of PDS-side outcome.
+        crate::pds_admin::dispatch::dispatch_after_revoke_action(
+            self.pds_admin.as_ref(),
+            &self.pool,
+            crate::pds_admin::dispatch::RevokeDispatchContext {
+                action_id: req.action_id,
+                subject_did: &row.subject_did,
+                revoke_reason: req.revoked_reason.as_deref(),
+            },
+        )
+        .await;
 
         Ok(RevokedAction {
             action_id: req.action_id,
