@@ -39,11 +39,34 @@ cairn moderator list --config /etc/cairn/cairn.toml
 
 # Filter to a single role, or emit JSON for scripts:
 cairn moderator list --role admin --json --config /etc/cairn/cairn.toml
+
+# Add a moderator AND grant XRPC-call access in one invocation
+# (#99 / §F23.7). Convenience for the common case: granting
+# moderator status implies the moderator should also be able to
+# call cairn-mod via proxied XRPC. --by is required and is
+# recorded as added_by_moderator on the new xrpc_known_callers row.
+cairn moderator add did:plc:example \
+  --role mod \
+  --with-xrpc-callers --by did:plc:operator \
+  --config /etc/cairn/cairn.toml
 ```
 
 The CLI runs as a one-shot — no server startup, no
 single-instance lease acquisition; it is safe to invoke while
 `cairn serve` is running against the same DB.
+
+**`--with-xrpc-callers` idempotency.** Plain `cairn moderator add`
+is unchanged; the flag is opt-in. Under the hood the convenience
+flag is two operations against two independent tables
+(`moderators` and `xrpc_known_callers`); the composite is
+idempotent at the application layer rather than transactional.
+The CLI pre-checks `is_known_caller` and skips the second add
+when the DID is already an active caller, so re-running on a
+half-applied state — moderator-add succeeded but xrpc-callers-add
+failed — completes cleanly without surfacing a UNIQUE-constraint
+error. For a separate-table grant (a DID allowed to call cairn-mod
+via proxied XRPC without being a moderator), reach for
+[`cairn xrpc-callers add`](#manage-known-xrpc-callers-f234) directly.
 
 **`added_by` semantics:** CLI-initiated inserts leave the
 `moderators.added_by` column NULL — the CLI has no attested
@@ -242,6 +265,247 @@ expires timestamps), last action timestamp, and "returns to
 good standing in N days" trajectory hint. Operators who want
 just the active labels should reach for `cairn moderator
 labels` instead.
+
+## Audit-events view ([§F23.7](../cairn-design.md#f237-operator-tier-cli-surface))
+
+Operator-tier audit-events view via `cairn moderator events`.
+Direct-DB scan of `audit_log` (joined with `subject_actions` for
+the recordAction surface) — no HTTP, no moderator session, same
+operator-tier posture as `cairn audit list` and `cairn audit
+verify`. The default surfaces ALL audit_log rows including
+cairn-mod-internal events (`pending_*`, `retention_sweep`,
+`xrpc_*` collaboration changes, `service_record_*`, etc.);
+`--ozone-only` applies the same filter-out policy as
+`tools.ozone.moderation.queryEvents` ([§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy))
+and surfaces only the Ozone-eligible subset.
+
+```
+# Newest 50 events across all subjects.
+cairn moderator events --config /etc/cairn/cairn.toml
+
+# Narrow to one subject (DID for account-level, AT-URI for
+# record-level; the AT-URI form is parsed and applied as a
+# subject_did + subject_uri filter pair).
+cairn moderator events \
+  --subject did:plc:offender \
+  --config /etc/cairn/cairn.toml
+
+# Filter by actor / action / time-window.
+cairn moderator events --actor did:plc:moderator --config /etc/cairn/cairn.toml
+cairn moderator events --type retention_sweep --config /etc/cairn/cairn.toml
+cairn moderator events \
+  --from 2026-04-01T00:00:00Z --to 2026-05-01T00:00:00Z \
+  --config /etc/cairn/cairn.toml
+
+# Pagination (server caps at 250; default 50).
+cairn moderator events --limit 25 --config /etc/cairn/cairn.toml
+cairn moderator events --limit 25 --cursor <c> --config /etc/cairn/cairn.toml
+
+# JSON for downstream tooling.
+cairn moderator events --json --config /etc/cairn/cairn.toml
+
+# Apply the gateway endpoint's filter-out policy. Output matches
+# what an external Ozone client would see through
+# tools.ozone.moderation.queryEvents.
+cairn moderator events --ozone-only --config /etc/cairn/cairn.toml
+```
+
+The default tabular output emits one line per event, prefixed by
+shape — `ozone\t<id>\t<created_at>\t<$type>\t<subject>\tby=<actor>`
+for Ozone-eligible rows or `internal\t<id>\t<created_at>\t<action>\t<target>\tby=<actor>\toutcome=<outcome>`
+for cairn-mod-internal rows. The two shapes interleave in
+chronological order so a routine `cairn moderator events | grep
+<did>` surfaces both moderator-facing events and operator-internal
+noise on the same subject. JSON output discriminates on the
+`shape` field (`"ozone"` vs `"internal"`).
+
+**Operator-tier vs Ozone-tier.** `--ozone-only` is the canonical
+bridge between the two views. Without the flag, operators see
+the full cairn-mod audit chain (the operator-tier view); with the
+flag, the projection matches what an external moderator hitting
+`queryEvents` over the gateway sees (the Ozone-tier view).
+Operators verifying "what does this look like through Ozone?"
+pass `--ozone-only` and compare against the unfiltered output.
+
+The projection is shared with the gateway endpoint via
+`audit_event::project_audit_event`, so the two surfaces stay
+in lockstep — adding a new Ozone-eligible action type updates
+both views in the same change.
+
+Worked example. The same subject under each mode:
+
+```
+# Default (full): includes the cairn-mod-internal pending row.
+$ cairn moderator events --subject did:plc:offender --config /etc/cairn/cairn.toml
+ozone     42  2026-04-29T12:00:00.000Z  ...modEventLabel  did:plc:offender  by=did:plc:mod
+internal  41  2026-04-29T11:50:00.000Z  pending_policy_action_dismissed  19  by=did:plc:mod  outcome=success
+
+# --ozone-only: the internal row is filtered out.
+$ cairn moderator events --subject did:plc:offender --ozone-only --config /etc/cairn/cairn.toml
+ozone     42  2026-04-29T12:00:00.000Z  ...modEventLabel  did:plc:offender  by=did:plc:mod
+```
+
+Cross-references:
+[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
+(projection policy and the filter-out list);
+[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
+(operator-tier vs Ozone-tier split);
+[§F23.10](../cairn-design.md#f2310-patterns-established-for-v18)
+(the projection-submodule pattern v1.8+ inherits).
+
+## PDS-admin bridge ([§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge))
+
+Manual escape hatch for the PDS-admin bridge via `cairn pds-admin
+{takedown, suspend, restore}`. The **production path** is policy
+automation + label emission firing the bridge automatically —
+operators rarely need this surface in steady-state. The CLI
+exists for two cases: (a) testing the bridge during Phase B
+verification (per [§19.5](../cairn-design.md#195-operator-deployment-runbook-for-v17-pds-bridge--xrpc-gateway)),
+and (b) operator one-off escalations that bypass the policy
+engine for a specific subject. v1.7's vocabulary; v1.8's
+LocusBackend documentation reuses it.
+
+The CLI wraps `tools.cairn.admin.{recordAction, revokeAction}`
+HTTP-routed through the running `cairn serve`, so it requires a
+logged-in moderator session and a moderator-or-admin role row in
+`moderators`. The writer's post-commit dispatch fires the
+configured backend's `takedown_account` / `suspend_account` /
+`restore_account` call automatically; the CLI then looks up the
+resulting `pds_admin_audit` row and surfaces the bridge outcome
+in the same response.
+
+**Manual takedowns do NOT bypass strike accounting.** Per
+[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
+(and the §A14 invariant: one canonical action-recording path),
+the action lands in `subject_actions` like any other and updates
+strike state per `[strike_policy]`. Operators wanting a
+no-strike test path should use a dedicated test subject DID
+rather than reaching for the bridge against a real moderator
+target.
+
+```
+# Manual takedown. --reason defaults to the reserved
+# `pds-admin-cli` reason code if unset; operators must declare
+# that code in [moderation_reasons] for the default to work
+# (per §F23.8).
+cairn pds-admin takedown did:plc:offender \
+  --reason hate-speech \
+  --config /etc/cairn/cairn.toml
+
+# Manual indef_suspension (omit --duration).
+cairn pds-admin suspend did:plc:offender \
+  --reason harassment \
+  --config /etc/cairn/cairn.toml
+
+# Manual temp_suspension (set --duration; ISO-8601).
+cairn pds-admin suspend did:plc:offender \
+  --reason spam --duration P7D \
+  --config /etc/cairn/cairn.toml
+
+# Optional moderator-facing notes recorded on the
+# subject_actions row.
+cairn pds-admin takedown did:plc:offender \
+  --reason hate-speech \
+  --notes "manual escalation; pattern matches recent harassment" \
+  --config /etc/cairn/cairn.toml
+
+# Restore: revokes the most-recent unrevoked
+# takedown / temp_suspension / indef_suspension for the subject.
+# For a specific action_id, reach for `cairn moderator revoke`
+# instead — `pds-admin restore` is the convenience case.
+cairn pds-admin restore did:plc:offender \
+  --reason "false positive" \
+  --config /etc/cairn/cairn.toml
+
+# JSON output for tooling (carries the recordAction envelope and
+# the pds_admin_audit row in one structure).
+cairn pds-admin takedown did:plc:offender \
+  --reason hate-speech --json \
+  --config /etc/cairn/cairn.toml
+```
+
+**`--config` is required**; the CLI loads the operator config to
+(1) pre-flight `[pds_admin].enabled = true` so a misconfigured
+operator gets a precise error pointing at the config block
+rather than a successful recordAction with a silently-no-op
+bridge, and (2) read the DB path for the post-call
+`pds_admin_audit` lookup. The `--config` operator points must
+match the same config the running `cairn serve` is using;
+otherwise the pre-flight check is meaningless. v1.7 doesn't
+enforce this — operator responsibility.
+
+**Reserved reason code.** Manual escalations default to the
+reserved `pds-admin-cli` reason code (per
+[§F23.8](../cairn-design.md#f238-reserved-reason-codes)).
+Operators must declare it in `[moderation_reasons]` (or pass
+`--reason <other-code>` explicitly) for `cairn pds-admin` to
+succeed; otherwise the writer surfaces `ReasonNotFound` and
+the CLI prints the underlying error.
+
+The output format. The happy-path two-line output for
+`takedown` / `suspend`:
+
+```
+Recorded action 42 (subject taken down)
+bridge: success via takedown_account (id=ozone:8c3f...)
+```
+
+When the bridge dispatch hadn't surfaced a `pds_admin_audit` row
+by the time the CLI looked (the writer's post-commit hook is
+async vs. the HTTP response — most often this means the bridge
+is enabled but the dispatch is still in flight, less commonly
+that the bridge is disabled or the configured backend method is
+`"skip"`):
+
+```
+Recorded action 42 (subject taken down)
+bridge: dispatch pending — check `cairn moderator events` shortly
+```
+
+Operators following up on a "dispatch pending" line should run
+`cairn moderator events --subject <did> --type pds_admin_audit`
+(or refresh the operator's audit chain via `cairn audit verify`)
+to confirm the bridge did fire.
+
+When the bridge dispatched but the backend returned an error
+(authentication failure, network error, rate-limited), the
+output surfaces the error verbatim:
+
+```
+Recorded action 42 (subject taken down)
+bridge: auth via takedown_account (id=-)
+error: invalid app password
+```
+
+The cairn-mod-side action is still committed — the recordAction
+landed; the bridge call is what failed. Per
+[§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge)'s
+fail-loud-and-audit posture, the operator reconciles manually
+(typically: fix the underlying issue and re-run the appropriate
+`cairn pds-admin` call, or revoke the action).
+
+**`restore` semantics.** cairn-mod has no first-class "restore"
+action_type. `cairn pds-admin restore <did>` resolves the most-
+recent unrevoked takedown / temp_suspension / indef_suspension
+row for the subject (direct DB lookup) and revokes it via
+`tools.cairn.admin.revokeAction`; the writer's post-commit
+dispatch fires `OzoneBackend::restore_account`. For revocation
+of a specific action_id (rather than "most recent"), use `cairn
+moderator revoke <action_id>` directly — `pds-admin restore` is
+the convenience case for the common pattern.
+
+Cross-references:
+[§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge)
+(the bridge's design + the `PdsAdminBackend` trait);
+[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
+(operator-tier CLI surface);
+[§F23.8](../cairn-design.md#f238-reserved-reason-codes)
+(the `pds-admin-cli` reserved reason code);
+§A13 (audit-chain integration — `pds_admin_audit` rows
+hash-chain into the unified chain alongside `audit_log`);
+§A14 (one canonical action-recording path — manual bridge
+calls land in the same pipeline as policy-driven and
+moderator-direct actions).
 
 ## Pending policy actions ([§F22](../cairn-design.md#f22-policy-automation-v16))
 
@@ -442,6 +706,155 @@ the `moderators` table on the target cairn-mod instance.
 
 The label emission system this subcommand surfaces is documented
 in [cairn-design.md §F21](../cairn-design.md#f21-label-emission-against-moderation-state-v15).
+
+<a id="manage-known-xrpc-callers-f234"></a>
+
+## Manage known XRPC callers ([§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses))
+
+Manage the inbound gateway's `xrpc_known_callers` table —
+moderator DIDs whose **proxied `tools.ozone.moderation.*` calls
+through their upstream PDS** cairn-mod accepts. Direct DB; no
+HTTP, no moderator session. CLI-only management for v1.7 per
+§A12 (XRPC management of these tables is deferred — bootstrap
+problem: the admin XRPC surface is itself authenticated by
+service-auth, the same path being extended; granting the first
+caller via XRPC is circular).
+
+```
+# Add a known caller. --by is required and is recorded as
+# added_by_moderator on the new row. --note is optional
+# free-text (operator's own annotation, not surfaced anywhere).
+cairn xrpc-callers add did:plc:moderator \
+  --by did:plc:operator \
+  --note "added during v1.7 onboarding" \
+  --config /etc/cairn/cairn.toml
+
+# List active rows (default).
+cairn xrpc-callers list --config /etc/cairn/cairn.toml
+
+# Include revoked rows so operators can audit removal history.
+cairn xrpc-callers list --include-revoked --config /etc/cairn/cairn.toml
+
+# Revoke. --by records the operator running the command.
+cairn xrpc-callers revoke did:plc:moderator \
+  --by did:plc:operator \
+  --config /etc/cairn/cairn.toml
+```
+
+The list output is one line per row in the form
+`<did> <status> added@<ms> by <added_by_moderator> note=<note-or-->`,
+where `<status>` is `active` or `revoked@<ms>`.
+
+**Revocation is row-level irreversible.** A `revoke` flips the
+row's `revoked_at` and that flip stays — re-adding the same DID
+writes a *new* `xrpc_known_callers` row rather than reactivating
+the old one. The chain audits both events. Double-revoke against
+an already-revoked DID surfaces an error.
+
+**Distinct from `moderators`.** `moderators` controls direct
+service-auth calls to cairn-mod (the existing CLI / admin XRPC
+path); `xrpc_known_callers` controls **proxied** calls from
+upstream PDSes. The two tables overlap heavily in practice — a
+moderator who uses bsky.app routes through bsky-PDS proxy and
+needs both rows; the same moderator using `cairn moderator
+action` only needs the `moderators` row. The
+[`cairn moderator add --with-xrpc-callers`](#moderator-management)
+convenience flag handles the both-tables case in one CLI
+invocation.
+
+Worked example. Add → list → revoke → list:
+
+```
+$ cairn xrpc-callers add did:plc:moderator --by did:plc:operator --config /etc/cairn/cairn.toml
+added xrpc_known_caller: did:plc:moderator (by did:plc:operator)
+
+$ cairn xrpc-callers list --config /etc/cairn/cairn.toml
+did:plc:moderator active added@1714435200000 by did:plc:operator note=-
+
+$ cairn xrpc-callers revoke did:plc:moderator --by did:plc:operator --config /etc/cairn/cairn.toml
+revoked xrpc_known_caller: did:plc:moderator (by did:plc:operator)
+
+$ cairn xrpc-callers list --include-revoked --config /etc/cairn/cairn.toml
+did:plc:moderator revoked@1714438800000 added@1714435200000 by did:plc:operator note=-
+```
+
+Cross-references:
+[§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses)
+(the two-table trust model: known callers vs trusted PDSes);
+§A12 (CLI-only management for v1.7; XRPC management deferred);
+[§F23.8](../cairn-design.md#f238-reserved-reason-codes)
+(the membership table substitutes for pre-INSERT gates per
+#102's createReport dispatch).
+
+## Manage trusted PDSes ([§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses))
+
+Manage the inbound gateway's `xrpc_trusted_pdses` table —
+**PDS DIDs** whose **forwarded `com.atproto.moderation.createReport`
+calls** cairn-mod accepts. Same shape and posture as
+`cairn xrpc-callers`; the semantic distinction is which
+authorization question the table answers.
+
+The cryptographic distinction:
+
+- `xrpc_known_callers` is *moderator DIDs whose proxied
+  `tools.ozone.moderation.*` calls are accepted*. The verifying
+  signature is the moderator's own `#atproto` key (the user
+  signs the JWT; bsky-PDS proxies the request).
+- `xrpc_trusted_pdses` is *PDS DIDs whose forwarded
+  `com.atproto.moderation.createReport` calls are accepted*. The
+  verifying signature is the PDS's own service signing key (the
+  PDS itself signs the JWT, asserting on behalf of the user
+  whose DID appears in the request body's `reportedBy` field).
+
+A DID is typically only in one table or the other.
+
+```
+# Add a trusted PDS. --by is required.
+cairn xrpc-pdses add did:web:pds.example \
+  --by did:plc:operator \
+  --note "primary upstream PDS" \
+  --config /etc/cairn/cairn.toml
+
+# List active rows.
+cairn xrpc-pdses list --config /etc/cairn/cairn.toml
+
+# Include revoked rows.
+cairn xrpc-pdses list --include-revoked --config /etc/cairn/cairn.toml
+
+# Revoke.
+cairn xrpc-pdses revoke did:web:pds.example \
+  --by did:plc:operator \
+  --config /etc/cairn/cairn.toml
+```
+
+**Trust-boundary expansion.** Adding a PDS to
+`xrpc_trusted_pdses` is a meaningful trust gesture. Per the §4.9
+threat-model entry, cairn-mod transitively trusts the listed PDS
+to assert truthfully which user originated each forwarded report
+(the body's `reportedBy` field). cairn-mod cannot cryptographically
+verify that assertion — the JWT is signed by the PDS, not by the
+reporting user. A compromised or malicious upstream PDS could
+submit reports under arbitrary user DIDs, including DIDs that
+have never interacted with that PDS.
+
+Mitigation: only add upstream PDSes whose operation the operator
+trusts. Removing a PDS from this table immediately stops
+accepting forwarded reports from it (the membership check runs
+per request) — there is no cache or grace period. Reports from
+issuers outside `xrpc_trusted_pdses` continue through the
+user-direct path (per
+[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
+/ #102: there is only one route registration for createReport
+across the router stack, and the trusted-PDS branch is dispatched
+*within* that handler based on `is_trusted_pds(claims.iss)`).
+
+Cross-references:
+[§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses)
+(the two-table trust model);
+§A12 (CLI-only management for v1.7);
+[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
+(the membership-dispatch shape per #102; trust-table membership
+substitutes for the user-direct path's pre-INSERT gates).
 
 ## Trust-chain inspection
 

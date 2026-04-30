@@ -252,6 +252,30 @@ async fn post_handler(
         Err(_) => return auth_required(),
     };
 
+    // 2.5. Membership dispatch (#102). When `iss` is a member of
+    // `xrpc_trusted_pdses`, the request is a PDS-forwarded report
+    // (§A10): the body carries an explicit `reportedBy` field, the
+    // PDS asserts the originating user identity, and the user-direct
+    // path's pre-gates (rate-limit / suppression / disk-guard) are
+    // substituted by the trust-table membership check. Dispatch into
+    // the gateway-path handler and return its response directly.
+    //
+    // Fail-closed on lookup error: if the membership query fails (DB
+    // hiccup, etc.) we fall through to the user-direct path. The
+    // pre-gates are conservative; running them on a PDS-forwarded
+    // request that should have skipped is acceptable degradation
+    // versus opening the trusted-PDS path unconditionally.
+    let trusted = crate::xrpc_gateway::is_trusted_pds(&state.pool, &caller.iss)
+        .await
+        .unwrap_or(false);
+    if trusted {
+        return crate::xrpc_gateway::handlers::create_report::dispatch_pds_forwarded_report(
+            &state.pool,
+            &body,
+        )
+        .await;
+    }
+
     // 3. Parse body.
     let input: CreateReportInput = match serde_json::from_slice(&body) {
         Ok(v) => v,

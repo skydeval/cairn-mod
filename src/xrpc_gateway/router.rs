@@ -10,16 +10,26 @@
 //! # NSID surface
 //!
 //! Per §A7, the v1.7 NSID set is hard-coded in
-//! [`crate::xrpc_gateway::Nsid`] (not config-extensible). Routes:
+//! [`crate::xrpc_gateway::Nsid`] (not config-extensible). The
+//! gateway router mounts three of the four NSIDs; createReport
+//! is intentionally not mounted here (#102 — the user-direct
+//! `crate::server::create_report::create_report_router` is the
+//! single mount point for that NSID and dispatches to the gateway-
+//! path handler when the JWT issuer is in `xrpc_trusted_pdses`).
 //!
-//! | Path | Method | Stub returns |
-//! |------|--------|--------------|
-//! | `/xrpc/com.atproto.moderation.createReport` | POST | 501 (body in #96) |
-//! | `/xrpc/tools.ozone.moderation.emitEvent` | POST | 501 (body in #95) |
-//! | `/xrpc/tools.ozone.moderation.queryStatuses` | GET | 501 (body in #97) |
-//! | `/xrpc/tools.ozone.moderation.queryEvents` | GET | 501 (body in #98) |
+//! | Path | Method | Handler |
+//! |------|--------|---------|
+//! | `/xrpc/tools.ozone.moderation.emitEvent` | POST | `handlers::emit_event` (#95) |
+//! | `/xrpc/tools.ozone.moderation.queryStatuses` | GET | `handlers::query_statuses` (#97) |
+//! | `/xrpc/tools.ozone.moderation.queryEvents` | GET | `handlers::query_events` (#98) |
 //! | other `/xrpc/*` | any | 501 via fallback (`MethodNotImplemented`) |
 //! | known NSID + wrong method | other | 405 (`MethodNotAllowed`) |
+//!
+//! `Nsid::ComAtprotoModerationCreateReport` remains in the
+//! NSID enum because the membership middleware's NSID-aware
+//! dispatch still references it (different membership table for
+//! createReport vs the tools.ozone NSIDs); the gateway router
+//! just doesn't route to it.
 //!
 //! All five non-success outcomes use the **same XRPC error
 //! envelope** (`{"error": ..., "message": ...}`) per bsky findings
@@ -49,9 +59,7 @@ use sqlx::{Pool, Sqlite};
 
 use crate::xrpc_gateway::auth::XrpcAuthService;
 use crate::xrpc_gateway::config::XrpcGatewayConfig;
-use crate::xrpc_gateway::handlers::{
-    XrpcGatewayState, create_report, emit_event, query_events, query_statuses,
-};
+use crate::xrpc_gateway::handlers::{XrpcGatewayState, emit_event, query_events, query_statuses};
 use crate::xrpc_gateway::middleware::{
     xrpc_auth_middleware, xrpc_membership_middleware, xrpc_replay_middleware,
 };
@@ -157,11 +165,18 @@ pub fn build_router(
 /// in `tests/xrpc_gateway_*.rs` (full-stack) and the in-crate
 /// router tests below (full-stack with fixture state).
 fn routes() -> Router {
+    // createReport is NOT mounted here (#102). The user-direct
+    // router at `crate::server::create_report` is the single mount
+    // point for `/xrpc/com.atproto.moderation.createReport`; that
+    // handler dispatches to the gateway-path logic (per #96, now
+    // in `crate::xrpc_gateway::handlers::create_report::dispatch_pds_forwarded_report`)
+    // when the JWT issuer is in `xrpc_trusted_pdses`. Mounting on
+    // both routers panicked at startup via `Router::merge`'s
+    // duplicate-route detector. The membership middleware's
+    // NSID-aware dispatch retains the `Nsid::ComAtprotoModerationCreateReport`
+    // arm — the variant is still part of the closed enum even
+    // though the gateway router doesn't route to it.
     Router::new()
-        .route(
-            "/xrpc/com.atproto.moderation.createReport",
-            post(handle_create_report).fallback(handle_method_not_allowed),
-        )
         .route(
             "/xrpc/tools.ozone.moderation.emitEvent",
             post(handle_emit_event).fallback(handle_method_not_allowed),
@@ -189,15 +204,15 @@ fn routes() -> Router {
 // auth middleware can compose without extractor-collision
 // surprises.
 
-// `com.atproto.moderation.createReport` — body in
-// [`crate::xrpc_gateway::handlers::create_report`] (#96).
-async fn handle_create_report(
-    state: Extension<XrpcGatewayState>,
-    claims: Extension<crate::xrpc_gateway::XrpcAuthClaims>,
-    body: axum::body::Bytes,
-) -> Response {
-    create_report::handler(state, claims, body).await
-}
+// `com.atproto.moderation.createReport` — NOT mounted here as of
+// #102. See the `routes()` function comment for the dispatch-
+// not-mount rationale; the handler lives at the user-direct
+// `crate::server::create_report::create_report_router` and
+// dispatches into `crate::xrpc_gateway::handlers::create_report::dispatch_pds_forwarded_report`
+// when membership in `xrpc_trusted_pdses` confirms the JWT issuer.
+// emitEvent / queryStatuses / queryEvents below are unaffected by
+// #102 — they have no user-direct equivalent and stay mounted
+// on the gateway router.
 
 // `tools.ozone.moderation.emitEvent` — body in
 // [`crate::xrpc_gateway::handlers::emit_event`] (#95).
@@ -364,8 +379,14 @@ mod tests {
         // post-auth + post-membership + post-replay.
         let url = spawn_authed().await;
         // POST-only NSIDs hit with GET; GET-only NSIDs hit with POST.
+        // createReport is excluded post-#102: it's no longer
+        // mounted on the gateway router (the user-direct router
+        // owns the mount + dispatches to the gateway path via
+        // membership check). A GET to createReport now lands on the
+        // gateway router's unknown-NSID fallback (501); separate
+        // test coverage for that path lives in
+        // tests/xrpc_gateway_create_report.rs.
         let cases: &[(reqwest::Method, &str)] = &[
-            (reqwest::Method::GET, "com.atproto.moderation.createReport"),
             (reqwest::Method::GET, "tools.ozone.moderation.emitEvent"),
             (
                 reqwest::Method::POST,
@@ -814,18 +835,30 @@ mod tests {
         );
     }
 
+    // The trusted-PDS createReport happy path and untrusted-PDS
+    // 403 path are both moved to tests/xrpc_gateway_create_report.rs
+    // post-#102 — createReport is no longer mounted on the gateway
+    // router (the user-direct router is the single mount point and
+    // dispatches via membership check). The full-stack tests in
+    // the integration test file exercise both branches end-to-end;
+    // verifying them through the gateway-only fixture here would
+    // pin behavior we explicitly retired.
+    //
+    // What remains testable from inside this file: that POST to
+    // createReport via the gateway router falls through to the
+    // unknown-NSID 501 fallback, since createReport isn't a route
+    // on this router anymore.
     #[tokio::test]
-    async fn trusted_pds_can_call_create_report() {
-        // Issuer is in xrpc_trusted_pdses. createReport passes
-        // membership and reaches the handler. Empty body → 400
-        // InvalidRequest from the post-#96 handler. The important
-        // assertion is that membership did NOT short-circuit at
-        // 403 (which would mean the trusted-PDS gate is broken).
-        let pool = empty_pool().await;
-        add_trusted_pds(&pool, fx::ISSUER_DID, Some("test"), "did:plc:m")
-            .await
-            .unwrap();
-        let url = spawn_with_pool(pool).await;
+    async fn create_report_falls_through_to_unknown_nsid_on_gateway_router() {
+        // Per #102: createReport is intentionally NOT mounted on
+        // the gateway router. With valid auth + valid membership
+        // (build_test_pool seeds both tables), the request passes
+        // all three middleware layers and hits the router's
+        // unknown-NSID fallback at route dispatch — confirming the
+        // route truly isn't there. (The user-direct mount +
+        // dispatch happens at the composed top-level cairn-mod
+        // router, not this gateway-only fixture.)
+        let url = spawn_authed().await;
         let jwt = fx::build_jwt(
             &fx::valid_claims("com.atproto.moderation.createReport"),
             "ES256K",
@@ -836,24 +869,12 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(res.status().as_u16(), 400);
-    }
-
-    #[tokio::test]
-    async fn untrusted_pds_create_report_returns_403() {
-        let pool = empty_pool().await;
-        let url = spawn_with_pool(pool).await;
-        let jwt = fx::build_jwt(
-            &fx::valid_claims("com.atproto.moderation.createReport"),
-            "ES256K",
+        assert_eq!(res.status().as_u16(), 501);
+        let body: serde_json::Value = res.json().await.unwrap();
+        assert_eq!(
+            body.get("error").and_then(|v| v.as_str()),
+            Some("MethodNotImplemented")
         );
-        let res = client()
-            .post(format!("{url}/xrpc/com.atproto.moderation.createReport"))
-            .header("authorization", auth_header(&jwt))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(res.status().as_u16(), 403);
     }
 
     #[tokio::test]

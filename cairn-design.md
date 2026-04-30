@@ -1393,7 +1393,9 @@ Other event types (`modEventEscalate`, `modEventResolveAppeal`, `modEventMute`, 
 
 **Defense-in-depth on `createdBy`.** The wire shape carries a `createdBy` DID; cairn-mod enforces `createdBy == claims.iss`. The auth middleware already proved who the caller is; the wire field is preserved for Ozone-client compatibility but `claims.iss` is the authoritative actor.
 
-When `com.atproto.moderation.createReport` arrives (PDS-signed per §F23.4), it lands in the existing `reports` table for the §F11 / §F12 / §F17 resolution surface to handle unchanged. The lexicon's `reasonType` is stored verbatim — cairn-mod's `reports.reason_type` already uses lexicon `$type` strings, no translation table needed. The `reportedBy` field is taken verbatim from the request body (transitively trusted per §F23.4).
+`com.atproto.moderation.createReport` is the existing report-intake endpoint (§F11). When `[xrpc_gateway].enabled = true`, the endpoint additionally accepts PDS-forwarded reports — verified service-auth JWTs whose issuer is in `xrpc_trusted_pdses` skip the user-direct path's pre-gates (rate-limit / suppression / disk-guard) because the membership table substitutes for those gates. Reports from issuers outside `xrpc_trusted_pdses` continue through the user-direct path unchanged.
+
+The dispatch lives at the user-direct router's mount point — there is **only one** route registration for `/xrpc/com.atproto.moderation.createReport` across the whole router stack. The PDS-forwarded path is a branch within that handler, gated on `is_trusted_pds(claims.iss)`. This shape was finalized in #102 after a Phase B verification finding caught the duplicate-route panic that an earlier separate-mount design produced. The branch difference: the dispatched path takes `reportedBy` verbatim from the request body (transitively trusted per §F23.4); the user-direct path uses `claims.iss` as `reported_by` (the user authenticated directly, no body field). Both paths land rows in the same `reports` table for the §F11 / §F12 / §F17 resolution surface to handle unchanged. The lexicon's `reasonType` is stored verbatim on either path — cairn-mod's `reports.reason_type` already uses lexicon `$type` strings, no translation table needed.
 
 **Projection policy for the read endpoints.** The two read NSIDs project cairn-mod's internal data model into Ozone's read-side wire shapes. The translation logic lives in `src/xrpc_gateway/handlers/projections/` as pure functions; the field-by-field decisions are surfaceable in one file per endpoint.
 
@@ -1905,7 +1907,11 @@ If step 7 fails with a non-success bridge outcome, the CLI surfaces the underlyi
 This flow requires bsky-PDS operator coordination. cairn-mod's gateway accepts inbound calls; the upstream bsky-PDS is what forwards them. Both ends must be configured.
 
 1. **Publish cairn-mod's service DID.** Per §F23.6's `service_did` convention. If using `did:web:<host>`, publish a `.well-known/did.json` document at the operator's host with the labeler's `#atproto` verification method. The `did:web` resolution path is what bsky-PDS users' clients use to mint service-auth JWTs targeting cairn-mod.
-2. **Configure bsky-PDS's `tools.ozone.*` proxy URL** (the env var name varies — historically `PDS_OZONE_URL` on bsky-PDS deployments; verify against the operator's current bsky-PDS docs). Setting it points the PDS's `tools.ozone.moderation.*` proxy at cairn-mod. Operator must restart bsky-PDS for the change to take effect.
+2. **Configure bsky-PDS's moderation-service env vars.** Two paired variables on the bsky-PDS side route `tools.ozone.moderation.*` traffic to cairn-mod (verified against `@atproto/pds@0.4.219` source — both names are stable for the bsky-PDS versions cairn-mod v1.7 is calibrated against):
+   - `PDS_MOD_SERVICE_URL` — the URL bsky-PDS forwards proxied `tools.ozone.moderation.*` calls to. Set to cairn-mod's public base URL (e.g., `https://cairn.example.com`).
+   - `PDS_MOD_SERVICE_DID` — the DID bsky-PDS uses as the `aud` claim when minting service-auth JWTs for forwarded requests. Set to the `service_did` from `[xrpc_gateway]` (e.g., `did:web:cairn.example.com`).
+
+   Operator must restart bsky-PDS for the changes to take effect.
 3. **Configure bsky-PDS's `PDS_REPORT_SERVICE_URL` env var** if forwarding `com.atproto.moderation.createReport` is desired (per A10 / §F23.4). Same restart-required note. Skip this step if the operator wants reports to remain on the user-direct path (§F11) only.
 4. **Declare the `xrpc-gateway-default` reserved reason code in `[moderation_reasons]`** (per §F23.8). Without this, inbound `modEventTakedown` / `modEventComment` / `modEventReverseTakedown` events that don't carry an explicit `createLabelVals` fail with `ReasonNotFound`.
 5. **Edit cairn-mod's TOML config** to set `[xrpc_gateway].enabled = true` and populate `service_did`, `replay_cache_ttl_seconds`, `clock_skew_tolerance_seconds`. See §F23.6 for the full example.
@@ -1923,7 +1929,7 @@ This flow requires bsky-PDS operator coordination. cairn-mod's gateway accepts i
    ```
    cairn xrpc-pdses add did:web:bsky.example.com --note "primary PDS" --by did:plc:operator
    ```
-   Per §F23.4: adding a PDS extends transitive trust to the PDS's `reportedBy` assertions. Only add upstream PDSes the operator trusts the operation of (see threat-model §4.9).
+   Per §F23.4: adding a PDS extends transitive trust to the PDS's `reportedBy` assertions. Only add upstream PDSes the operator trusts the operation of (see threat-model §4.9). The seeded membership doesn't mount a new route — it controls dispatch *within* the existing `createReport` endpoint (per §F23.5 / #102): a forwarded request from a seeded PDS skips the user-direct path's pre-gates and accepts `reportedBy` from the body; everything else continues through the user-direct path unchanged.
 9. **Verify with a probe call.** From a moderator's bsky.app client (or any client that proxies through bsky-PDS), attempt a `tools.ozone.moderation.emitEvent` against a test subject. Check cairn-mod's logs for the layer outcomes (`auth verification succeeded`, membership-allowed, replay-novel) and check `cairn moderator events --subject <test-did>` for the resulting recordAction. If any layer rejects, the response status indicates which (401 = auth, 403 = membership, 400 ExpiredToken = replay).
 
 #### 19.5.4 Verification dance for combined deployment

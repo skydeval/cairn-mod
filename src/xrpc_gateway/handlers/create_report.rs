@@ -1,12 +1,22 @@
-//! `com.atproto.moderation.createReport` handler body (#96, v1.7).
+//! `com.atproto.moderation.createReport` PDS-forwarded path (#96, #102, v1.7).
 //!
-//! Phase D's second handler. PDS-signed inbound flow per §A10:
-//! upstream PDSes forward user-filed reports here, and cairn-mod
-//! inserts a row into the existing `reports` table — the same
-//! table the user-direct intake at
-//! `crate::server::create_report` (the user-direct intake module) writes into. From there,
-//! cairn-mod's existing report-resolution surface (§F11/§F12/§F17
-//! — admin XRPC + CLI) handles the row unchanged.
+//! Phase D's second handler — refactored in #102 from a separate
+//! gateway-router mount into a **dispatched branch within the
+//! existing user-direct `create_report_router`**. The mount point
+//! at `/xrpc/com.atproto.moderation.createReport` lives in
+//! `crate::server::create_report` (the user-direct intake module);
+//! that handler verifies the service-auth JWT, then looks up
+//! `is_trusted_pds(claims.iss)`. Trusted-PDS hits dispatch into
+//! [`dispatch_pds_forwarded_report`] (this module); other hits
+//! continue through the user-direct path with its existing
+//! pre-gates (rate-limit / suppression / disk-guard).
+//!
+//! Pre-#102 this module mounted its own route on the gateway
+//! router. That mount conflicted with the user-direct mount at
+//! the same NSID and panicked at startup when `[xrpc_gateway]
+//! .enabled = true` and `create_report_router` was composed
+//! alongside via `Router::merge`. The dispatch-not-mount fix
+//! preserves both flows under a single endpoint.
 //!
 //! # Auth path differs from emitEvent
 //!
@@ -15,9 +25,8 @@
 //! the originating user's DID is asserted on the wire as the
 //! `reportedBy` field. cairn-mod cannot cryptographically verify
 //! that assertion — operators trust upstream PDSes by adding them
-//! to `xrpc_trusted_pdses`. The membership middleware (refactored
-//! from #94) routes this NSID to `is_trusted_pds` so the gate is
-//! the PDS's DID, not the reporter's.
+//! to `xrpc_trusted_pdses`. The dispatch in `crate::server::create_report`
+//! decides whether to route here based on that membership check.
 //!
 //! # No translation table for reasonType
 //!
@@ -39,9 +48,7 @@
 //! gates, they can keep their PDS off `xrpc_trusted_pdses` and
 //! point clients at the user-direct route instead.
 
-use axum::Extension;
 use axum::Json;
-use axum::body::Bytes;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -50,10 +57,6 @@ use sqlx::{Pool, Sqlite};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
-
-use crate::xrpc_gateway::XrpcAuthClaims;
-
-use super::XrpcGatewayState;
 
 /// `reasonType` allowlist — identical to the user-direct path's
 /// `crate::server::create_report` (the user-direct intake module) allowlist (§F11). Widening
@@ -179,27 +182,34 @@ pub struct ReportView {
 // Handler
 // ==========================================================================
 
-/// Handler entry point. Wired into the gateway router by
-/// [`crate::xrpc_gateway::router::build_router`] for
-/// `POST /xrpc/com.atproto.moderation.createReport`.
+/// PDS-forwarded report dispatch entry point. Called from the
+/// user-direct router (`crate::server::create_report`) when
+/// `claims.iss` is a member of `xrpc_trusted_pdses`. Bypasses the
+/// user-direct path's pre-gates (rate-limit / suppression /
+/// disk-guard) per §A10 — the trust-table membership is the
+/// substituted abuse gate.
 ///
 /// Pipeline:
-/// 1. Parse the request body. Malformed JSON → 400 `InvalidRequest`.
+/// 1. Parse the request body as the gateway-shaped
+///    [`CreateReportRequest`] (with `reportedBy`, distinct from
+///    the user-direct shape's body without `reportedBy`). Malformed
+///    JSON → 400 `InvalidRequest`.
 /// 2. Validate `reasonType` against the allowlist + `reason`
 ///    length cap. Failure → 400.
-/// 3. Validate the subject discriminator (DID syntax, AT-URI
-///    syntax, CID non-empty). Failure → 400.
-/// 4. Validate `reportedBy` is DID-shaped — defense-in-depth so a
+/// 3. Validate `reportedBy` is DID-shaped — defense-in-depth so a
 ///    malformed PDS-asserted DID can't poison the table.
+/// 4. Validate the subject discriminator (DID syntax, AT-URI
+///    syntax, CID non-empty). Failure → 400.
 /// 5. INSERT into `reports` and read back the assigned `id`.
 /// 6. Build the [`ReportView`] response, echoing the original
 ///    `subject` bytes from the parsed input.
-pub(crate) async fn handler(
-    Extension(state): Extension<XrpcGatewayState>,
-    Extension(_claims): Extension<XrpcAuthClaims>,
-    body: Bytes,
-) -> Response {
-    let req: CreateReportRequest = match serde_json::from_slice(&body) {
+///
+/// `body` is the raw request bytes the caller already read. The
+/// caller already verified the JWT and confirmed `iss` membership
+/// in `xrpc_trusted_pdses`; this function trusts that gate fired
+/// upstream.
+pub async fn dispatch_pds_forwarded_report(pool: &Pool<Sqlite>, body: &[u8]) -> Response {
+    let req: CreateReportRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return invalid_request(format!("malformed request body: {e}")),
     };
@@ -231,7 +241,7 @@ pub(crate) async fn handler(
         }
     };
 
-    let id = match insert_report(&state.pool, &req, &translated, &created_at).await {
+    let id = match insert_report(pool, &req, &translated, &created_at).await {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(

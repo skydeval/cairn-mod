@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 ### Changed
+
+### Fixed
+
+### Deprecated
+
+### Removed
+
+### Security
+
+## [1.7.0] - 2026-04-30
+
+> v1.7 "PDS-side enforcement bridge & inbound XRPC gateway" closes
+> the loop between cairn-mod and the operator's PDS in two halves.
+> Outbound: a `[pds_admin]` config block declares operator-trusted
+> PDS credentials and an action-type-to-backend-method mapping;
+> cairn-mod's existing recordAction pipeline now propagates
+> account-state changes (takedown / temp suspension / restore) to
+> the configured PDS in lockstep with label emission. Inbound: a new
+> `xrpc_gateway` accepts proxied `tools.ozone.moderation.*` calls
+> and PDS-forwarded `com.atproto.moderation.createReport` — making
+> cairn-mod a usable Ozone replacement for operators on bsky-PDS.
+> Both halves preserve cairn-mod's audit-chain discipline (every
+> backend call hash-chains into the existing audit log; every
+> inbound mutation lands via the canonical recordAction path).
+> v1.7 ships bsky-PDS support; the `PdsAdminBackend` trait
+> abstraction accommodates v1.8's Aurora-Locus backend without API
+> changes. Disabled by default — operators upgrading from v1.6 see
+> no behavior change unless they opt in.
+
+### Added
+
+### Changed
 - [pds_admin] config block: parsing, validation, schema (#83)
 - [pds_admin] `PdsAdminBackend` trait + `BackendError` + `BackendActionId` + `Subject` types (#84)
 - [pds_admin] `pds_admin_audit` table + unified hash chain spanning `audit_log` (#85)
@@ -51,6 +83,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actions. Fixed across all four layers + `cairn moderator history`
   tabular output gains an ACTOR column (a1c71cb; caught during Phase
   B verification).
+- Startup panic on `[xrpc_gateway].enabled = true`: both
+  `src/server/create_report.rs` and `src/xrpc_gateway/router.rs`
+  registered `POST /xrpc/com.atproto.moderation.createReport`, and
+  `axum::Router::merge` panicked on the duplicate route at
+  `serve.rs:257`. Fix: gateway router no longer mounts createReport;
+  the user-direct `create_report_router` is the single mount point
+  and dispatches to the gateway path's logic when the JWT issuer is
+  in `xrpc_trusted_pdses` (PDS-forwarded reports skip pre-gates +
+  take `reportedBy` from the body); other reports continue through
+  the user-direct path with pre-gates intact. §F23.5 + §19.5.3
+  updated to reflect the dispatch-not-mount architecture. v1.6 → v1.7
+  with `[xrpc_gateway].enabled = false` is unchanged. (#102; caught
+  during Phase B verification)
 
 ### Removed
 
