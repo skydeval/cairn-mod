@@ -31,6 +31,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously-named state-conflict cases. **Not yet writeable** — the SQL
   CHECK constraint relaxation lands in a later v1.8.1 migration step
   alongside the new `error_category` column.
+- v1.8.1 cross-release type-system foundation (partial). Foundation
+  types consumed by later v1.8.x releases that have v1.8.1 as their
+  shape ground-truth:
+  - `BackendActionId` migrated from a wrapper-string newtype to an
+    enum with `PerEvent(String)` and `PerBatch(String)` variants. The
+    `pds_admin_audit.backend_action_id` wire format is unchanged
+    (variant tag is Rust-only; serialization round-trips the inner
+    string only). v1.7-shaped call sites continue to use
+    `BackendActionId::new(..)`, which produces `PerEvent`. The
+    `PerBatch` variant is reserved for v1.8.5+ batch-action consumers.
+  - `CapabilityVersion(u32)` newtype with `parse_suffix("vN")` and
+    free-function `parse_capability_string("family-vN")`. No
+    operator impact yet — Aurora-Locus capability-gated trait
+    surface ships in later v1.8.x releases.
+  - `CapabilityClassification` (`AutoAdvance` / `OperatorOptIn`) +
+    empty `CAPABILITY_CLASSIFICATIONS` registry + `classification_for`
+    lookup helper. Registry populates as later v1.8.x releases
+    introduce capability-gated trait methods.
+  - `PaginationCursor(String)` opaque-string newtype. cairn-mod
+    treats the cursor as opaque round-trip data; first paginated
+    consumer ships in v1.8.3.
+  - `AuditTrailEntryRead` and `AuditTrailEntryWrite` upstream-audit
+    record types. `subjects` and `event_payload` carry
+    `serde_json::Value` placeholders pending the polymorphic
+    `Subject` and `EventPayload` types' first-consumer landings;
+    no v1.8.1 code path constructs these yet.
 
 ### Changed
 - `apply_label` and `negate_label` on `OzoneBackend` now return

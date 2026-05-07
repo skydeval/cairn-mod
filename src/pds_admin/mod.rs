@@ -56,4 +56,8 @@ pub use dispatch::{
     dispatch_after_revoke_action,
 };
 pub use ozone::OzoneBackend;
-pub use types::Subject;
+pub use types::{
+    AuditTrailEntryRead, AuditTrailEntryWrite, CAPABILITY_CLASSIFICATIONS,
+    CapabilityClassification, CapabilityVersion, PaginationCursor, Subject, classification_for,
+    parse_capability_string,
+};

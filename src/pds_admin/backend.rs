@@ -16,7 +16,7 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::types::Subject;
 
@@ -29,52 +29,118 @@ use super::types::Subject;
 /// - **bsky-PDS** (v1.7's `OzoneBackend`)'s
 ///   `com.atproto.admin.updateSubjectStatus` returns no id at
 ///   all; the backend implementation synthesizes one
-///   client-side (e.g., a UUID or a `(timestamp, subject)`
-///   tuple — chosen at #86 implementation time).
+///   client-side (`ozone:{did}:{precipitating_action_id}` per
+///   `synthesize_action_id`).
 ///
 /// cairn-mod's audit log treats the value as opaque; only the
-/// backend that issued it can interpret it. Stored as `String`
-/// for serialization simplicity; backends may encode structured
-/// data (e.g., JSON) when needed.
+/// backend that issued it can interpret it. The wire string
+/// stored in `pds_admin_audit.backend_action_id` is unchanged
+/// across the v1.7→v1.8+ shape evolution — the variant tag is
+/// a Rust-only concern.
+///
+/// # Variants
+///
+/// - [`Self::PerEvent`] — single-event action (one emitEvent
+///   call, one `updateSubjectStatus`). v1.7's
+///   `OzoneBackend::synthesize_action_id` returns this.
+/// - [`Self::PerBatch`] — batch action covering multiple
+///   subjects (Aurora-Locus's `emitEvent` is polymorphic over
+///   a `subjects` array; v1.8.5 introduces the first
+///   consumers).
+///
+/// v1.7-stored values are all per-event by construction
+/// (v1.7 has no batch concept). The future schema migration
+/// adding an `action_id_kind` column to `pds_admin_audit`
+/// (chainlink #110) backfills existing rows to `'PerEvent'`
+/// and lets the writer dispatch by variant for new rows.
 ///
 /// # Construction
 ///
-/// Construction is explicit via [`Self::new`]. There's
-/// deliberately no `From<String>` blanket impl — backend
-/// boundaries should be unambiguous in code review (a `.into()`
-/// at a backend's response-mapping site is harder to grep for
-/// than a `BackendActionId::new(...)`).
+/// [`Self::new`] is the v1.7-compat constructor — equivalent
+/// to `Self::PerEvent(id.into())` and used by every existing
+/// call site without needing a per-call-site update for the
+/// variant migration. Direct variant construction
+/// (`BackendActionId::PerEvent(...)` /
+/// `BackendActionId::PerBatch(...)`) is also fine and
+/// preferred at sites that mean to be explicit about the
+/// kind. There's deliberately no `From<String>` blanket impl
+/// — backend boundaries should be unambiguous in code review.
+///
+/// # Wire serialization
+///
+/// `Serialize` and `Deserialize` round-trip the inner string
+/// only — no variant discriminator. This keeps the
+/// `pds_admin_audit.backend_action_id` column's TEXT shape
+/// hash-stable across v1.7-state rows and v1.8.1-written rows
+/// (the unified hash chain reads the column as `&str` and
+/// would notice a serialization-shape change). Deserialization
+/// always produces [`Self::PerEvent`]; the variant tag for
+/// PerBatch travels via a separate column added by the
+/// chainlink-#110 migration, not through the action-id
+/// serialization itself.
 ///
 /// # Equality and hashing
 ///
-/// `Eq + Hash` is intentional: v1.8+ retry logic and the audit
-/// table's lookup paths use this type as a `HashMap` /
-/// `HashSet` key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BackendActionId(String);
+/// `Eq + Hash` is intentional: v1.8+ retry logic and the
+/// audit table's lookup paths use this type as a `HashMap` /
+/// `HashSet` key. `PerEvent("x")` and `PerBatch("x")` compare
+/// **unequal** despite having the same wire string — the
+/// variant tag participates in equality.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum BackendActionId {
+    /// Single-event action — one upstream call, one identifier.
+    /// v1.7's `OzoneBackend` produces this exclusively.
+    PerEvent(String),
+    /// Batch action covering multiple subjects. v1.8.5+
+    /// consumers (Aurora-Locus's polymorphic `emitEvent`)
+    /// produce this. Reserved in v1.8.1; not constructed by
+    /// any v1.8.1 code path.
+    PerBatch(String),
+}
 
 impl BackendActionId {
-    /// Wrap a backend-issued identifier string. The caller is
-    /// responsible for any backend-specific normalization
-    /// (e.g., trimming whitespace, lowercasing hex) before
-    /// construction.
+    /// Wrap a backend-issued identifier as a per-event action.
+    /// v1.7-compat constructor — equivalent to
+    /// `Self::PerEvent(id.into())`. The caller is responsible
+    /// for any backend-specific normalization (trimming
+    /// whitespace, lowercasing hex) before construction.
+    ///
+    /// Use this at v1.7-shaped call sites (every current
+    /// caller); use the explicit variant constructor at v1.8.5+
+    /// call sites that introduce batch identifiers.
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self::PerEvent(id.into())
     }
 
-    /// Borrow the underlying identifier as a `&str`. Use this
-    /// at consumer sites (audit-row construction, log lines)
-    /// rather than `Display` when the value is being stored or
+    /// Borrow the underlying identifier as a `&str`,
+    /// regardless of variant. Use at consumer sites
+    /// (audit-row construction, log lines) rather than
+    /// [`fmt::Display`] when the value is being stored or
     /// matched programmatically — `as_str` is grep-friendlier
     /// than `to_string()`.
     pub fn as_str(&self) -> &str {
-        &self.0
+        match self {
+            Self::PerEvent(s) | Self::PerBatch(s) => s.as_str(),
+        }
     }
 }
 
 impl fmt::Display for BackendActionId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for BackendActionId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendActionId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::PerEvent(s))
     }
 }
 
@@ -742,6 +808,63 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let back: BackendActionId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn backend_action_id_new_constructs_per_event() {
+        // v1.7-compat constructor produces PerEvent — every existing
+        // call site (synthesize_action_id, audit-row reads) gets the
+        // PerEvent variant transparently.
+        let id = BackendActionId::new("ozone:did:plc:abc:42");
+        assert!(matches!(id, BackendActionId::PerEvent(_)));
+    }
+
+    #[test]
+    fn backend_action_id_per_batch_as_str_returns_inner() {
+        let id = BackendActionId::PerBatch("batch-7".to_string());
+        assert_eq!(id.as_str(), "batch-7");
+        assert_eq!(format!("{id}"), "batch-7");
+    }
+
+    #[test]
+    fn backend_action_id_per_event_and_per_batch_compare_unequal() {
+        // Variant tag participates in equality even when the inner
+        // wire string is identical — required so HashMap lookups
+        // don't conflate the two action shapes.
+        let evt = BackendActionId::PerEvent("x".to_string());
+        let batch = BackendActionId::PerBatch("x".to_string());
+        assert_ne!(evt, batch);
+
+        let mut map: std::collections::HashMap<BackendActionId, &'static str> =
+            std::collections::HashMap::new();
+        map.insert(evt.clone(), "single");
+        map.insert(batch.clone(), "batched");
+        assert_eq!(map.get(&evt), Some(&"single"));
+        assert_eq!(map.get(&batch), Some(&"batched"));
+    }
+
+    #[test]
+    fn backend_action_id_serializes_as_bare_string_no_variant_tag() {
+        // Wire compatibility with v1.7's newtype shape — the
+        // pds_admin_audit.backend_action_id column is a single
+        // TEXT, hash-relevant; the variant tag must not leak.
+        let evt = BackendActionId::PerEvent("ozone:did:x:1".to_string());
+        let json = serde_json::to_string(&evt).unwrap();
+        assert_eq!(json, "\"ozone:did:x:1\"");
+
+        let batch = BackendActionId::PerBatch("ozone:batch:1".to_string());
+        let json = serde_json::to_string(&batch).unwrap();
+        assert_eq!(json, "\"ozone:batch:1\"");
+    }
+
+    #[test]
+    fn backend_action_id_deserializes_string_as_per_event() {
+        // Step 7's chainlink-#110 migration adds a discriminator
+        // column so PerBatch can ride a separate channel; until
+        // then, every wire deserialization produces PerEvent (the
+        // v1.7-compat backfill rule).
+        let id: BackendActionId = serde_json::from_str("\"ozone:did:x:1\"").unwrap();
+        assert_eq!(id, BackendActionId::PerEvent("ozone:did:x:1".to_string()));
     }
 
     // ===== BackendError variant rendering =====

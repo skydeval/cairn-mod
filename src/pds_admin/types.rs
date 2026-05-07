@@ -24,6 +24,8 @@
 //!
 //! [`PdsAdminBackend`]: crate::pds_admin::PdsAdminBackend
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// Subject of a label apply / negate call.
@@ -158,5 +160,477 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Subject = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+}
+
+// ===========================================================================
+// Cross-release type-system foundation
+// ===========================================================================
+//
+// The types below are the v1.8.1 ground-truth-stable foundation consumed
+// by v1.8.2 onward. They land here because §5.1's additive-only rule
+// requires later releases to use existing types — but they don't have
+// v1.8.1 callers themselves.
+//
+// Surface-dependent siblings (Subject as a polymorphic Aurora-Locus
+// shape, OAuthScope + credential types, Capability/CapabilitySet +
+// describeCapabilities parser, PaginationRequest + PaginationOrdering)
+// defer to their first cross-release consumer per the umbrella's
+// types-deferred-to-first-consumer carve-out — see chainlinks #106-#109
+// for tracking.
+
+/// Versioned suffix on a capability family string, parsed from the
+/// trailing `-vN` segment.
+///
+/// Capability strings advertised by Aurora-Locus follow a
+/// `family-vN` convention where `family` is the human-readable
+/// surface name (e.g. `subject-context`) and `vN` is a
+/// monotonically-increasing version tag. `CapabilityVersion` wraps
+/// that integer.
+///
+/// # Why `u32` and not semver
+///
+/// The Aurora-Locus capability advertisement contract is
+/// monotonic-increment per family (`v1` → `v2` → `v3`); breaking
+/// changes ship as a new major version of the family string itself,
+/// not as a semver bump. Adopting semver here would add
+/// expressiveness the wire surface doesn't use and would bend the
+/// `parse_suffix` parser into accepting forms (`v1.2.3`,
+/// `v1-rc1`) that don't appear in advertisements. Adding semver
+/// later is a series-level revision per the v1.8 lock-ins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CapabilityVersion(pub u32);
+
+impl CapabilityVersion {
+    /// Parse a `vN` suffix into a [`CapabilityVersion`].
+    ///
+    /// Accepts `"v0"`, `"v1"`, `"v17"`, `"v999"`. Rejects:
+    /// - missing or non-`v` prefix (`""`, `"1"`, `"V1"`),
+    /// - non-numeric tail (`"v0a"`, `"v1.0"`, `"v1-rc1"`),
+    /// - empty tail (`"v"`),
+    /// - leading whitespace or other surrounding noise.
+    ///
+    /// Returns `None` for any of those — the caller decides
+    /// whether unparseable means "treat as unversioned" or
+    /// "reject the advertisement."
+    pub fn parse_suffix(s: &str) -> Option<Self> {
+        let n = s.strip_prefix('v')?;
+        if n.is_empty() {
+            return None;
+        }
+        n.parse::<u32>().ok().map(CapabilityVersion)
+    }
+}
+
+impl fmt::Display for CapabilityVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0)
+    }
+}
+
+/// Split a capability string `family-vN` into its `(family, version)`
+/// components.
+///
+/// Returns `None` for unversioned strings (no `-v` segment) and for
+/// strings whose suffix isn't a valid [`CapabilityVersion::parse_suffix`]
+/// input. The family substring is whatever precedes the final `-v`;
+/// multi-dash families like `tools-aurora-foo-v3` parse to
+/// `("tools-aurora-foo", v3)`.
+///
+/// Best-effort: treats only the **last** `-v` occurrence as the
+/// version separator, so a family that legitimately contains `-v`
+/// elsewhere (e.g. a hypothetical `early-vintage-loader-v2`)
+/// resolves correctly to `("early-vintage-loader", v2)`.
+pub fn parse_capability_string(s: &str) -> Option<(String, CapabilityVersion)> {
+    let (family, suffix) = s.rsplit_once("-v")?;
+    if family.is_empty() {
+        return None;
+    }
+    // CapabilityVersion::parse_suffix expects a leading `v`.
+    let with_v = format!("v{suffix}");
+    let version = CapabilityVersion::parse_suffix(&with_v)?;
+    Some((family.to_string(), version))
+}
+
+/// Operator-policy classification for a capability family.
+///
+/// Aurora-Locus advertises capabilities at fine granularity; cairn-mod
+/// classifies each family by how the operator should treat its
+/// presence/absence transitions.
+///
+/// - [`Self::AutoAdvance`]: cairn-mod automatically uses the highest
+///   advertised version on every cap-set refresh. Suitable for
+///   read-only / monotonically-improving families where moving forward
+///   carries no operator risk.
+/// - [`Self::OperatorOptIn`]: cairn-mod requires the operator to
+///   explicitly pin a version (or accept the default at config time).
+///   Suitable for families whose new versions could change behavior
+///   the operator has tested against a specific version.
+///
+/// The registry is empty in v1.8.1 — no families are classified yet
+/// because no cap-gated trait method consumers exist. Populated by
+/// later v1.8.x releases as they introduce consumers (see
+/// [`CAPABILITY_CLASSIFICATIONS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityClassification {
+    /// Auto-advance to highest advertised version on cap-set refresh.
+    AutoAdvance,
+    /// Operator must explicitly pin a version; cap-set refresh does
+    /// not change the in-use version without operator action.
+    OperatorOptIn,
+}
+
+/// Static registry mapping capability family → classification.
+///
+/// Empty in v1.8.1: no family has a consumer yet, so classifying
+/// hypothetically would be theatre. Later v1.8.x releases populate
+/// this slice as they introduce consumers:
+///
+// v1.8.3: tools.aurora.moderator.* (queryStatuses, queryEvents)
+// v1.8.4: tools.aurora.moderator.* (getSubjectContext)
+// v1.8.5: tools.aurora.admin.* (emitEvent variants)
+// v1.8.6: tools.aurora.admin.* (audit-trail family)
+// v1.8.8: tools.aurora.admin.* (subscribeModEvents)
+// v1.8.9: tools.aurora.admin.* (instance-metrics, runtime-settings)
+// v1.8.10: tools.aurora.ops.*
+///
+/// `tools.aurora.describeCapabilities` is intentionally NOT a
+/// capability — it's the probe NSID itself, not a feature gated by
+/// advertisement.
+pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[];
+
+/// Look up a family's classification in the registry.
+///
+/// Returns `None` for unknown families (operator-side custom
+/// capabilities, or families whose consumer hasn't shipped yet).
+/// Callers decide whether unknown means "skip" or "warn" or
+/// "fail-loud."
+pub fn classification_for(family: &str) -> Option<CapabilityClassification> {
+    CAPABILITY_CLASSIFICATIONS
+        .iter()
+        .find(|(name, _)| *name == family)
+        .map(|(_, c)| *c)
+}
+
+/// Opaque pagination cursor.
+///
+/// cairn-mod does not parse the inner string — it's whatever the
+/// upstream PDS produced. Operators round-trip it verbatim from a
+/// page response into the next page request.
+///
+/// The full `PaginationRequest` shape (limit + cursor + ordering)
+/// defers to the first cross-release consumer because the
+/// `ordering` question depends on Aurora-Locus's actual paginated-
+/// read surface (see the deferred-types chainlink). The cursor
+/// newtype itself is wire-shape-independent and lands here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaginationCursor(pub String);
+
+impl fmt::Display for PaginationCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A read row from Aurora-Locus's audit-trail surface.
+///
+/// Used by future cross-release consumers (v1.8.6+) that read
+/// upstream audit rows for forensics, hash-chain verification,
+/// or operator-facing display. v1.8.1 lands the type so v1.8.2-
+/// v1.8.10 can refer to it under §5.1's additive-only rule;
+/// no v1.8.1 code path constructs this.
+///
+/// `upstream_action` is `serde_json::Value` because the action
+/// shape is the upstream's responsibility. Operators querying for
+/// specific action shapes do their own JSON-path navigation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditTrailEntryRead {
+    /// Upstream-assigned identifier (e.g., Aurora-Locus's
+    /// `audit_chain_entry.id` or equivalent).
+    pub upstream_id: String,
+    /// Upstream-assigned monotonic sequence number used for
+    /// chain-walk ordering. Distinct from `upstream_id` so the
+    /// upstream can use opaque ids for forensics while
+    /// preserving a sortable iteration key.
+    pub upstream_seq: u64,
+    /// Wall-clock epoch milliseconds when the upstream recorded
+    /// the row. Matches v1.7's audit-row timestamp encoding.
+    pub timestamp_epoch_ms: i64,
+    /// Action payload as the upstream emitted it. Untyped at
+    /// this layer; consumer-side types may project it via
+    /// `serde_json::from_value`.
+    pub upstream_action: serde_json::Value,
+    /// Predecessor row's hash, if the upstream maintains a hash
+    /// chain. `None` when the upstream doesn't expose chain
+    /// links or when this row is the chain head.
+    pub hash_chain_predecessor: Option<String>,
+    /// Upstream-supplied signature over this row's
+    /// canonicalized contents. Stored verbatim; verification
+    /// happens at the consumer-side per the v1.8.6 audit-trail
+    /// reader's contract.
+    pub hash_chain_signature: String,
+}
+
+/// A write row destined for Aurora-Locus's audit-trail surface.
+///
+/// Used by future cross-release consumers (v1.8.5+) that write
+/// upstream audit rows from cairn-mod-side actions. v1.8.1 lands
+/// the type so v1.8.2-v1.8.10 can refer to it under §5.1's
+/// additive-only rule; no v1.8.1 code path constructs this.
+///
+/// `subjects` is `Vec<serde_json::Value>` because the polymorphic
+/// `Subject` type is deferred to first consumer (chainlink #106).
+/// When `Subject` lands, this field's type tightens to
+/// `Vec<Subject>` — a non-additive shape change that will require
+/// the consuming release to coordinate with cairn-mod's release
+/// notes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditTrailEntryWrite {
+    /// Upstream-side batch identifier — Aurora-Locus's
+    /// polymorphic `emitEvent` aggregates multiple subjects
+    /// under one batch.
+    pub batch_id: String,
+    // TODO(#106): tighten Vec<serde_json::Value> to Vec<Subject>
+    // when the polymorphic Subject type lands at its first
+    // consumer step.
+    /// Subjects this batch operates on. Untyped at this layer
+    /// pending the polymorphic `Subject` type's first-consumer
+    /// definition (see chainlink #106).
+    pub subjects: Vec<serde_json::Value>,
+    /// Event payload — Aurora-Locus's `emitEvent` variant
+    /// shape. Untyped at this layer pending the typed
+    /// `EventPayload` discriminator's first-consumer definition
+    /// at v1.8.3.
+    pub event_payload: serde_json::Value,
+    /// Wall-clock epoch milliseconds when cairn-mod prepared
+    /// the batch. The upstream records its own receipt time
+    /// separately; this field is the cairn-mod-side wall clock.
+    pub timestamp_epoch_ms: i64,
+}
+
+#[cfg(test)]
+mod cross_release_type_tests {
+    use super::*;
+
+    // ----- CapabilityVersion -----
+
+    #[test]
+    fn capability_version_parses_well_formed_suffix() {
+        assert_eq!(
+            CapabilityVersion::parse_suffix("v0"),
+            Some(CapabilityVersion(0))
+        );
+        assert_eq!(
+            CapabilityVersion::parse_suffix("v1"),
+            Some(CapabilityVersion(1))
+        );
+        assert_eq!(
+            CapabilityVersion::parse_suffix("v17"),
+            Some(CapabilityVersion(17))
+        );
+        assert_eq!(
+            CapabilityVersion::parse_suffix("v999"),
+            Some(CapabilityVersion(999))
+        );
+    }
+
+    #[test]
+    fn capability_version_rejects_malformed_suffix() {
+        assert_eq!(CapabilityVersion::parse_suffix(""), None);
+        assert_eq!(CapabilityVersion::parse_suffix("v"), None);
+        assert_eq!(CapabilityVersion::parse_suffix("1"), None);
+        assert_eq!(CapabilityVersion::parse_suffix("V1"), None); // uppercase rejected
+        assert_eq!(CapabilityVersion::parse_suffix("v0a"), None);
+        assert_eq!(CapabilityVersion::parse_suffix("v1.0"), None);
+        assert_eq!(CapabilityVersion::parse_suffix("v1-rc1"), None);
+        assert_eq!(CapabilityVersion::parse_suffix(" v1"), None); // leading whitespace
+    }
+
+    #[test]
+    fn capability_version_orders_numerically() {
+        assert!(CapabilityVersion(1) < CapabilityVersion(2));
+        assert!(CapabilityVersion(9) < CapabilityVersion(10));
+        assert_eq!(
+            CapabilityVersion(5).max(CapabilityVersion(3)),
+            CapabilityVersion(5)
+        );
+    }
+
+    #[test]
+    fn capability_version_displays_with_v_prefix() {
+        assert_eq!(format!("{}", CapabilityVersion(7)), "v7");
+    }
+
+    // ----- parse_capability_string -----
+
+    #[test]
+    fn parse_capability_string_splits_well_formed() {
+        assert_eq!(
+            parse_capability_string("queue-query-v1"),
+            Some(("queue-query".to_string(), CapabilityVersion(1)))
+        );
+        assert_eq!(
+            parse_capability_string("subject-context-v2"),
+            Some(("subject-context".to_string(), CapabilityVersion(2)))
+        );
+    }
+
+    #[test]
+    fn parse_capability_string_handles_multi_dash_family() {
+        // The split takes the LAST `-v` only.
+        assert_eq!(
+            parse_capability_string("tools-aurora-foo-v3"),
+            Some(("tools-aurora-foo".to_string(), CapabilityVersion(3)))
+        );
+    }
+
+    #[test]
+    fn parse_capability_string_rejects_unversioned() {
+        assert_eq!(parse_capability_string("queue-query"), None);
+        assert_eq!(parse_capability_string("plain"), None);
+    }
+
+    #[test]
+    fn parse_capability_string_rejects_malformed_suffix() {
+        assert_eq!(parse_capability_string("queue-query-v"), None);
+        assert_eq!(parse_capability_string("queue-query-v0a"), None);
+        assert_eq!(parse_capability_string("queue-query-v1.0"), None);
+    }
+
+    #[test]
+    fn parse_capability_string_rejects_empty_family() {
+        assert_eq!(parse_capability_string("-v1"), None);
+        assert_eq!(parse_capability_string(""), None);
+    }
+
+    // ----- CapabilityClassification + registry -----
+
+    #[test]
+    fn capability_classifications_registry_is_empty_in_v1_8_1() {
+        // Pinned: any change to this constant requires a
+        // coordinated release decision (capability-gated trait
+        // surface activation, per the v1.8.x rollout plan).
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 0);
+    }
+
+    #[test]
+    fn classification_for_returns_none_for_unknown() {
+        assert_eq!(classification_for("anything"), None);
+        assert_eq!(classification_for(""), None);
+    }
+
+    #[test]
+    fn classification_for_lookup_mechanism() {
+        // Sanity-check the lookup mechanism against a
+        // test-local slice so we don't have to wait for
+        // v1.8.3+ to verify it works.
+        const TEST_REGISTRY: &[(&str, CapabilityClassification)] = &[
+            ("auto-family", CapabilityClassification::AutoAdvance),
+            ("opt-in-family", CapabilityClassification::OperatorOptIn),
+        ];
+        let lookup = |name: &str| {
+            TEST_REGISTRY
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, c)| *c)
+        };
+        assert_eq!(
+            lookup("auto-family"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            lookup("opt-in-family"),
+            Some(CapabilityClassification::OperatorOptIn)
+        );
+        assert_eq!(lookup("unknown"), None);
+    }
+
+    // ----- PaginationCursor -----
+
+    #[test]
+    fn pagination_cursor_construction_and_display() {
+        let c = PaginationCursor("eyJpZCI6NDJ9".to_string());
+        assert_eq!(c.0, "eyJpZCI6NDJ9");
+        assert_eq!(format!("{c}"), "eyJpZCI6NDJ9");
+    }
+
+    #[test]
+    fn pagination_cursor_serde_round_trip() {
+        let c = PaginationCursor("opaque".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        let back: PaginationCursor = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+    }
+
+    // ----- AuditTrailEntryRead / AuditTrailEntryWrite -----
+
+    #[test]
+    fn audit_trail_entry_read_construction_and_round_trip() {
+        let entry = AuditTrailEntryRead {
+            upstream_id: "upstream-abc".to_string(),
+            upstream_seq: 17,
+            timestamp_epoch_ms: 1_700_000_000_000,
+            upstream_action: serde_json::json!({
+                "$type": "tools.aurora.admin.emitEvent#takedownAccount",
+                "did": "did:plc:abc",
+            }),
+            hash_chain_predecessor: Some("prev-hash-hex".to_string()),
+            hash_chain_signature: "sig-bytes-hex".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AuditTrailEntryRead = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn audit_trail_entry_read_handles_chain_head() {
+        // Chain head: hash_chain_predecessor is None.
+        let entry = AuditTrailEntryRead {
+            upstream_id: "first".to_string(),
+            upstream_seq: 0,
+            timestamp_epoch_ms: 0,
+            upstream_action: serde_json::Value::Null,
+            hash_chain_predecessor: None,
+            hash_chain_signature: "head-sig".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"hash_chain_predecessor\":null"));
+        let back: AuditTrailEntryRead = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn audit_trail_entry_write_construction_and_round_trip() {
+        let entry = AuditTrailEntryWrite {
+            batch_id: "batch-1".to_string(),
+            subjects: vec![
+                serde_json::json!({"$type":"com.atproto.admin.defs#repoRef","did":"did:plc:a"}),
+                serde_json::json!({"$type":"com.atproto.admin.defs#repoRef","did":"did:plc:b"}),
+            ],
+            event_payload: serde_json::json!({
+                "$type": "tools.aurora.admin.emitEvent#takedownAccount",
+                "comment": "spam",
+            }),
+            timestamp_epoch_ms: 1_700_000_000_000,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AuditTrailEntryWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
+        assert_eq!(entry.subjects.len(), 2);
+    }
+
+    #[test]
+    fn audit_trail_entry_write_handles_empty_subjects() {
+        // Server-level events have no subject; the type accepts
+        // an empty Vec without ceremony.
+        let entry = AuditTrailEntryWrite {
+            batch_id: "no-subject-batch".to_string(),
+            subjects: vec![],
+            event_payload: serde_json::json!({"kind":"server-level"}),
+            timestamp_epoch_ms: 0,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: AuditTrailEntryWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(entry, back);
     }
 }
