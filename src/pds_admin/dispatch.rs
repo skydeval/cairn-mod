@@ -456,60 +456,79 @@ fn log_call_outcome<T>(
             method = method.as_wire_str(),
             "pds_admin backend call succeeded"
         ),
-        Err(BackendError::Unsupported(msg)) => tracing::error!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error = %msg,
-            "pds_admin backend rejected method as unsupported (operator config issue)"
-        ),
-        Err(BackendError::Network(e)) => tracing::warn!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error = %e,
-            "pds_admin backend call failed at the network layer (transient; not retried in v1.7)"
-        ),
-        Err(BackendError::Auth(e)) => tracing::error!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error = %e,
-            "pds_admin backend rejected our admin auth (operator must rotate credentials)"
-        ),
-        Err(BackendError::RateLimited {
-            message,
-            retry_after_seconds,
-        }) => tracing::warn!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            retry_after_seconds = ?retry_after_seconds,
-            error = %message,
-            "pds_admin backend rate-limited the call (not retried in v1.7)"
-        ),
-        Err(BackendError::Conflict(e)) => tracing::warn!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error = %e,
-            "pds_admin backend reported state conflict"
-        ),
-        Err(BackendError::RemoteError { code, message }) => tracing::warn!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error_code = %code,
-            error = %message,
-            "pds_admin backend returned an unrecognized error envelope"
-        ),
-        Err(BackendError::Validation(e)) => tracing::error!(
-            action_id,
-            subject_did,
-            method = method.as_wire_str(),
-            error = %e,
-            "pds_admin backend rejected our request as malformed (cairn-mod-side bug)"
-        ),
+        Err(e) => {
+            // Severity selection by variant operator affordance:
+            // - Transient → WARN (transient; not retried in v1.7)
+            // - Auth, Validation, Unsupported, ArchitecturallyForbidden,
+            //   CapabilityNotAdvertised → ERROR (operator-actionable)
+            // - Terminal → WARN (upstream-state; investigate but not
+            //   a cairn-mod-side bug)
+            let category = e.variant_name();
+            let message = e.message();
+            let retry_after_seconds = e.retry_after_seconds();
+            let error_code = e.error_code();
+            match e {
+                BackendError::Transient(_) => tracing::warn!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error_code = ?error_code,
+                    retry_after_seconds = ?retry_after_seconds,
+                    error = %message,
+                    "pds_admin backend call failed transiently (not retried in v1.7)"
+                ),
+                BackendError::Auth(_) => tracing::error!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error = %message,
+                    "pds_admin backend rejected our admin auth (operator must rotate credentials)"
+                ),
+                BackendError::Terminal(_) => tracing::warn!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error_code = ?error_code,
+                    error = %message,
+                    "pds_admin backend rejected the call on upstream state (operator should investigate)"
+                ),
+                BackendError::Validation(_) => tracing::error!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error_code = ?error_code,
+                    error = %message,
+                    "pds_admin backend rejected our request as malformed (cairn-mod-side bug)"
+                ),
+                BackendError::CapabilityNotAdvertised(_) => tracing::error!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error = %message,
+                    "pds_admin backend does not advertise the required capability (operator config issue)"
+                ),
+                BackendError::Unsupported => tracing::error!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    "pds_admin backend does not implement this method (switch backends if needed)"
+                ),
+                BackendError::ArchitecturallyForbidden(_) => tracing::error!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error = %message,
+                    "pds_admin backend method architecturally forbidden by cairn-mod (configuration bug — should be rejected at action_map validation)"
+                ),
+            }
+        }
     }
 }
 
@@ -615,7 +634,7 @@ mod tests {
                 reason: String::new(),
                 action_id: 0,
             });
-            Err(BackendError::Unsupported("test"))
+            Err(BackendError::Unsupported)
         }
 
         async fn negate_label(
@@ -784,7 +803,7 @@ mod tests {
         let pool = fresh_pool().await;
         let action_id = fixture_subject_action(&pool).await;
         let backend = RecordingBackend::new();
-        backend.with_takedown_err(BackendError::Network("connection refused".into()));
+        backend.with_takedown_err(BackendError::Transient("connection refused".into()));
         let mut map = BTreeMap::new();
         map.insert(
             ActionType::Takedown,
@@ -1120,7 +1139,7 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::Network("dns".into())),
+            Err(BackendError::Transient("dns".into())),
             10,
             20,
         )

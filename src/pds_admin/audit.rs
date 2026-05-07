@@ -60,17 +60,38 @@ use crate::pds_admin::{BackendActionId, BackendError, BackendMethod};
 /// Maps from [`BackendError`] variants and the success case to a
 /// stable enumeration suitable for indexing and forensic queries
 /// (`SELECT * FROM pds_admin_audit WHERE outcome = 'auth'`). The
-/// SQL-level CHECK constraint pins the v1.7 set; adding a variant
+/// SQL-level CHECK constraint pins the value-set; adding a value
 /// is a coordinated code-and-migration change.
+///
+/// # v1.7 vs v1.8.1 value-set
+///
+/// v1.7 shipped eight values: `success` / `unsupported` /
+/// `network` / `auth` / `rate_limited` / `conflict` /
+/// `remote_error` / `validation`. v1.8.1 adds [`Self::Terminal`]
+/// (`'terminal'`) for upstream-state failures (HTTP 404 / 410)
+/// distinct from request-shape failures and from the
+/// previously-named state-conflict cases. The CHECK constraint
+/// in `migrations/0006_pds_admin_audit.sql` does NOT yet include
+/// `'terminal'`; relaxing it is a coordinated migration step
+/// (see chainlink #104).
+///
+/// Until that migration lands, the [`Self::from_backend_result`]
+/// projection writes only v1.7 values — the new
+/// [`outcome_for_backend_error`] mapping (which can produce
+/// `Terminal`) is defined here for unit testing and is wired in
+/// at the writer call site as a single line change in the same
+/// migration step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditOutcome {
     /// Backend acknowledged the call and the request semantically
     /// succeeded. `backend_action_id` is populated for methods that
     /// return one (`takedown_account`, `suspend_account`).
     Success,
-    /// Backend doesn't implement this method on this PDS. Should be
-    /// caught by #83's action_map validation at startup; reaching
-    /// runtime is a configuration bug.
+    /// Backend doesn't implement this method on this PDS, or
+    /// cairn-mod's design forbids the call architecturally (label
+    /// methods per the §F4 invariant). The `error_category` column
+    /// distinguishes the two semantically — see
+    /// [`outcome_for_backend_error`].
     Unsupported,
     /// Network-layer failure (DNS, TCP, TLS, timeout). Transient.
     Network,
@@ -81,19 +102,38 @@ pub enum AuditOutcome {
     RateLimited,
     /// Backend acknowledged the call but disagreed with the
     /// requested state transition (e.g., `restore_account` on an
-    /// account that isn't taken down).
+    /// account that isn't taken down). Distinct from
+    /// [`Self::Terminal`] in v1.8.1+: `Conflict` is reserved for
+    /// state-transition disagreements with a recognized shape
+    /// (preserving v1.7 dashboards); `Terminal` is the catch-all
+    /// for upstream-state rejections without a recognized shape.
     Conflict,
     /// Backend returned an error envelope cairn-mod doesn't have a
     /// dedicated variant for. `error_code` and `error_message`
     /// preserve the wire-level fields verbatim.
     RemoteError,
-    /// Pre-call validation failed (cairn-mod-side bug). The call
-    /// never reached the backend.
+    /// Pre-call validation failed, or the upstream rejected the
+    /// request shape. Distinct from [`Self::Terminal`]: `Validation`
+    /// is request-shape; `Terminal` is upstream-state.
     Validation,
+    /// **New in v1.8.1.** Upstream-state failure that is not
+    /// retryable and not a request-shape problem (HTTP 404 / 410,
+    /// or any `BackendError::Terminal` without a recognized
+    /// `[sub_classification=...]` marker). The SQL CHECK
+    /// constraint does not yet include `'terminal'`; activated by
+    /// the migration tracked in chainlink #104.
+    Terminal,
 }
 
 impl AuditOutcome {
     /// Project a backend call result onto an audit outcome.
+    ///
+    /// **v1.7-compat projection.** Used by the audit-writer until
+    /// the Step 7 schema migration relaxes the outcome CHECK
+    /// constraint and adds the `error_category` column. Once the
+    /// migration lands, callers switch to
+    /// [`outcome_for_backend_error`] (which can produce
+    /// [`Self::Terminal`]).
     ///
     /// Generic over the success type so callers with both
     /// `Result<BackendActionId, BackendError>` (takedown / suspend)
@@ -106,19 +146,68 @@ impl AuditOutcome {
     pub fn from_backend_result<T>(result: &std::result::Result<T, BackendError>) -> Self {
         match result {
             Ok(_) => Self::Success,
-            Err(BackendError::Unsupported(_)) => Self::Unsupported,
-            Err(BackendError::Network(_)) => Self::Network,
-            Err(BackendError::Auth(_)) => Self::Auth,
-            Err(BackendError::RateLimited { .. }) => Self::RateLimited,
-            Err(BackendError::Conflict(_)) => Self::Conflict,
-            Err(BackendError::RemoteError { .. }) => Self::RemoteError,
-            Err(BackendError::Validation(_)) => Self::Validation,
+            Err(e) => Self::from_backend_error_v17_compat(e),
         }
     }
 
-    /// DB wire-string form. Inverse of [`Self::from_db_str`]. Pinned
-    /// against the SQL CHECK constraint values in
-    /// `migrations/0006_pds_admin_audit.sql`.
+    /// v1.7-compat: maps a [`BackendError`] to an outcome value
+    /// that's guaranteed to satisfy the v1.7 CHECK constraint
+    /// (eight values; no `terminal`). Internal helper for
+    /// [`Self::from_backend_result`].
+    fn from_backend_error_v17_compat(e: &BackendError) -> Self {
+        match e {
+            // Unsupported and ArchitecturallyForbidden share the
+            // 'unsupported' outcome; error_category will distinguish
+            // them once the column lands (chainlink #104).
+            BackendError::Unsupported | BackendError::ArchitecturallyForbidden(_) => {
+                Self::Unsupported
+            }
+            // Transient with the rate-limited marker preserves v1.7's
+            // 'rate_limited' outcome; otherwise 'network'.
+            BackendError::Transient(msg) => {
+                if msg.starts_with("[sub_classification=RateLimited") {
+                    Self::RateLimited
+                } else {
+                    Self::Network
+                }
+            }
+            BackendError::Auth(_) => Self::Auth,
+            // Terminal with the conflict marker preserves v1.7's
+            // 'conflict' outcome; with the remote-error marker
+            // preserves 'remote_error'; otherwise the new
+            // 'terminal' value — which the v1.7 CHECK rejects, so
+            // we coalesce to 'remote_error' until the Step 7
+            // migration relaxes the CHECK (chainlink #104).
+            BackendError::Terminal(msg) => {
+                if msg.starts_with("[sub_classification=Conflict") {
+                    Self::Conflict
+                } else if msg.starts_with("[sub_classification=RemoteError") {
+                    Self::RemoteError
+                } else {
+                    // v1.7-compat coalescence: the 'terminal' value
+                    // doesn't pass the CHECK constraint yet. Step 7
+                    // relaxes the CHECK and switches the writer to
+                    // outcome_for_backend_error so this case becomes
+                    // 'terminal' atomically.
+                    Self::RemoteError
+                }
+            }
+            // CapabilityNotAdvertised is reserved for the v1.8+ Rust
+            // PDS backend; under v1.7 it doesn't fire from
+            // OzoneBackend. Project to 'validation' to preserve
+            // v1.7's "is a validation issue at the call site"
+            // semantic per the v1.8.1 mapping table.
+            BackendError::CapabilityNotAdvertised(_) => Self::Validation,
+            BackendError::Validation(_) => Self::Validation,
+        }
+    }
+
+    /// DB wire-string form. Inverse of [`Self::from_db_str`].
+    /// Pinned against the SQL CHECK constraint values in
+    /// `migrations/0006_pds_admin_audit.sql` (eight v1.7 values
+    /// plus the v1.8.1 addition `'terminal'` — the latter is
+    /// rejected by the current CHECK and only fires once the
+    /// chainlink-#104 migration relaxes it).
     pub fn as_db_str(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -129,6 +218,7 @@ impl AuditOutcome {
             Self::Conflict => "conflict",
             Self::RemoteError => "remote_error",
             Self::Validation => "validation",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -146,7 +236,67 @@ impl AuditOutcome {
             "conflict" => Some(Self::Conflict),
             "remote_error" => Some(Self::RemoteError),
             "validation" => Some(Self::Validation),
+            "terminal" => Some(Self::Terminal),
             _ => None,
+        }
+    }
+}
+
+/// Variant→outcome mapping per the v1.8.1 taxonomy. **Activated
+/// by chainlink #104's Step 7 migration**; until then the
+/// audit-writer uses [`AuditOutcome::from_backend_result`]
+/// (which never produces [`AuditOutcome::Terminal`] because the
+/// SQL CHECK constraint rejects it).
+///
+/// Mapping table:
+///
+/// | `BackendError` variant            | inner-string marker                      | outcome      |
+/// |-----------------------------------|------------------------------------------|--------------|
+/// | `Auth`                            | (any)                                    | `auth`       |
+/// | `Transient`                       | `[sub_classification=RateLimited ...]`   | `rate_limited` |
+/// | `Transient`                       | `[sub_classification=RemoteError ...]`   | `network`    |
+/// | `Transient`                       | (no marker)                              | `network`    |
+/// | `Validation`                      | (any, including `RemoteError` marker)    | `validation` |
+/// | `Terminal`                        | `[sub_classification=Conflict]`          | `conflict`   |
+/// | `Terminal`                        | `[sub_classification=RemoteError ...]`   | `remote_error` |
+/// | `Terminal`                        | (no marker, or other markers)            | `terminal`   |
+/// | `CapabilityNotAdvertised`         | n/a                                      | `validation` |
+/// | `Unsupported`                     | n/a                                      | `unsupported`|
+/// | `ArchitecturallyForbidden`        | n/a                                      | `unsupported`|
+///
+/// Sub-classification distinctions inside `outcome` exist for
+/// dashboard continuity (v1.7 operators querying
+/// `WHERE outcome = 'rate_limited'` continue to get rate-limited
+/// rows). Variant-level identity lives in the `error_category`
+/// column added by the same chainlink-#104 migration.
+pub fn outcome_for_backend_error(e: &BackendError) -> AuditOutcome {
+    match e {
+        BackendError::Auth(_) => AuditOutcome::Auth,
+        BackendError::Transient(msg) => {
+            if msg.starts_with("[sub_classification=RateLimited") {
+                AuditOutcome::RateLimited
+            } else {
+                // Both no-marker Transient and the RemoteError-marker
+                // Transient land at 'network' (the latter preserves
+                // v1.7's outcome=network for unrecognized 5xx-style
+                // errors that v1.7 wrote as RemoteError under network
+                // semantics — see ozone.rs's other-5xx branch).
+                AuditOutcome::Network
+            }
+        }
+        BackendError::Validation(_) => AuditOutcome::Validation,
+        BackendError::Terminal(msg) => {
+            if msg.starts_with("[sub_classification=Conflict") {
+                AuditOutcome::Conflict
+            } else if msg.starts_with("[sub_classification=RemoteError") {
+                AuditOutcome::RemoteError
+            } else {
+                AuditOutcome::Terminal
+            }
+        }
+        BackendError::CapabilityNotAdvertised(_) => AuditOutcome::Validation,
+        BackendError::Unsupported | BackendError::ArchitecturallyForbidden(_) => {
+            AuditOutcome::Unsupported
         }
     }
 }
@@ -172,10 +322,11 @@ pub struct PdsAdminAuditRecord {
     pub backend_action_id: Option<BackendActionId>,
     /// Outcome category.
     pub outcome: AuditOutcome,
-    /// Backend-supplied error code (currently only populated for
-    /// [`AuditOutcome::RemoteError`] from
-    /// [`BackendError::RemoteError`]'s `code` field). `None` on
-    /// success and for variants without a code field.
+    /// Backend-supplied error code, populated from any
+    /// `[sub_classification=RemoteError code=X]` marker on the
+    /// failing [`BackendError`] (see
+    /// [`BackendError::error_code`]). `None` on success and for
+    /// variants without the marker.
     pub error_code: Option<String>,
     /// Human-readable error context. `None` on success.
     pub error_message: Option<String>,
@@ -290,28 +441,31 @@ pub(crate) fn compute_pds_admin_audit_row_hash(
 /// Project a backend-call result into the `(error_code,
 /// error_message, retry_after_seconds)` audit-row triple.
 ///
-/// `BackendError::RemoteError` is the only v1.7 variant that
-/// populates `error_code`; the rest carry only a message (or, for
-/// `RateLimited`, a message + retry hint).
+/// Under the v1.8.1 taxonomy, structured side-channel data lives
+/// in `[sub_classification=...]` markers prepended to the inner
+/// message. The [`BackendError::error_code`] and
+/// [`BackendError::retry_after_seconds`] accessors parse those
+/// markers back out; this helper preserves the existing audit-row
+/// columns so v1.7 dashboards keep working.
 fn project_error_columns<T>(
     result: &std::result::Result<T, BackendError>,
 ) -> (Option<String>, Option<String>, Option<u32>) {
     match result {
         Ok(_) => (None, None, None),
-        Err(e) => match e {
-            BackendError::Unsupported(s) => (None, Some((*s).to_string()), None),
-            BackendError::Network(s) => (None, Some(s.clone()), None),
-            BackendError::Auth(s) => (None, Some(s.clone()), None),
-            BackendError::RateLimited {
-                message,
-                retry_after_seconds,
-            } => (None, Some(message.clone()), *retry_after_seconds),
-            BackendError::Conflict(s) => (None, Some(s.clone()), None),
-            BackendError::RemoteError { code, message } => {
-                (Some(code.clone()), Some(message.clone()), None)
-            }
-            BackendError::Validation(s) => (None, Some(s.clone()), None),
-        },
+        Err(e) => {
+            let error_code = e.error_code().map(str::to_string);
+            // Empty error_message for Unsupported (variant carries no
+            // payload) is encoded as None so the audit-row column
+            // stays NULL rather than empty-string.
+            let message = e.message();
+            let error_message = if message.is_empty() {
+                None
+            } else {
+                Some(message.to_string())
+            };
+            let retry_after = e.retry_after_seconds();
+            (error_code, error_message, retry_after)
+        }
     }
 }
 
@@ -351,6 +505,13 @@ pub async fn record_pds_admin_call(
     call_completed_at: i64,
 ) -> Result<PdsAdminAuditRecord> {
     let outcome = AuditOutcome::from_backend_result(&result);
+    // Plumbed through perform_insert; the column itself is not yet
+    // bound in the INSERT (the migration that adds it lands in
+    // chainlink #104's Step 7).
+    let error_category: Option<&'static str> = match &result {
+        Ok(_) => None,
+        Err(e) => Some(e.variant_name()),
+    };
     let backend_action_id = match &result {
         Ok(Some(id)) => Some(id.clone()),
         Ok(None) | Err(_) => None,
@@ -372,6 +533,7 @@ pub async fn record_pds_admin_call(
         backend_method,
         backend_action_id.as_ref(),
         outcome,
+        error_category,
         error_code.as_deref(),
         error_message.as_deref(),
         retry_after_seconds,
@@ -405,6 +567,13 @@ async fn perform_insert(
     backend_method: BackendMethod,
     backend_action_id: Option<&BackendActionId>,
     outcome: AuditOutcome,
+    // TODO(#104): activate error_category column write once the
+    // pds_admin_audit migration adds the column. Until then the
+    // value is plumbed through the call signature but not bound
+    // in the INSERT below; the row-hashing input also omits it
+    // so chain-walk verification stays compatible with v1.7-era
+    // rows.
+    _error_category: Option<&'static str>,
     error_code: Option<&str>,
     error_message: Option<&str>,
     retry_after_seconds: Option<u32>,
@@ -660,6 +829,7 @@ mod tests {
             AuditOutcome::Conflict,
             AuditOutcome::RemoteError,
             AuditOutcome::Validation,
+            AuditOutcome::Terminal,
         ];
         for o in all {
             assert_eq!(AuditOutcome::from_db_str(o.as_db_str()), Some(o));
@@ -673,49 +843,73 @@ mod tests {
     }
 
     #[test]
-    fn from_backend_result_maps_each_variant() {
+    fn from_backend_result_maps_each_variant_v17_compat() {
+        // v1.7-compat projection: never produces Terminal (the SQL
+        // CHECK constraint rejects 'terminal'). The new mapping —
+        // outcome_for_backend_error — is exercised separately and
+        // activates when chainlink #104's migration relaxes the
+        // CHECK.
         let success: std::result::Result<i32, BackendError> = Ok(0);
         assert_eq!(
             AuditOutcome::from_backend_result(&success),
             AuditOutcome::Success
         );
 
-        let unsupp: std::result::Result<i32, _> = Err(BackendError::Unsupported("nope"));
+        // Unsupported and ArchitecturallyForbidden share 'unsupported'.
+        let unsupp: std::result::Result<i32, _> = Err(BackendError::Unsupported);
         assert_eq!(
             AuditOutcome::from_backend_result(&unsupp),
             AuditOutcome::Unsupported
         );
+        let forbid: std::result::Result<i32, _> =
+            Err(BackendError::ArchitecturallyForbidden("nope".into()));
+        assert_eq!(
+            AuditOutcome::from_backend_result(&forbid),
+            AuditOutcome::Unsupported
+        );
 
-        let network: std::result::Result<i32, _> = Err(BackendError::Network("dns".into()));
+        // Plain Transient → 'network'; with rate-limited marker → 'rate_limited'.
+        let network: std::result::Result<i32, _> =
+            Err(BackendError::Transient("dns failure".into()));
         assert_eq!(
             AuditOutcome::from_backend_result(&network),
             AuditOutcome::Network
         );
-
-        let auth: std::result::Result<i32, _> = Err(BackendError::Auth("401".into()));
-        assert_eq!(AuditOutcome::from_backend_result(&auth), AuditOutcome::Auth);
-
-        let rate: std::result::Result<i32, _> = Err(BackendError::RateLimited {
-            message: "slow".into(),
-            retry_after_seconds: Some(30),
-        });
+        let rate: std::result::Result<i32, _> = Err(BackendError::Transient(
+            "[sub_classification=RateLimited retry_after_seconds=30] slow".into(),
+        ));
         assert_eq!(
             AuditOutcome::from_backend_result(&rate),
             AuditOutcome::RateLimited
         );
 
-        let conflict: std::result::Result<i32, _> = Err(BackendError::Conflict("already".into()));
+        let auth: std::result::Result<i32, _> = Err(BackendError::Auth("401".into()));
+        assert_eq!(AuditOutcome::from_backend_result(&auth), AuditOutcome::Auth);
+
+        // Terminal with conflict marker → 'conflict' (preserves v1.7 dashboard).
+        let conflict: std::result::Result<i32, _> = Err(BackendError::Terminal(
+            "[sub_classification=Conflict] already taken down".into(),
+        ));
         assert_eq!(
             AuditOutcome::from_backend_result(&conflict),
             AuditOutcome::Conflict
         );
 
-        let remote: std::result::Result<i32, _> = Err(BackendError::RemoteError {
-            code: "BadInput".into(),
-            message: "?".into(),
-        });
+        // Terminal with remote-error marker → 'remote_error'.
+        let remote: std::result::Result<i32, _> = Err(BackendError::Terminal(
+            "[sub_classification=RemoteError code=NotFound] x".into(),
+        ));
         assert_eq!(
             AuditOutcome::from_backend_result(&remote),
+            AuditOutcome::RemoteError
+        );
+
+        // Bare Terminal coalesces to 'remote_error' under v1.7-compat
+        // until chainlink #104's migration relaxes the CHECK.
+        let bare_terminal: std::result::Result<i32, _> =
+            Err(BackendError::Terminal("subject not found".into()));
+        assert_eq!(
+            AuditOutcome::from_backend_result(&bare_terminal),
             AuditOutcome::RemoteError
         );
 
@@ -723,6 +917,91 @@ mod tests {
         assert_eq!(
             AuditOutcome::from_backend_result(&validation),
             AuditOutcome::Validation
+        );
+
+        let cap: std::result::Result<i32, _> =
+            Err(BackendError::CapabilityNotAdvertised("foo".into()));
+        assert_eq!(
+            AuditOutcome::from_backend_result(&cap),
+            AuditOutcome::Validation
+        );
+    }
+
+    #[test]
+    fn outcome_for_backend_error_full_mapping_table() {
+        // Activated by chainlink #104's Step 7. Every row of the
+        // mapping table is asserted here so the function is ready to
+        // fire atomically with the migration.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Auth("401".into())),
+            AuditOutcome::Auth
+        );
+
+        // Transient: rate-limited marker → rate_limited; remote-error
+        // marker → network; no marker → network.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Transient(
+                "[sub_classification=RateLimited retry_after_seconds=10] slow".into()
+            )),
+            AuditOutcome::RateLimited
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Transient(
+                "[sub_classification=RemoteError code=599] oops".into()
+            )),
+            AuditOutcome::Network
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Transient("dns timeout".into())),
+            AuditOutcome::Network
+        );
+
+        // Validation: any marker still maps to validation.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Validation("missing".into())),
+            AuditOutcome::Validation
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Validation(
+                "[sub_classification=RemoteError code=InvalidRequest] x".into()
+            )),
+            AuditOutcome::Validation
+        );
+
+        // Terminal: conflict marker → conflict; remote-error marker →
+        // remote_error; otherwise terminal.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Terminal(
+                "[sub_classification=Conflict] already taken down".into()
+            )),
+            AuditOutcome::Conflict
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Terminal(
+                "[sub_classification=RemoteError code=NotFound] x".into()
+            )),
+            AuditOutcome::RemoteError
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Terminal("subject not found".into())),
+            AuditOutcome::Terminal
+        );
+
+        // CapabilityNotAdvertised stays under validation.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::CapabilityNotAdvertised("foo".into())),
+            AuditOutcome::Validation
+        );
+
+        // Unsupported and ArchitecturallyForbidden share 'unsupported';
+        // error_category distinguishes them post-chainlink-#104.
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::Unsupported),
+            AuditOutcome::Unsupported
+        );
+        assert_eq!(
+            outcome_for_backend_error(&BackendError::ArchitecturallyForbidden("§F4".into())),
+            AuditOutcome::Unsupported
         );
     }
 
@@ -798,10 +1077,9 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::RateLimited {
-                message: "slow down".into(),
-                retry_after_seconds: Some(120),
-            }),
+            Err(BackendError::Transient(
+                "[sub_classification=RateLimited retry_after_seconds=120] slow down".into(),
+            )),
             10,
             20,
         )
@@ -810,7 +1088,14 @@ mod tests {
 
         assert_eq!(stored.outcome, AuditOutcome::RateLimited);
         assert_eq!(stored.retry_after_seconds, Some(120));
-        assert_eq!(stored.error_message.as_deref(), Some("slow down"));
+        assert!(
+            stored
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("slow down"),
+            "error_message preserves the inner text"
+        );
         assert!(stored.error_code.is_none());
         assert!(stored.backend_action_id.is_none());
     }
@@ -824,10 +1109,46 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::RemoteError {
-                code: "InvalidRequest".into(),
-                message: "bad shape".into(),
-            }),
+            Err(BackendError::Validation(
+                "[sub_classification=RemoteError code=InvalidRequest] bad shape".into(),
+            )),
+            10,
+            20,
+        )
+        .await
+        .unwrap();
+
+        // V1.7-compat: a Validation with the RemoteError marker maps
+        // to outcome='validation' (request-shape semantic). Step 7's
+        // outcome_for_backend_error keeps the same mapping.
+        assert_eq!(stored.outcome, AuditOutcome::Validation);
+        assert_eq!(stored.error_code.as_deref(), Some("InvalidRequest"));
+        assert!(
+            stored
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("bad shape"),
+            "error_message preserves the inner text"
+        );
+        assert!(stored.retry_after_seconds.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_terminal_with_remote_error_marker_writes_remote_error_outcome() {
+        // Demonstrates the v1.7-compat coalescence: Terminal with the
+        // RemoteError marker preserves outcome='remote_error' so v1.7
+        // dashboards keep working until chainlink #104's migration.
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+
+        let stored = record_pds_admin_call(
+            &pool,
+            action_id,
+            BackendMethod::TakedownAccount,
+            Err(BackendError::Terminal(
+                "[sub_classification=RemoteError code=NotFound] subject not found".into(),
+            )),
             10,
             20,
         )
@@ -835,9 +1156,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(stored.outcome, AuditOutcome::RemoteError);
-        assert_eq!(stored.error_code.as_deref(), Some("InvalidRequest"));
-        assert_eq!(stored.error_message.as_deref(), Some("bad shape"));
-        assert!(stored.retry_after_seconds.is_none());
+        assert_eq!(stored.error_code.as_deref(), Some("NotFound"));
     }
 
     #[tokio::test]
@@ -849,7 +1168,7 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::Network("dns timeout".into())),
+            Err(BackendError::Transient("dns timeout".into())),
             10,
             20,
         )
@@ -987,7 +1306,7 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::Network("first".into())),
+            Err(BackendError::Transient("first".into())),
             10,
             20,
         )
@@ -997,7 +1316,7 @@ mod tests {
             &pool,
             action_id,
             BackendMethod::TakedownAccount,
-            Err(BackendError::Network("second".into())),
+            Err(BackendError::Transient("second".into())),
             30,
             40,
         )

@@ -183,15 +183,16 @@ async fn takedown_account_429_with_retry_after_carries_hint() {
         .takedown_account(SUBJECT_DID, "spam", None, 1)
         .await
         .expect_err("429 must produce an error");
-    match err {
-        cairn_mod::pds_admin::BackendError::RateLimited {
-            retry_after_seconds,
-            ..
-        } => {
-            assert_eq!(retry_after_seconds, Some(30));
+    match &err {
+        cairn_mod::pds_admin::BackendError::Transient(msg) => {
+            assert!(
+                msg.contains("[sub_classification=RateLimited retry_after_seconds=30]"),
+                "Transient message carries the rate-limited marker with hint: {msg}"
+            );
         }
-        other => panic!("expected RateLimited, got {other:?}"),
+        other => panic!("expected Transient, got {other:?}"),
     }
+    assert_eq!(err.retry_after_seconds(), Some(30));
 }
 
 #[tokio::test]
@@ -210,12 +211,12 @@ async fn takedown_account_5xx_maps_to_network() {
         .expect_err("503 must produce an error");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::Network(_)
+        cairn_mod::pds_admin::BackendError::Transient(_)
     ));
 }
 
 #[tokio::test]
-async fn takedown_account_unreachable_pds_maps_to_network() {
+async fn takedown_account_unreachable_pds_maps_to_transient() {
     // No MockServer — the URL points at a port that should be
     // closed. reqwest's connect-refused → Network per the helper
     // map_reqwest_error.
@@ -231,7 +232,7 @@ async fn takedown_account_unreachable_pds_maps_to_network() {
         .expect_err("connect-refused must produce an error");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::Network(_)
+        cairn_mod::pds_admin::BackendError::Transient(_)
     ));
 }
 
@@ -532,12 +533,13 @@ async fn restore_account_idempotent_path_returns_ok_on_200() {
 }
 
 #[tokio::test]
-async fn restore_account_conflict_path_maps_to_remote_error() {
+async fn restore_account_conflict_path_maps_to_validation_with_remote_error_marker() {
     // The other plausible bsky-PDS response: 400 with an
     // "InvalidRequest" envelope explaining the account isn't
-    // currently taken down. Doesn't contain "subject" or "did"
-    // wording, so it falls through to RemoteError per #87's
-    // status-mapping table (not Validation).
+    // currently taken down. Under the v1.8.1 taxonomy, 400 by
+    // status class is Validation; the wire-level error code is
+    // preserved in a [sub_classification=RemoteError code=X]
+    // marker so dashboards filtering by code keep working.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/xrpc/com.atproto.admin.updateSubjectStatus"))
@@ -556,8 +558,9 @@ async fn restore_account_conflict_path_maps_to_remote_error() {
         .expect_err("400 must produce an error");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::RemoteError { .. }
+        cairn_mod::pds_admin::BackendError::Validation(_)
     ));
+    assert_eq!(err.error_code(), Some("InvalidRequest"));
 }
 
 // ===========================================================================
@@ -855,12 +858,12 @@ async fn probe_against_unreachable_url_returns_network_error() {
         .expect_err("connect-refused must surface as an error");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::Network(_)
+        cairn_mod::pds_admin::BackendError::Transient(_)
     ));
 }
 
 #[tokio::test]
-async fn probe_with_non_json_body_returns_remote_error_invalid_response() {
+async fn probe_with_non_json_body_returns_terminal_invalid_response() {
     // Operator misconfigures pds_url to point at something that
     // returns 200 with non-JSON (e.g., an nginx default page,
     // or a different service entirely). Probe should catch this
@@ -877,17 +880,18 @@ async fn probe_with_non_json_body_returns_remote_error_invalid_response() {
         .probe()
         .await
         .expect_err("non-JSON body must surface as an error");
-    match err {
-        cairn_mod::pds_admin::BackendError::RemoteError { code, message } => {
-            assert_eq!(code, "InvalidResponse");
-            assert!(message.contains("describeServer"));
+    match &err {
+        cairn_mod::pds_admin::BackendError::Terminal(msg) => {
+            assert!(msg.contains("[sub_classification=RemoteError code=InvalidResponse]"));
+            assert!(msg.contains("describeServer"));
         }
-        other => panic!("expected RemoteError, got {other:?}"),
+        other => panic!("expected Terminal, got {other:?}"),
     }
+    assert_eq!(err.error_code(), Some("InvalidResponse"));
 }
 
 #[tokio::test]
-async fn probe_with_json_array_body_returns_remote_error_invalid_response() {
+async fn probe_with_json_array_body_returns_terminal_invalid_response() {
     // Edge case: 200 with parseable JSON that ISN'T an object.
     // describeServer's response shape is documented as an object;
     // a JSON array (or scalar) isn't a real PDS response either.
@@ -905,14 +909,14 @@ async fn probe_with_json_array_body_returns_remote_error_invalid_response() {
         .expect_err("non-object JSON must error");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::RemoteError { .. }
+        cairn_mod::pds_admin::BackendError::Terminal(_)
     ));
 }
 
 #[tokio::test]
-async fn probe_with_5xx_maps_to_network() {
+async fn probe_with_5xx_maps_to_transient() {
     // Transient infra failure on the PDS side; same mapping as
-    // mutating calls per #87's status table.
+    // mutating calls per the v1.8.1 status table.
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/xrpc/com.atproto.server.describeServer"))
@@ -924,6 +928,6 @@ async fn probe_with_5xx_maps_to_network() {
     let err = backend.probe().await.expect_err("503 must surface");
     assert!(matches!(
         err,
-        cairn_mod::pds_admin::BackendError::Network(_)
+        cairn_mod::pds_admin::BackendError::Transient(_)
     ));
 }

@@ -9,7 +9,8 @@
 //! - **#86** — struct + ctor + helper functions (`xrpc_url`,
 //!   `basic_auth_header`, `map_reqwest_error`); trait impl with
 //!   `unimplemented!()` placeholders for the mutating methods.
-//!   Label methods return [`BackendError::Unsupported`] per §A5
+//!   Label methods return [`BackendError::ArchitecturallyForbidden`]
+//!   per the §F4 architectural invariant
 //!   (final v1.7 behavior; cairn-mod's own `subscribeLabels` (§F4)
 //!   is the label distribution surface).
 //! - **#87 (this)** — `takedown_account` body via
@@ -46,10 +47,13 @@ use crate::pds_admin::types::Subject;
 /// using HTTP Basic auth (admin password from
 /// `[pds_admin.ozone].admin_password_env`). The label methods
 /// (`apply_label`, `negate_label`) deliberately return
-/// [`BackendError::Unsupported`] per §A5 in
-/// `v1_7-architectural-decisions.md` — bsky-PDS doesn't implement
-/// label-apply at the protocol layer, and cairn-mod's own
-/// `subscribeLabels` (§F4) is the label distribution surface.
+/// [`BackendError::ArchitecturallyForbidden`] per the §F4
+/// architectural invariant (see
+/// [`crate::pds_admin::backend::F4_INVARIANT_REASON`]):
+/// cairn-mod's own `subscribeLabels` (§F4) is the canonical
+/// label-distribution surface to the network, and emitting
+/// labels via the upstream PDS would create a duplicate
+/// emission path with audit-trail divergence.
 ///
 /// # Cloning / sharing
 ///
@@ -161,23 +165,24 @@ impl OzoneBackend {
     /// connection refused, TLS handshake failure, read timeout
     /// mid-body, etc.).
     pub(crate) fn map_reqwest_error(err: reqwest::Error) -> BackendError {
-        if err.is_timeout() || err.is_connect() {
-            BackendError::Network(err.to_string())
-        } else if err.is_status() {
+        if err.is_status() {
             // Reachable only if a caller used `.error_for_status()`
-            // and is mapping the result here; #87's takedown_account
-            // body inspects the status before reading the body, so
-            // this branch is unused in practice.
+            // and is mapping the result here; the mutating-method
+            // bodies inspect the status before reading the body, so
+            // this branch is unused in practice. Mark as transient
+            // with a [sub_classification=RemoteError ...] marker so
+            // the wire-level status survives the migration.
             let code = err
                 .status()
                 .map(|s| s.as_u16().to_string())
                 .unwrap_or_default();
-            BackendError::RemoteError {
-                code,
-                message: err.to_string(),
-            }
+            BackendError::Transient(format!(
+                "[sub_classification=RemoteError code={code}] {err}"
+            ))
         } else {
-            BackendError::Network(err.to_string())
+            // Transport-level failures (DNS, TCP, TLS, timeout,
+            // mid-body read) are all transient by nature.
+            BackendError::Transient(err.to_string())
         }
     }
 }
@@ -253,19 +258,38 @@ fn parse_retry_after_seconds(header: &reqwest::header::HeaderValue) -> Option<u3
 }
 
 /// Map an HTTP status code (with the response body and an optional
-/// `Retry-After` hint) into the matching [`BackendError`] variant.
+/// `Retry-After` hint) into the matching [`BackendError`] variant
+/// per the v1.8.1 taxonomy.
 ///
-/// Handles the bsky-PDS-specific dispositions per #87's prompt:
+/// Status-class dispositions:
 /// - **400** with `InvalidRequest` and a subject/did message →
 ///   [`BackendError::Validation`] (the operator's request was
 ///   malformed in a way that names the subject).
-/// - **400** otherwise → [`BackendError::RemoteError`].
+/// - **400** otherwise → [`BackendError::Validation`] with a
+///   `[sub_classification=RemoteError code={code}]` marker
+///   prepended. (Status-class is request-shape; the marker
+///   preserves the wire-level error code for forensics.)
 /// - **401 / 403** → [`BackendError::Auth`].
-/// - **429** → [`BackendError::RateLimited`] with the parsed hint.
-/// - **500 / 502 / 503 / 504** → [`BackendError::Network`]
+/// - **404 / 409 / 410** → [`BackendError::Terminal`] with a
+///   `[sub_classification=RemoteError code={code}]` marker — these
+///   are upstream-state rejections, not request-shape problems.
+/// - **429** → [`BackendError::Transient`] with a
+///   `[sub_classification=RateLimited retry_after_seconds=N]` (or
+///   `[sub_classification=RateLimited]` when no hint was supplied)
+///   marker prepended. Operators query the retry hint via
+///   [`BackendError::retry_after_seconds`].
+/// - **500 / 502 / 503 / 504** → [`BackendError::Transient`]
 ///   (transient infrastructure; not auth or validation).
-/// - **Other 5xx** → [`BackendError::RemoteError`].
-/// - **Other** → [`BackendError::RemoteError`] with the raw status.
+/// - **Other 5xx** (e.g., 599) → [`BackendError::Transient`] with
+///   `[sub_classification=RemoteError code={code}]` — preserves
+///   the wire-level status while keeping the operator affordance
+///   ("try again later") intact for the unrecognized-server-failure
+///   shape.
+/// - **Other** (any non-2xx not classified above) →
+///   [`BackendError::Terminal`] with
+///   `[sub_classification=RemoteError code={code}]`. Defaults to
+///   Terminal because we don't know whether retrying is safe for
+///   an unrecognized status class.
 ///
 /// Bodies that don't parse as the XRPC envelope fall back to
 /// using the raw bytes (best-effort) for the message.
@@ -282,41 +306,66 @@ pub(crate) fn map_status_to_backend_error(
             let (code, message) =
                 envelope.unwrap_or_else(|| ("InvalidRequest".to_string(), lossy_body()));
             // bsky-PDS's "InvalidRequest" with subject/did wording is
-            // the validation-failure shape; everything else under 400
-            // is a generic remote-error envelope.
+            // the request-shape failure; everything else under 400
+            // is still a request-shape failure (per the v1.8.1
+            // taxonomy: 400/422 are Validation by status class) but
+            // carries the wire-level error code in a marker for
+            // forensics.
             if code == "InvalidRequest" {
                 let lower = message.to_ascii_lowercase();
                 if lower.contains("subject") || lower.contains("did") {
                     return BackendError::Validation(message);
                 }
             }
-            BackendError::RemoteError { code, message }
+            BackendError::Validation(format!(
+                "[sub_classification=RemoteError code={code}] {message}"
+            ))
         }
         401 | 403 => {
             let message = envelope.map(|(_, m)| m).unwrap_or_else(lossy_body);
             BackendError::Auth(format!("HTTP {}: {}", status.as_u16(), message))
         }
+        404 | 409 | 410 => {
+            let (code, message) =
+                envelope.unwrap_or_else(|| (status.as_u16().to_string(), lossy_body()));
+            BackendError::Terminal(format!(
+                "[sub_classification=RemoteError code={code}] {message}"
+            ))
+        }
         429 => {
             let message = envelope
                 .map(|(_, m)| m)
                 .unwrap_or_else(|| "rate limited".to_string());
-            BackendError::RateLimited {
-                message,
-                retry_after_seconds,
-            }
+            let marker = match retry_after_seconds {
+                Some(n) => format!("[sub_classification=RateLimited retry_after_seconds={n}]"),
+                None => "[sub_classification=RateLimited]".to_string(),
+            };
+            BackendError::Transient(format!("{marker} {message}"))
         }
-        500 | 502 | 503 | 504 => BackendError::Network(format!(
+        500 | 502 | 503 | 504 => BackendError::Transient(format!(
             "HTTP {}: {}",
             status.as_u16(),
             envelope.map(|(_, m)| m).unwrap_or_else(lossy_body)
         )),
-        _ => match envelope {
-            Some((code, message)) => BackendError::RemoteError { code, message },
-            None => BackendError::RemoteError {
-                code: status.as_u16().to_string(),
-                message: lossy_body(),
-            },
-        },
+        s if (500..600).contains(&s) => {
+            // Unrecognized 5xx (e.g., 599). Still transient by
+            // status class; preserve the wire-level code.
+            let (code, message) =
+                envelope.unwrap_or_else(|| (status.as_u16().to_string(), lossy_body()));
+            BackendError::Transient(format!(
+                "[sub_classification=RemoteError code={code}] {message}"
+            ))
+        }
+        _ => {
+            // Any other status class (1xx redirects we didn't follow,
+            // 3xx, exotic codes). Default to Terminal — we don't know
+            // whether retry is safe.
+            let (code, message) =
+                envelope.unwrap_or_else(|| (status.as_u16().to_string(), lossy_body()));
+            BackendError::Terminal(format!(
+                "[sub_classification=RemoteError code={code}] {message}"
+            ))
+        }
     }
 }
 
@@ -545,33 +594,32 @@ impl PdsAdminBackend for OzoneBackend {
         ))
     }
 
-    /// Returns [`BackendError::Unsupported`] — bsky-PDS does not
-    /// implement label-apply at the protocol layer, and cairn-mod's
-    /// own `subscribeLabels` (§F4) is the label distribution
-    /// surface. Per §A5 in v1.7 architectural decisions; #83's
-    /// action_map validation rejects configurations that would
-    /// route label actions to this backend, so reaching this method
-    /// at runtime is a configuration bug.
+    /// Returns [`BackendError::ArchitecturallyForbidden`] carrying
+    /// [`crate::pds_admin::backend::F4_INVARIANT_REASON`] — cairn-mod's
+    /// `subscribeLabels` (§F4) is the canonical label-distribution
+    /// surface to the network, and emitting labels via the upstream
+    /// PDS would create a duplicate emission path with audit-trail
+    /// divergence. The §F4 invariant applies regardless of which
+    /// backend the upstream PDS is. #83's action_map validation
+    /// rejects configurations that would route label actions to a
+    /// PDS-admin backend, so reaching this method at runtime is a
+    /// configuration bug.
     async fn apply_label(
         &self,
         _subject: &Subject,
         _val: &str,
         _expires_days: Option<u32>,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(
-            "OzoneBackend does not implement apply_label; \
-             cairn-mod's subscribeLabels (§F4) is the label distribution surface \
-             (see §A5 in v1.7 architectural decisions)",
+        Err(BackendError::ArchitecturallyForbidden(
+            crate::pds_admin::backend::F4_INVARIANT_REASON.to_string(),
         ))
     }
 
-    /// Returns [`BackendError::Unsupported`] — same rationale as
-    /// [`Self::apply_label`].
+    /// Returns [`BackendError::ArchitecturallyForbidden`] — same
+    /// rationale as [`Self::apply_label`].
     async fn negate_label(&self, _subject: &Subject, _val: &str) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported(
-            "OzoneBackend does not implement negate_label; \
-             cairn-mod's subscribeLabels (§F4) is the label distribution surface \
-             (see §A5 in v1.7 architectural decisions)",
+        Err(BackendError::ArchitecturallyForbidden(
+            crate::pds_admin::backend::F4_INVARIANT_REASON.to_string(),
         ))
     }
 
@@ -643,12 +691,12 @@ impl PdsAdminBackend for OzoneBackend {
                 detected_version: None,
                 capabilities: Vec::new(),
             }),
-            Ok(_) | Err(_) => Err(BackendError::RemoteError {
-                code: "InvalidResponse".to_string(),
-                message: "describeServer returned a 200 with non-JSON-object body; \
-                          configured pds_url likely doesn't point at a bsky-PDS"
+            Ok(_) | Err(_) => Err(BackendError::Terminal(
+                "[sub_classification=RemoteError code=InvalidResponse] \
+                 describeServer returned a 200 with non-JSON-object body; \
+                 configured pds_url likely doesn't point at a bsky-PDS"
                     .to_string(),
-            }),
+            )),
         }
     }
 }
@@ -778,44 +826,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_label_returns_unsupported() {
+    async fn apply_label_returns_architecturally_forbidden() {
         let backend = fixture_backend("https://bsky.example.com");
         let res = backend
             .apply_label(&Subject::account("did:plc:abc"), "spam", None)
             .await;
         match res {
-            Err(BackendError::Unsupported(msg)) => {
+            Err(BackendError::ArchitecturallyForbidden(msg)) => {
                 assert!(
-                    msg.contains("apply_label"),
-                    "message names the method: {msg}"
+                    msg.contains("§F4"),
+                    "message cites the §F4 architectural anchor: {msg}"
                 );
                 assert!(
-                    msg.contains("§A5") || msg.contains("A5"),
-                    "cites §A5: {msg}"
+                    msg.contains("subscribeLabels"),
+                    "message names subscribeLabels as the canonical surface: {msg}"
                 );
             }
-            other => panic!("expected Unsupported, got {other:?}"),
+            other => panic!("expected ArchitecturallyForbidden, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn negate_label_returns_unsupported() {
+    async fn negate_label_returns_architecturally_forbidden() {
         let backend = fixture_backend("https://bsky.example.com");
         let res = backend
             .negate_label(&Subject::account("did:plc:abc"), "spam")
             .await;
         match res {
-            Err(BackendError::Unsupported(msg)) => {
+            Err(BackendError::ArchitecturallyForbidden(msg)) => {
                 assert!(
-                    msg.contains("negate_label"),
-                    "message names the method: {msg}"
+                    msg.contains("§F4"),
+                    "message cites the §F4 architectural anchor: {msg}"
                 );
                 assert!(
-                    msg.contains("§A5") || msg.contains("A5"),
-                    "cites §A5: {msg}"
+                    msg.contains("subscribeLabels"),
+                    "message names subscribeLabels as the canonical surface: {msg}"
                 );
             }
-            other => panic!("expected Unsupported, got {other:?}"),
+            other => panic!("expected ArchitecturallyForbidden, got {other:?}"),
         }
     }
 
@@ -876,13 +924,42 @@ mod tests {
     }
 
     #[test]
-    fn map_status_400_invalid_request_without_subject_is_remote_error() {
+    fn map_status_400_invalid_request_without_subject_is_validation_with_marker() {
+        // 400 by status class is Validation in v1.8.1's taxonomy; the
+        // wire-level error code is preserved in a marker so forensics
+        // and the Step 7 outcome mapping can still pivot on it.
         let body = br#"{"error": "InvalidRequest", "message": "rate limit exceeded"}"#.as_slice();
         let err = map_status_to_backend_error(reqwest::StatusCode::BAD_REQUEST, body, None);
-        match err {
-            BackendError::RemoteError { code, .. } => assert_eq!(code, "InvalidRequest"),
-            other => panic!("expected RemoteError, got {other:?}"),
+        match &err {
+            BackendError::Validation(msg) => assert!(
+                msg.contains("[sub_classification=RemoteError code=InvalidRequest]"),
+                "validation message carries the RemoteError marker: {msg}"
+            ),
+            other => panic!("expected Validation, got {other:?}"),
         }
+        assert_eq!(err.error_code(), Some("InvalidRequest"));
+    }
+
+    #[test]
+    fn map_status_404_is_terminal_with_remote_error_marker() {
+        // 404 / 409 / 410 are upstream-state rejections — the v1.8.1
+        // taxonomy classes them as Terminal regardless of the body shape.
+        let body = br#"{"error": "NotFound", "message": "subject not found"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::NOT_FOUND, body, None);
+        match &err {
+            BackendError::Terminal(msg) => {
+                assert!(msg.contains("[sub_classification=RemoteError code=NotFound]"))
+            }
+            other => panic!("expected Terminal, got {other:?}"),
+        }
+        assert_eq!(err.error_code(), Some("NotFound"));
+    }
+
+    #[test]
+    fn map_status_409_is_terminal_with_remote_error_marker() {
+        let body = br#"{"error": "Conflict", "message": "already taken down"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::CONFLICT, body, None);
+        assert!(matches!(err, BackendError::Terminal(_)));
     }
 
     #[test]
@@ -905,42 +982,82 @@ mod tests {
     }
 
     #[test]
-    fn map_status_429_carries_retry_after() {
+    fn map_status_429_is_transient_with_rate_limited_marker_and_retry_after() {
         let body = br#"{"error": "RateLimitExceeded", "message": "calm down"}"#.as_slice();
         let err =
             map_status_to_backend_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, Some(30));
-        match err {
-            BackendError::RateLimited {
-                message,
-                retry_after_seconds,
-            } => {
-                assert_eq!(retry_after_seconds, Some(30));
-                assert_eq!(message, "calm down");
+        match &err {
+            BackendError::Transient(msg) => {
+                assert!(
+                    msg.contains("[sub_classification=RateLimited retry_after_seconds=30]"),
+                    "Transient message carries the rate-limited marker: {msg}"
+                );
+                assert!(msg.contains("calm down"));
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => panic!("expected Transient, got {other:?}"),
         }
+        assert_eq!(err.retry_after_seconds(), Some(30));
     }
 
     #[test]
-    fn map_status_5xx_transient_is_network() {
+    fn map_status_429_without_retry_after_carries_marker_only() {
+        let body = br#"{"error": "RateLimitExceeded", "message": "throttled"}"#.as_slice();
+        let err = map_status_to_backend_error(reqwest::StatusCode::TOO_MANY_REQUESTS, body, None);
+        match &err {
+            BackendError::Transient(msg) => {
+                assert!(msg.starts_with("[sub_classification=RateLimited]"));
+                assert!(msg.contains("throttled"));
+            }
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        assert_eq!(err.retry_after_seconds(), None);
+    }
+
+    #[test]
+    fn map_status_5xx_transient_is_transient() {
         for code in [500u16, 502, 503, 504] {
             let status = reqwest::StatusCode::from_u16(code).unwrap();
             let err = map_status_to_backend_error(status, b"oops", None);
             assert!(
-                matches!(err, BackendError::Network(_)),
-                "{code} should be Network"
+                matches!(err, BackendError::Transient(_)),
+                "{code} should be Transient"
             );
         }
     }
 
     #[test]
-    fn map_status_other_5xx_is_remote_error() {
+    fn map_status_other_5xx_is_transient_with_remote_error_marker() {
+        // 599 is still a 5xx — Transient by status class — but carries the
+        // wire-level code in a marker so dashboards filtering by code can
+        // still see it.
         let err = map_status_to_backend_error(
             reqwest::StatusCode::from_u16(599).unwrap(),
             b"unrecognized server failure",
             None,
         );
-        assert!(matches!(err, BackendError::RemoteError { .. }));
+        match &err {
+            BackendError::Transient(msg) => {
+                assert!(msg.contains("[sub_classification=RemoteError code=599]"));
+            }
+            other => panic!("expected Transient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_status_unknown_class_defaults_to_terminal() {
+        // 3xx redirects we didn't follow, exotic codes — default to
+        // Terminal because we don't know whether retry is safe.
+        let err = map_status_to_backend_error(
+            reqwest::StatusCode::from_u16(304).unwrap(),
+            b"not modified",
+            None,
+        );
+        match &err {
+            BackendError::Terminal(msg) => {
+                assert!(msg.contains("[sub_classification=RemoteError code=304]"));
+            }
+            other => panic!("expected Terminal, got {other:?}"),
+        }
     }
 
     #[test]

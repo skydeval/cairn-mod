@@ -8,8 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `BackendError` taxonomy split (foundation for v1.8 series). The seven-variant
+  shape — `Transient` / `Validation` / `Terminal` / `Auth` /
+  `CapabilityNotAdvertised` / `Unsupported` / `ArchitecturallyForbidden` —
+  is the operator-facing dashboard contract going forward; structured-log
+  parsers keying on the variant name need updating (see "Changed" below).
+- `BackendFailureLog` structured-log shape (nine fields: `scope` / `backend` /
+  `method` / `error_category` / `error_message` / `retry_after_seconds` /
+  `error_code` / `timestamp_epoch_ms` / `correlation_id`). Emitted via the
+  `log_backend_failure` helper. Operators querying structured logs pivot on
+  `error_category` (low-cardinality, exactly seven values).
+- `[sub_classification=Name ...]` marker convention in `error_message`
+  strings. Carries previously-structured side-channel data (rate-limit
+  retry hints, wire-level error codes, state-conflict markers) across
+  the variant migration without expanding the variant set. Operators can
+  query for sub-classifications via substring match in `error_message`,
+  e.g. `WHERE error_message LIKE '%[sub_classification=RateLimited%'`.
+  The `BackendError::retry_after_seconds()` and `BackendError::error_code()`
+  accessors parse the markers programmatically.
+- New `outcome` value `'terminal'` reserved for upstream-state failures
+  (HTTP 404 / 410) distinct from request-shape failures and from the
+  previously-named state-conflict cases. **Not yet writeable** — the SQL
+  CHECK constraint relaxation lands in a later v1.8.1 migration step
+  alongside the new `error_category` column.
 
 ### Changed
+- `apply_label` and `negate_label` on `OzoneBackend` now return
+  `BackendError::ArchitecturallyForbidden` (carrying the §F4 invariant
+  reason text) instead of `BackendError::Unsupported`. **Behavior is
+  unchanged** — cairn-mod has always forbidden these methods on
+  `OzoneBackend` per the §F4 architectural invariant in `cairn-design.md`,
+  and continues to do so. The new variant name carries clearer operator
+  semantics: `Unsupported` now means "switch backends if you need this,"
+  while `ArchitecturallyForbidden` means "no backend will ever do this;
+  cairn-mod's design forbids it." If you parse cairn-mod's structured
+  failure logs by variant name, update your parsers.
+- HTTP error mapping in `OzoneBackend` migrated to the new variant set:
+  network/timeout/HTTP 5xx → `Transient`; HTTP 401/403 → `Auth`;
+  HTTP 400/422 → `Validation`; HTTP 404/409/410 → `Terminal`; HTTP 429 →
+  `Transient` with `[sub_classification=RateLimited retry_after_seconds=N]`.
+  Operator dashboards keying on the existing `outcome` column values
+  (`network` / `auth` / `validation` / `rate_limited` / `conflict` /
+  `remote_error` / `unsupported`) continue to see the same row sets they
+  did in v1.7 — the v1.8.1 audit-writer preserves v1.7 outcome semantics
+  via the marker convention until the schema migration lands.
 
 ### Fixed
 

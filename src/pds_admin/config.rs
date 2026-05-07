@@ -517,9 +517,10 @@ fn validated_action_map(
             && warned_methods.insert((action_type, method))
         {
             tracing::warn!(
-                "config: [pds_admin.action_map].{} maps to {}, but OzoneBackend does not \
-                 implement label methods in v1.7; this action will not propagate to the PDS \
-                 (#89: returns BackendError::Unsupported at runtime)",
+                "config: [pds_admin.action_map].{} maps to {}, but cairn-mod's §F4 \
+                 architectural invariant forbids label methods on every PDS-admin backend; \
+                 this action will not propagate to the PDS (returns \
+                 BackendError::ArchitecturallyForbidden at runtime)",
                 action_type.as_db_str(),
                 method.as_wire_str(),
             );

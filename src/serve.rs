@@ -421,12 +421,15 @@ fn build_pds_admin_bridge(
 ///
 /// Severity selection mirrors the recordAction-dispatch
 /// convention from `crate::pds_admin::dispatch::log_call_outcome`:
-/// transient variants (`Network`, `RateLimited`) → WARN;
-/// operator-actionable variants (`Auth`, `Validation`,
-/// `RemoteError`, `Unsupported`) → ERROR.
+/// `Transient` (including its rate-limited sub-classification) →
+/// WARN; everything operator-actionable
+/// (`Auth` / `Validation` / `Terminal` / `Unsupported` /
+/// `ArchitecturallyForbidden` / `CapabilityNotAdvertised`) →
+/// ERROR.
 async fn run_pds_admin_startup_probe(bridge: &crate::pds_admin::PdsAdminBridge) {
     use crate::pds_admin::BackendError;
-    match bridge.backend.probe().await {
+    let result = bridge.backend.probe().await;
+    match result {
         Ok(report) => {
             tracing::info!(
                 backend = report.backend_name,
@@ -436,29 +439,28 @@ async fn run_pds_admin_startup_probe(bridge: &crate::pds_admin::PdsAdminBridge) 
                 "pds_admin probe successful"
             );
         }
-        Err(BackendError::Network(e)) => {
-            tracing::warn!(
-                error = %e,
-                "pds_admin probe failed at the network layer; cairn-mod will continue starting (first real call will retry)"
-            );
-        }
-        Err(BackendError::RateLimited {
-            message,
-            retry_after_seconds,
-        }) => {
-            tracing::warn!(
-                error = %message,
-                retry_after_seconds = ?retry_after_seconds,
-                "pds_admin probe rate-limited; cairn-mod will continue starting"
-            );
-        }
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "pds_admin probe failed: operator-actionable misconfiguration. \
-                 cairn-mod will continue starting; first real call will retry, \
-                 but moderation actions will fail until the underlying issue is fixed."
-            );
+        Err(ref e) => {
+            let category = e.variant_name();
+            let message = e.message();
+            let retry_after_seconds = e.retry_after_seconds();
+            let error_code = e.error_code();
+            match e {
+                BackendError::Transient(_) => tracing::warn!(
+                    error_category = category,
+                    retry_after_seconds = ?retry_after_seconds,
+                    error_code = ?error_code,
+                    error = %message,
+                    "pds_admin probe failed transiently; cairn-mod will continue starting (first real call will retry)"
+                ),
+                _ => tracing::error!(
+                    error_category = category,
+                    error_code = ?error_code,
+                    error = %message,
+                    "pds_admin probe failed: operator-actionable misconfiguration. \
+                     cairn-mod will continue starting; first real call will retry, \
+                     but moderation actions will fail until the underlying issue is fixed."
+                ),
+            }
         }
     }
 }
