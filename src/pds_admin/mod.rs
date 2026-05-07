@@ -48,8 +48,9 @@ pub use audit::{
 };
 pub use backend::{BackendActionId, BackendError, BackendInitError, PdsAdminBackend, ProbeReport};
 pub use config::{
-    ActionMapEntry, AdminPassword, BackendMethod, OzoneBackendConfig, PdsAdminBackendConfig,
-    PdsAdminPolicy,
+    ActionMapEntry, AdminPassword, BackendMethod, BackendSelection, OzoneBackendConfig,
+    PdsAdminBackendConfig, PdsAdminConfigError, PdsAdminPolicy, RustBackendConfig, resolve_backend,
+    should_warn_rust_backend_dispatch, validate_audit_divergence_acknowledgment,
 };
 pub use dispatch::{
     DispatchContext, PdsAdminBridge, RevokeDispatchContext, dispatch_after_record_action,

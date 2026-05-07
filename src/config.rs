@@ -211,12 +211,30 @@ pub struct PdsAdminConfigToml {
     /// action type.
     #[serde(default)]
     pub enabled: bool,
+    /// Explicit backend selector. v1.8.1 accepts `"ozone"` or
+    /// `"rust"`; absent (default) means auto-detect from the
+    /// present subsection (unambiguous-iff-exactly-one). When
+    /// both subsections are present, the selector is required.
+    /// Empty string is rejected as a distinct error from
+    /// unknown values to surface accidental
+    /// `backend = ""` typos clearly.
+    #[serde(default)]
+    pub backend: Option<String>,
     /// `[pds_admin.ozone]` subsection — the bsky-PDS backend
-    /// config. Required when `enabled = true`. May be present
-    /// when `enabled = false` for forward-compat (the
-    /// per-block resolver still validates it).
+    /// config. May be present whether or not `enabled = true`;
+    /// per-block validation runs even when disabled, so
+    /// staging configs surface typos immediately.
     #[serde(default)]
     pub ozone: Option<PdsAdminOzoneToml>,
+    /// `[pds_admin.rust]` subsection — Rust-PDS backend config
+    /// (Aurora-Locus and other ATProto Rust PDSes). The
+    /// inspector-only posture in v1.8.1 (per the
+    /// `acknowledge_v1_8_1_audit_divergence` flag) means the
+    /// backend is structurally valid but produces audit-failure
+    /// at dispatch time; v1.8.2's protocol-parity work lifts
+    /// that restriction.
+    #[serde(default)]
+    pub rust: Option<PdsAdminRustToml>,
     /// `[pds_admin.action_map]` subsection. Required when
     /// `enabled = true`. Maps cairn-mod action types
     /// (`takedown`, `temp_suspension`, etc.) to backend method
@@ -225,20 +243,22 @@ pub struct PdsAdminConfigToml {
     /// with_lift_after = bool }`); see [`PdsAdminActionMapValueToml`].
     #[serde(default)]
     pub action_map: Option<BTreeMap<String, PdsAdminActionMapValueToml>>,
-    /// `[pds_admin.locus]` subsection — Aurora-Locus backend.
-    /// Reserved for v1.8; rejected at config-load in v1.7 with
-    /// a clear "deferred to v1.8" message. Parsed as opaque
-    /// JSON so v1.7 doesn't have to know the v1.8 schema; only
-    /// that the key was set.
+    /// `[pds_admin.locus]` subsection — early-design name for
+    /// the Aurora-Locus backend. Renamed to `[pds_admin.rust]`
+    /// in v1.8.1 to reflect the polymorphic-Rust-PDS stance.
+    /// Operators with v1.7-staged `[pds_admin.locus]` configs
+    /// get a clear migration error pointing at the new key
+    /// name. Parsed as opaque JSON to avoid coupling on the
+    /// (since-superseded) v1.8-design-time shape.
     #[serde(default)]
     pub locus: Option<serde_json::Value>,
     /// Catch-all for unrecognized backend subsection names
     /// (e.g., a typo like `[pds_admin.ozonee]` or a future
-    /// `[pds_admin.kestrel]`). v1.7 rejects each at
-    /// config-load. The flatten attribute collects every
-    /// unmatched key under `[pds_admin]` here; the named
-    /// fields above (`enabled`, `ozone`, `action_map`, `locus`)
-    /// are consumed first.
+    /// `[pds_admin.kestrel]`). The named fields above
+    /// (`enabled`, `backend`, `ozone`, `rust`, `action_map`,
+    /// `locus`) are consumed first; everything else lands
+    /// here. Each unrecognized name is rejected at
+    /// config-load.
     #[serde(flatten, default)]
     pub other_backends: BTreeMap<String, serde_json::Value>,
 }
@@ -273,6 +293,100 @@ pub struct PdsAdminOzoneToml {
     /// omitted; clamped to 1..=60 at validation time.
     #[serde(default = "default_pds_admin_request_timeout_seconds")]
     pub request_timeout_seconds: u32,
+}
+
+/// TOML projection of the Rust-PDS backend config (§F23,
+/// v1.8.1). Maps to the runtime
+/// [`crate::pds_admin::RustBackendConfig`] via
+/// [`crate::pds_admin::PdsAdminPolicy::from_config`], which:
+/// - parses `url` via [`url::Url::parse`] (https or http; no
+///   scheme constraint at this layer — protocol parity with
+///   `pds_url` will tighten in v1.8.2 once Aurora-Locus
+///   advertises a stable scheme posture);
+/// - reads the env vars named by `client_id_env` and
+///   `client_secret_env`, rejecting empty/unset values and
+///   the same-env-var-twice misconfiguration;
+/// - validates each scope as a non-empty wire string with the
+///   `atproto:` prefix (typed validation lands at the OAuth
+///   flow's first consumer step);
+/// - parses `capability_refresh_interval` as a duration string
+///   (default `"1h"`, lower-bound `"10s"`);
+/// - cross-validates `pinned_versions` against
+///   `required_capabilities` for family-name consistency;
+/// - enforces `acknowledge_v1_8_1_audit_divergence = true`
+///   when the bridge is enabled and this backend is selected
+///   (the v1.8.1 inspector-mode hard-stop).
+///
+/// Fields use serde defaults where possible to keep the TOML
+/// surface ergonomic. The `#[serde(rename = "url")]` on
+/// `pds_url` matches the v1.8 umbrella's wire-key choice while
+/// keeping the Rust field name distinct from the [`url::Url`]
+/// type that wraps it at the runtime layer.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct PdsAdminRustToml {
+    /// Base URL of the Rust PDS this cairn-mod talks to.
+    /// Wire key: `url` (per the v1.8 umbrella's `[pds_admin.rust]`
+    /// surface decision); the Rust field name is `url` to match,
+    /// while the runtime [`crate::pds_admin::RustBackendConfig`]
+    /// holds it as a parsed [`url::Url`].
+    pub url: String,
+    /// Name of the env var holding the OAuth client identifier
+    /// for cairn-mod's RustBackend client. Empty or unset
+    /// values are rejected at config load.
+    pub client_id_env: String,
+    /// Name of the env var holding the OAuth client secret.
+    /// Distinct from `client_id_env`; naming both fields with
+    /// the same env-var name is rejected as a misconfiguration.
+    pub client_secret_env: String,
+    /// OAuth scopes to request from the Rust PDS's issuer.
+    /// Required, non-empty. Each scope is validated
+    /// structurally (non-empty wire string, `atproto:` family
+    /// prefix); the typed `OAuthScope` parse lands at the
+    /// OAuth flow's first consumer step.
+    pub scopes: Vec<String>,
+    /// Cap-set refresh cadence. Default `"1h"`. Parses as a
+    /// human-readable duration string (e.g. `"30m"`,
+    /// `"2h"`). Lower bound `"10s"`; below → config-load
+    /// error.
+    #[serde(default)]
+    pub capability_refresh_interval: Option<String>,
+    /// Capabilities the operator declares as required. The
+    /// startup probe rejects the configuration if the Rust PDS
+    /// does not advertise every required capability. v1.8.1
+    /// validates structurally only (each entry is a non-empty
+    /// string); typed validation against
+    /// [`crate::pds_admin::CAPABILITY_CLASSIFICATIONS`] lands
+    /// at the first capability-gated trait method consumer.
+    #[serde(default)]
+    pub required_capabilities: Option<Vec<String>>,
+    /// Per-family pinned capability versions. Operators pin a
+    /// family to a specific version when newer advertised
+    /// versions could change behavior (per the
+    /// `OperatorOptIn` classification). Each key is a family
+    /// name (no `-vN` suffix); each value is a `vN` version
+    /// string. Cross-validated against
+    /// `required_capabilities` for family-name consistency.
+    #[serde(default)]
+    pub pinned_versions: Option<BTreeMap<String, String>>,
+    /// Whether to persist OAuth state (refresh tokens, access
+    /// tokens) across cairn-mod restarts. Default `true`.
+    /// Reading this field is deferred to the OAuth flow's
+    /// first consumer step; v1.8.1 accepts it in config so
+    /// operators can pre-configure.
+    #[serde(default)]
+    pub verification_persist: Option<bool>,
+    /// **Required when `enabled = true` and this backend is
+    /// selected.** Operators must explicitly acknowledge the
+    /// v1.8.1 inspector-only audit divergence: cairn-mod's
+    /// RustBackend produces a `BackendError` audit row at
+    /// dispatch time in v1.8.1 because protocol parity work
+    /// lands at v1.8.2. Setting this flag without reading the
+    /// release notes is a misconfiguration the operator owns.
+    /// The flag is self-removing across the v1.8 series: it is
+    /// required in v1.8.1, deprecated in v1.8.2, and removed
+    /// in v1.8.3.
+    #[serde(default)]
+    pub acknowledge_v1_8_1_audit_divergence: Option<bool>,
 }
 
 /// One entry in [`PdsAdminConfigToml::action_map`]. v1.7's TOML
@@ -824,7 +938,7 @@ impl Config {
         // cairn-mod's reason vocabulary, so [moderation_reasons]
         // is unrelated. See [`crate::pds_admin::PdsAdminPolicy`]
         // for the full validation rules.
-        let _ = crate::pds_admin::PdsAdminPolicy::from_config(self)?;
+        let pds_admin_policy = crate::pds_admin::PdsAdminPolicy::from_config(self)?;
         // [xrpc_gateway] (§F23 inbound, #91, v1.7). Run the
         // resolver for its side effect: enforces required-field
         // presence when enabled, malformed-DID rejection,
@@ -832,7 +946,19 @@ impl Config {
         // rejection. The resolved config is rebuilt at
         // `serve::run` startup; here we only care that the
         // validation passes.
-        let _ = crate::xrpc_gateway::XrpcGatewayConfig::from_config(self)?;
+        let xrpc_gateway = crate::xrpc_gateway::XrpcGatewayConfig::from_config(self)?;
+        // [pds_admin] inspector-only audit-divergence enforcement
+        // (v1.8.1). Canonical gate: every config-validation entry
+        // point — startup, hypothetical hot-reload, hypothetical
+        // API-driven config edits — must run this. Short-circuits
+        // on `enabled = false` and on `backend = ozone`. Bypassing
+        // this gate would let an operator stand up an inspector-
+        // only RustBackend that silently corrupts the audit-trail.
+        crate::pds_admin::validate_audit_divergence_acknowledgment(
+            &pds_admin_policy,
+            Some(&policy_automation),
+            xrpc_gateway.as_ref(),
+        )?;
         // Path existence of db_path / signing_key_path is checked at
         // use time by storage::open and SigningKey::load_from_file —
         // duplicating here would just double-fail and lose the

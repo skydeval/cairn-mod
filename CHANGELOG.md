@@ -31,6 +31,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previously-named state-conflict cases. **Not yet writeable** — the SQL
   CHECK constraint relaxation lands in a later v1.8.1 migration step
   alongside the new `error_category` column.
+- `[pds_admin].backend` selector — explicit string `"ozone"` or
+  `"rust"` selects the active PDS-admin backend. When omitted (the
+  v1.7-compatible shape) and exactly one backend subsection is
+  declared, the selector auto-detects. When both are declared and
+  no selector is set, the configuration is rejected as ambiguous.
+  When the selector points at a subsection that isn't declared, the
+  configuration is rejected with a specific `selector requires
+  block` error.
+- `[pds_admin.rust]` configuration block — declares a Rust-PDS
+  backend (Aurora-Locus or another ATProto Rust PDS). Required
+  keys: `url`, `client_id_env`, `client_secret_env`, `scopes`.
+  Optional keys: `capability_refresh_interval` (default `"1h"`,
+  lower-bound `"10s"`), `required_capabilities`,
+  `pinned_versions`, `verification_persist` (default `true`),
+  `acknowledge_v1_8_1_audit_divergence`. The OAuth credential env
+  vars must name distinct, non-empty environment variables;
+  reusing one env var for both id and secret is rejected.
+- **Inspector-only audit-divergence enforcement when `[pds_admin]`
+  is enabled with `backend = "rust"`.** v1.8.1's RustBackend is
+  inspector-only — every dispatch produces a `BackendError`
+  audit-trail row at runtime because protocol parity with the
+  upstream ATProto admin surface lands at v1.8.2. Operators who
+  want to stand up the bridge against a Rust PDS in v1.8.1 must
+  acknowledge this explicitly via three independent
+  configuration constraints, all enforced at startup:
+  1. `[pds_admin.rust].acknowledge_v1_8_1_audit_divergence = true`
+     must be set on the selected block. Operators reading the
+     v1.8.1 release notes own this flag. The flag is
+     self-removing across the v1.8 series — required in v1.8.1,
+     deprecated in v1.8.2, removed in v1.8.3.
+  2. No `[policy_automation.rules.*]` may have `mode = "auto"`.
+     Auto-mode rules dispatch to the backend without operator
+     confirmation; in v1.8.1's inspector-only posture they would
+     silently produce audit-failure rows on every fire. Use
+     `mode = "flag"` on every rule until v1.8.2 ships.
+  3. `[xrpc_gateway].enabled` must not be `true`. The inbound
+     XRPC gateway dispatches into the recordAction path that
+     calls the configured backend; with the inspector-only Rust
+     backend this would produce continuous audit-failure rows
+     for every inbound request.
+
+  All three error messages include a v1.8.2-lifts-the-restriction
+  pointer so operators see the upgrade path. Configurations that
+  set `enabled = true` with `backend = "ozone"` are unaffected.
+- `[pds_admin.locus]` (the early-design name for `[pds_admin.rust]`)
+  is rejected at config-load with a clear "renamed to
+  `[pds_admin.rust]` in v1.8.1" message. Operators with
+  v1.7-staged `[pds_admin.locus]` configs see the renaming error
+  immediately rather than silently losing the subsection.
 - v1.8.1 cross-release type-system foundation (partial). Foundation
   types consumed by later v1.8.x releases that have v1.8.1 as their
   shape ground-truth:

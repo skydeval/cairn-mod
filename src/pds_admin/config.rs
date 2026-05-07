@@ -85,13 +85,19 @@ pub struct PdsAdminPolicy {
     pub action_map: BTreeMap<ActionType, ActionMapEntry>,
 }
 
-/// Backend selector. v1.7 has only [`Self::Ozone`]; v1.8 will
-/// add a `Locus` variant. The resolver rejects `[pds_admin.locus]`
-/// in v1.7 before this type sees it.
+/// Backend selector. v1.7 has only [`Self::Ozone`]; v1.8.1
+/// adds [`Self::Rust`] for Aurora-Locus and other ATProto
+/// Rust PDSes. The resolver enforces the truth table over
+/// `(backend selector, ozone block, rust block)`; downstream
+/// consumers match on this enum to dispatch.
 #[derive(Debug, Clone)]
 pub enum PdsAdminBackendConfig {
-    /// bsky-PDS backend (the v1.7 default and only option).
+    /// bsky-PDS backend (the v1.7 default).
     Ozone(OzoneBackendConfig),
+    /// Rust-PDS backend (v1.8.1+). Inspector-only in v1.8.1
+    /// per the audit-divergence acknowledgment posture; v1.8.2
+    /// lifts the restriction once protocol parity ships.
+    Rust(RustBackendConfig),
 }
 
 /// Resolved bsky-PDS backend config.
@@ -107,6 +113,255 @@ pub struct OzoneBackendConfig {
     /// validation; the runtime value is the operator's choice or
     /// the default of 10s.
     pub request_timeout: Duration,
+}
+
+/// Resolved Rust-PDS backend config.
+///
+/// Built from [`crate::config::PdsAdminRustToml`] by the
+/// resolver. Holds the parsed URL, OAuth client credentials
+/// (resolved from env vars at config load), validated scope
+/// list, refresh cadence, and the audit-divergence
+/// acknowledgment flag that gates the v1.8.1 inspector-only
+/// posture.
+#[derive(Debug, Clone)]
+pub struct RustBackendConfig {
+    /// Parsed PDS base URL.
+    pub pds_url: url::Url,
+    /// OAuth client identifier resolved from the env var
+    /// named by `client_id_env` at config load. Stored as a
+    /// plain `String` because client identifiers are not
+    /// secret in OAuth 2.1; the redacting wrapper is reserved
+    /// for the secret.
+    pub client_id: String,
+    /// OAuth client secret resolved from the env var named
+    /// by `client_secret_env`. Wrapped for redacting Debug +
+    /// zero-on-drop.
+    pub client_secret: AdminPassword,
+    /// Validated scope wire strings. Each entry is non-empty
+    /// and prefixed with `atproto:` per the v1.8.1 structural
+    /// validation; typed `OAuthScope` parsing lands at the
+    /// OAuth flow's first consumer step.
+    pub scopes: Vec<String>,
+    /// Cap-set refresh cadence. Default 1 hour; lower bound
+    /// 10 seconds.
+    pub capability_refresh_interval: Duration,
+    /// Capability families the operator declared as required.
+    /// Empty by default. Each entry is a non-empty wire
+    /// string; typed validation against the
+    /// [`super::CAPABILITY_CLASSIFICATIONS`] registry lands
+    /// at the first capability-gated trait method consumer.
+    pub required_capabilities: Vec<String>,
+    /// Per-family pinned capability versions. Empty by
+    /// default. Family names cross-validated against
+    /// `required_capabilities` for consistency.
+    pub pinned_versions: BTreeMap<String, String>,
+    /// Whether to persist OAuth state across cairn-mod
+    /// restarts. Default `true`. Consumed starting at the
+    /// OAuth flow's first consumer step.
+    pub verification_persist: bool,
+    /// Operator's explicit acknowledgment of the v1.8.1
+    /// inspector-only audit divergence. **Required `true`**
+    /// when the bridge is enabled and this backend is
+    /// selected; otherwise the
+    /// [`validate_audit_divergence_acknowledgment`] gate
+    /// rejects the configuration at startup. Self-removing
+    /// across the v1.8 series: required v1.8.1, deprecated
+    /// v1.8.2, removed v1.8.3.
+    pub acknowledge_v1_8_1_audit_divergence: bool,
+}
+
+/// Resolver discriminator for the active backend.
+///
+/// Returned by [`resolve_backend`] over the truth table of
+/// `(backend selector, ozone block, rust block)`. Distinct
+/// from [`PdsAdminBackendConfig`] (which carries the resolved
+/// config payload) because resolution is a pure function of
+/// the TOML projection — the dispatch logic that builds the
+/// payload runs after this discriminator is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendSelection {
+    /// bsky-PDS via [`crate::pds_admin::OzoneBackend`].
+    Ozone,
+    /// Rust PDS via the v1.8.1+ Rust backend (deferred
+    /// implementation lands at Step 5 of v1.8.1).
+    Rust,
+}
+
+/// Structured config-validation errors for the `[pds_admin]`
+/// block.
+///
+/// Distinct from cairn-mod's top-level `Error` so test
+/// assertions can match on variants directly. Converts to
+/// `Error::Signing(format!("config: ..."))` for the
+/// operator-facing surface (matching cairn-mod's existing
+/// stringly-typed config error pattern).
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PdsAdminConfigError {
+    /// Both `[pds_admin.ozone]` and `[pds_admin.rust]` are
+    /// present with no explicit `backend` selector.
+    #[error(
+        "config: [pds_admin] declares both `ozone` and `rust` subsections \
+         but no `backend` selector — set `backend = \"ozone\"` or \
+         `backend = \"rust\"` to disambiguate"
+    )]
+    AmbiguousBackend,
+    /// `[pds_admin].enabled = true` but neither subsection is
+    /// present.
+    #[error(
+        "config: [pds_admin].enabled = true but no backend subsection is present \
+         (declare [pds_admin.ozone] or [pds_admin.rust])"
+    )]
+    NoBackendConfigured,
+    /// `backend = "ozone"` but `[pds_admin.ozone]` is absent.
+    #[error(
+        "config: [pds_admin].backend = \"ozone\" requires [pds_admin.ozone] \
+         to be declared"
+    )]
+    SelectorRequiresOzoneBlock,
+    /// `backend = "rust"` but `[pds_admin.rust]` is absent.
+    #[error(
+        "config: [pds_admin].backend = \"rust\" requires [pds_admin.rust] \
+         to be declared"
+    )]
+    SelectorRequiresRustBlock,
+    /// `backend = "<value>"` is not one of the recognized
+    /// strings. v1.8.1 accepts `"ozone"` or `"rust"`.
+    #[error(
+        "config: [pds_admin].backend = {0:?} is not a recognized backend \
+         (expected \"ozone\" or \"rust\")"
+    )]
+    UnknownBackend(String),
+    /// `backend = ""` — distinct from
+    /// [`Self::UnknownBackend`] so accidental empty-string
+    /// typos surface clearly.
+    #[error(
+        "config: [pds_admin].backend = \"\" is empty (set to \"ozone\" or \"rust\", \
+         or remove the key for auto-detection)"
+    )]
+    EmptyBackendSelector,
+    /// Per-block validation failure for `[pds_admin.ozone]`.
+    /// The inner string carries the specific rule that
+    /// failed.
+    #[error("config: [pds_admin.ozone] is invalid: {0}")]
+    OzoneBlockInvalid(String),
+    /// Per-block validation failure for `[pds_admin.rust]`.
+    /// The inner string carries the specific rule that
+    /// failed.
+    #[error("config: [pds_admin.rust] is invalid: {0}")]
+    RustBlockInvalid(String),
+    /// Unknown subsection or sibling key under `[pds_admin]`.
+    /// The `block` is the parent section (e.g.
+    /// `"pds_admin"`); the `key` is the offending name.
+    #[error("config: [{block}] declares unknown sibling key {key:?}")]
+    UnknownKey {
+        /// Parent section name without brackets.
+        block: String,
+        /// Offending key name.
+        key: String,
+    },
+    /// An env var named by `admin_password_env` /
+    /// `client_id_env` / `client_secret_env` is unset or
+    /// empty at process startup.
+    #[error("config: env var ${0} is not set or is empty")]
+    MissingEnvVar(String),
+    /// The same env var name was supplied for both
+    /// `client_id_env` and `client_secret_env`. Distinct
+    /// secrets per OAuth 2.1; reusing one env var is a
+    /// misconfiguration.
+    #[error(
+        "config: [pds_admin.rust].client_id_env and client_secret_env both name \
+         env var ${0} — OAuth client id and secret must be distinct"
+    )]
+    EnvVarReused(String),
+    /// A scope wire string failed structural validation.
+    /// **v1.8.1 structural-only**: typed `OAuthScope` parsing
+    /// lands at the OAuth flow's first consumer step (chainlink
+    /// #G).
+    #[error(
+        "config: [pds_admin.rust].scopes contains unrecognized scope {0:?} \
+         (expected non-empty string with `atproto:` prefix)"
+    )]
+    UnknownScope(String),
+    /// `[pds_admin.rust].scopes` contains the same wire
+    /// string twice.
+    #[error("config: [pds_admin.rust].scopes contains duplicate scope {0:?}")]
+    DuplicateScope(String),
+    /// `capability_refresh_interval` resolves to less than
+    /// the lower bound (10 seconds).
+    #[error(
+        "config: [pds_admin.rust].capability_refresh_interval = {0:?} is below \
+         the lower bound of 10s"
+    )]
+    CapabilityRefreshIntervalTooShort(String),
+    /// `capability_refresh_interval` is not a parseable
+    /// duration string.
+    #[error(
+        "config: [pds_admin.rust].capability_refresh_interval = {0:?} is not a \
+         valid duration (expected forms like \"10s\", \"5m\", \"1h\")"
+    )]
+    CapabilityRefreshIntervalUnparseable(String),
+    /// `pinned_versions` references a family name that doesn't
+    /// appear in `required_capabilities` (or vice versa). The
+    /// inner strings carry the specific mismatch.
+    #[error("config: [pds_admin.rust].pinned_versions / required_capabilities mismatch: {0}")]
+    PinnedVersionMismatch(String),
+    /// `[pds_admin.rust].acknowledge_v1_8_1_audit_divergence`
+    /// is missing or `false` while the bridge is enabled with
+    /// the Rust backend selected.
+    #[error(
+        "config: [pds_admin].enabled = true with backend = \"rust\" requires \
+         [pds_admin.rust].acknowledge_v1_8_1_audit_divergence = true. \
+         The v1.8.1 RustBackend is inspector-only — every dispatch produces \
+         an audit-failure row until v1.8.2's protocol-parity work lands and \
+         lifts this restriction along with the \
+         acknowledge_v1_8_1_audit_divergence flag."
+    )]
+    AuditDivergenceAcknowledgmentRequired,
+    /// `policy_automation` declares one or more rules in
+    /// `mode = "auto"` while the bridge is enabled with the
+    /// Rust backend. Auto-mode rules dispatch to the backend
+    /// without operator confirmation; in v1.8.1's inspector-only
+    /// posture this would silently produce audit-failure rows
+    /// at every auto-fire. The inner vector carries the names
+    /// of the offending rules.
+    #[error(
+        "config: [pds_admin].backend = \"rust\" is incompatible with \
+         policy_automation rules in mode = \"auto\" (rules: {0:?}). \
+         v1.8.2's protocol-parity work makes RustBackend functional and \
+         lifts this restriction along with the \
+         acknowledge_v1_8_1_audit_divergence flag."
+    )]
+    PolicyAutoModeIncompatibleWithInspectorRustBackend(Vec<String>),
+    /// `[xrpc_gateway].enabled = true` while the bridge is
+    /// enabled with the Rust backend. The inbound XRPC gateway
+    /// dispatches into the recordAction path which would call
+    /// the Rust backend; v1.8.1 rejects this combination at
+    /// startup.
+    #[error(
+        "config: [pds_admin].backend = \"rust\" is incompatible with \
+         [xrpc_gateway].enabled = true. v1.8.2's protocol-parity work makes \
+         RustBackend functional and lifts this restriction along with the \
+         acknowledge_v1_8_1_audit_divergence flag."
+    )]
+    XrpcGatewayIncompatibleWithInspectorRustBackend,
+    /// `[pds_admin.locus]` is set — early-design name
+    /// renamed to `[pds_admin.rust]` in v1.8.1.
+    #[error(
+        "config: [pds_admin.locus] was renamed to [pds_admin.rust] in v1.8.1; \
+         move the subsection's contents under the new name"
+    )]
+    LocusBlockRenamed,
+}
+
+impl From<PdsAdminConfigError> for Error {
+    fn from(e: PdsAdminConfigError) -> Self {
+        // Match the v1.7 stringly-typed config-error pattern. Tests can
+        // still match on the structured PdsAdminConfigError directly when
+        // they call resolve_backend / validated_rust_from_toml /
+        // validate_audit_divergence_acknowledgment without going through
+        // the conversion.
+        Error::Signing(e.to_string())
+    }
 }
 
 /// Per-action-type entry in the resolved action_map. `Skip`
@@ -333,20 +588,26 @@ impl PdsAdminPolicy {
     {
         // Forward-compat: when `enabled = false`, validate per-
         // subsection but skip the cross-block rules. Operators
-        // staging a v1.8 `[pds_admin.locus]` config behind
-        // `enabled = false` should still get told that v1.7 doesn't
-        // support locus — but they shouldn't be forced to fill in
-        // every action_map entry just to typecheck the toggle off.
+        // staging a config behind `enabled = false` should still
+        // get told about typos / renamed keys / invalid blocks —
+        // but they shouldn't be forced to fill in every action_map
+        // entry just to typecheck the toggle off.
         reject_unsupported_backend_subsections(toml)?;
 
-        // [pds_admin.ozone]: per-block validation runs whether or
-        // not enabled, so a forward-compat staging config still
-        // gets URL/env-var checking. The resolved value only
-        // surfaces on the policy when enabled is true.
+        // Per-block validation runs whether or not `enabled = true`,
+        // so a staging config still gets URL / env-var / scope
+        // checking. The resolved values only surface on the policy
+        // when `enabled = true` and the resolver picks the matching
+        // backend.
         let resolved_ozone = toml
             .ozone
             .as_ref()
             .map(|t| validated_ozone_from_toml(t, &read_env))
+            .transpose()?;
+        let resolved_rust = toml
+            .rust
+            .as_ref()
+            .map(|t| validated_rust_from_toml(t, &read_env))
             .transpose()?;
 
         if !toml.enabled {
@@ -357,15 +618,20 @@ impl PdsAdminPolicy {
             });
         }
 
-        // enabled = true: cross-block rules apply.
-        let backend = match resolved_ozone {
-            Some(ozone) => PdsAdminBackendConfig::Ozone(ozone),
-            None => {
-                return Err(Error::Signing(
-                    "config: [pds_admin].enabled = true but no backend subsection is present \
-                     (v1.7 supports [pds_admin.ozone] only)"
-                        .into(),
-                ));
+        // enabled = true: resolve the active backend per the truth
+        // table over (selector, ozone-present, rust-present), then
+        // pick the resolved value matching the selection.
+        let selection = resolve_backend(toml)?;
+        let backend = match selection {
+            BackendSelection::Ozone => {
+                let ozone = resolved_ozone
+                    .expect("resolve_backend returns Ozone only when [pds_admin.ozone] is present");
+                PdsAdminBackendConfig::Ozone(ozone)
+            }
+            BackendSelection::Rust => {
+                let rust = resolved_rust
+                    .expect("resolve_backend returns Rust only when [pds_admin.rust] is present");
+                PdsAdminBackendConfig::Rust(rust)
             }
         };
 
@@ -386,24 +652,369 @@ impl PdsAdminPolicy {
     }
 }
 
-/// Reject `[pds_admin.locus]` and any other unrecognized backend
-/// subsection. Runs even when `enabled = false` so operators
-/// catch typos and v1.8-staged configs at v1.7 startup, not at
-/// the eventual flip to enabled.
+/// Resolve the active backend per the v1.8.1 truth table over
+/// `(backend selector, ozone-present, rust-present)`.
+///
+/// Called only when `[pds_admin].enabled = true`; the
+/// disabled short-circuit inside
+/// [`PdsAdminPolicy::from_config`] runs first.
+///
+/// When the selector is set explicitly **and** both subsections
+/// are present, the unselected subsection still validated
+/// per-block (above), but its resolved value is logged as
+/// "ignored, present but not selected" via `tracing::info!` and
+/// not surfaced on the policy.
+pub fn resolve_backend(
+    toml: &crate::config::PdsAdminConfigToml,
+) -> std::result::Result<BackendSelection, PdsAdminConfigError> {
+    let ozone_present = toml.ozone.is_some();
+    let rust_present = toml.rust.is_some();
+
+    let selector_str: Option<&str> = toml.backend.as_deref();
+    let selector = match selector_str {
+        None => None,
+        Some("") => return Err(PdsAdminConfigError::EmptyBackendSelector),
+        Some("ozone") => Some(BackendSelection::Ozone),
+        Some("rust") => Some(BackendSelection::Rust),
+        Some(other) => return Err(PdsAdminConfigError::UnknownBackend(other.to_string())),
+    };
+
+    match (selector, ozone_present, rust_present) {
+        // Auto-detect from the unique subsection.
+        (None, true, false) => Ok(BackendSelection::Ozone),
+        (None, false, true) => Ok(BackendSelection::Rust),
+        (None, true, true) => Err(PdsAdminConfigError::AmbiguousBackend),
+        (None, false, false) => Err(PdsAdminConfigError::NoBackendConfigured),
+
+        // Explicit Ozone selector.
+        (Some(BackendSelection::Ozone), true, false) => Ok(BackendSelection::Ozone),
+        (Some(BackendSelection::Ozone), true, true) => {
+            tracing::info!(
+                target: "pds_admin_config",
+                "config: [pds_admin].backend = \"ozone\" — [pds_admin.rust] is present \
+                 and validated per-block but ignored at runtime"
+            );
+            Ok(BackendSelection::Ozone)
+        }
+        (Some(BackendSelection::Ozone), false, _) => {
+            Err(PdsAdminConfigError::SelectorRequiresOzoneBlock)
+        }
+
+        // Explicit Rust selector.
+        (Some(BackendSelection::Rust), false, true) => Ok(BackendSelection::Rust),
+        (Some(BackendSelection::Rust), true, true) => {
+            tracing::info!(
+                target: "pds_admin_config",
+                "config: [pds_admin].backend = \"rust\" — [pds_admin.ozone] is present \
+                 and validated per-block but ignored at runtime"
+            );
+            Ok(BackendSelection::Rust)
+        }
+        (Some(BackendSelection::Rust), _, false) => {
+            Err(PdsAdminConfigError::SelectorRequiresRustBlock)
+        }
+    }
+}
+
+/// Validate `[pds_admin.rust]` per the v1.8.1 block-validity
+/// rules and resolve into a [`RustBackendConfig`].
+///
+/// Validation rules:
+/// - `url` parses via [`url::Url::parse`]; no scheme constraint
+///   in v1.8.1 (the protocol-parity work that locks scheme posture
+///   ships in v1.8.2).
+/// - `client_id_env` and `client_secret_env` name distinct,
+///   non-empty env vars whose values are non-empty at process
+///   startup.
+/// - `scopes` is non-empty; each entry passes the structural
+///   scope check (non-empty wire string with `atproto:` prefix);
+///   no duplicates. Typed `OAuthScope` parsing lands at the
+///   OAuth flow's first consumer step.
+/// - `capability_refresh_interval` parses as a duration string
+///   (default `"1h"`, lower-bound `"10s"`).
+/// - `required_capabilities` is structurally validated (each
+///   entry non-empty, no duplicates); typed validation against
+///   the [`super::CAPABILITY_CLASSIFICATIONS`] registry lands at
+///   the first capability-gated trait method consumer.
+/// - `pinned_versions` keys are family names (no `-vN` suffix);
+///   values parse via [`super::CapabilityVersion::parse_suffix`];
+///   each pinned family must also appear in
+///   `required_capabilities` (mismatch surfaces as
+///   [`PdsAdminConfigError::PinnedVersionMismatch`]).
+fn validated_rust_from_toml<F>(
+    toml: &crate::config::PdsAdminRustToml,
+    read_env: &F,
+) -> Result<RustBackendConfig>
+where
+    F: Fn(&str) -> std::result::Result<String, std::env::VarError>,
+{
+    use PdsAdminConfigError as E;
+
+    let pds_url = url::Url::parse(&toml.url)
+        .map_err(|e| E::RustBlockInvalid(format!("`url` is not a valid URL: {e}")))?;
+
+    if toml.client_id_env.is_empty() {
+        return Err(E::RustBlockInvalid(
+            "`client_id_env` must name an env var (got empty string)".into(),
+        )
+        .into());
+    }
+    if toml.client_secret_env.is_empty() {
+        return Err(E::RustBlockInvalid(
+            "`client_secret_env` must name an env var (got empty string)".into(),
+        )
+        .into());
+    }
+    if toml.client_id_env == toml.client_secret_env {
+        return Err(E::EnvVarReused(toml.client_id_env.clone()).into());
+    }
+    let client_id =
+        read_env(&toml.client_id_env).map_err(|_| E::MissingEnvVar(toml.client_id_env.clone()))?;
+    if client_id.is_empty() {
+        return Err(E::MissingEnvVar(toml.client_id_env.clone()).into());
+    }
+    let client_secret = read_env(&toml.client_secret_env)
+        .map_err(|_| E::MissingEnvVar(toml.client_secret_env.clone()))?;
+    if client_secret.is_empty() {
+        return Err(E::MissingEnvVar(toml.client_secret_env.clone()).into());
+    }
+
+    if toml.scopes.is_empty() {
+        return Err(E::RustBlockInvalid(
+            "`scopes` must list at least one scope (got empty array)".into(),
+        )
+        .into());
+    }
+    let mut seen_scopes: BTreeSet<&str> = BTreeSet::new();
+    for scope in &toml.scopes {
+        if scope.is_empty() || !scope.starts_with("atproto:") {
+            return Err(E::UnknownScope(scope.clone()).into());
+        }
+        if !seen_scopes.insert(scope.as_str()) {
+            return Err(E::DuplicateScope(scope.clone()).into());
+        }
+    }
+
+    let refresh_str = toml.capability_refresh_interval.as_deref().unwrap_or("1h");
+    let refresh = parse_duration_string(refresh_str)
+        .ok_or_else(|| E::CapabilityRefreshIntervalUnparseable(refresh_str.to_string()))?;
+    if refresh < Duration::from_secs(10) {
+        return Err(E::CapabilityRefreshIntervalTooShort(refresh_str.to_string()).into());
+    }
+
+    let required_capabilities = toml.required_capabilities.clone().unwrap_or_default();
+    {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for cap in &required_capabilities {
+            if cap.is_empty() {
+                return Err(E::RustBlockInvalid(
+                    "`required_capabilities` contains an empty string".into(),
+                )
+                .into());
+            }
+            if !seen.insert(cap.as_str()) {
+                return Err(E::RustBlockInvalid(format!(
+                    "`required_capabilities` contains duplicate entry {cap:?}"
+                ))
+                .into());
+            }
+        }
+    }
+
+    let pinned_versions = toml.pinned_versions.clone().unwrap_or_default();
+    {
+        // Each pinned key must (a) parse as a family name (no -vN
+        // suffix) — we treat the key as the family name verbatim;
+        // (b) have a value that parses via CapabilityVersion::parse_suffix;
+        // (c) cross-validate: required_capabilities entries are wire
+        // strings of the form "family-vN" where the family must match
+        // a pinned key only if pinned. We surface mismatches as a
+        // single PinnedVersionMismatch listing the symptom.
+        for (family, version) in &pinned_versions {
+            if family.is_empty() {
+                return Err(
+                    E::RustBlockInvalid("`pinned_versions` contains an empty key".into()).into(),
+                );
+            }
+            if super::CapabilityVersion::parse_suffix(version).is_none() {
+                return Err(E::RustBlockInvalid(format!(
+                    "`pinned_versions[{family}]` = {version:?} is not a valid version suffix \
+                     (expected forms like \"v1\", \"v17\")"
+                ))
+                .into());
+            }
+            // If required_capabilities is non-empty, the pinned family
+            // must show up there. Empty required_capabilities means the
+            // operator hasn't declared anything required, so a
+            // pinned-but-not-required configuration is acceptable
+            // (operators may pin a capability they discovered through
+            // describeCapabilities but don't strictly require).
+            if !required_capabilities.is_empty() {
+                let has_match = required_capabilities.iter().any(|cap| {
+                    super::parse_capability_string(cap)
+                        .map(|(f, _)| f == *family)
+                        .unwrap_or(false)
+                        || cap == family
+                });
+                if !has_match {
+                    return Err(E::PinnedVersionMismatch(format!(
+                        "pinned family {family:?} does not appear in required_capabilities \
+                         (declare it as required, or remove the pin)"
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+
+    let verification_persist = toml.verification_persist.unwrap_or(true);
+    let acknowledge_v1_8_1_audit_divergence =
+        toml.acknowledge_v1_8_1_audit_divergence.unwrap_or(false);
+
+    Ok(RustBackendConfig {
+        pds_url,
+        client_id,
+        client_secret: AdminPassword::new(client_secret),
+        scopes: toml.scopes.clone(),
+        capability_refresh_interval: refresh,
+        required_capabilities,
+        pinned_versions,
+        verification_persist,
+        acknowledge_v1_8_1_audit_divergence,
+    })
+}
+
+/// Parse a human-readable duration string of the form
+/// `"<integer><unit>"`, where unit is one of `s`, `m`, `h`.
+/// Returns `None` for unparseable input. Used by
+/// `validated_rust_from_toml` for `capability_refresh_interval`.
+fn parse_duration_string(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = s.split_at(s.len().checked_sub(1)?);
+    let n: u64 = num_str.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        _ => return None,
+    };
+    Some(Duration::from_secs(secs))
+}
+
+/// Validate the audit-divergence acknowledgment per v1.8.1's
+/// inspector-only posture. **Canonical gate** for the
+/// `[pds_admin].enabled = true + backend = "rust"` configuration.
+///
+/// Three independent enforcement parts, all of which must pass:
+///
+/// 1. The `acknowledge_v1_8_1_audit_divergence` flag on the
+///    selected `[pds_admin.rust]` block must be `true`.
+/// 2. No `policy_automation` rule may be in `mode = "auto"`
+///    (auto-mode rules dispatch without operator confirmation;
+///    in v1.8.1's inspector-only posture they would silently
+///    produce audit-failure rows on every fire).
+/// 3. `[xrpc_gateway].enabled` must not be `true` (the inbound
+///    XRPC gateway would dispatch into the recordAction path
+///    that calls the Rust backend).
+///
+/// Each violation surfaces as a distinct
+/// [`PdsAdminConfigError`] variant; the v1.8.2-lifts footer in
+/// each error's display string points operators at the future
+/// release that drops the inspector-only posture.
+///
+/// Short-circuits on `enabled = false`: returns `Ok(())` without
+/// inspecting any other field. Also short-circuits on
+/// `backend = ozone` (the inspector-only posture is
+/// rust-specific).
+///
+/// **EVERY config-validation entry point** (startup;
+/// hypothetical hot-reload; hypothetical API-driven config
+/// edits) MUST call this gate. Bypassing it would let an
+/// operator stand up an inspector-only RustBackend that
+/// silently corrupts the audit-trail. The function is the
+/// canonical gate; do not duplicate its logic elsewhere.
+pub fn validate_audit_divergence_acknowledgment(
+    policy: &PdsAdminPolicy,
+    policy_automation: Option<&crate::policy::automation::PolicyAutomationPolicy>,
+    xrpc_gateway: Option<&crate::xrpc_gateway::XrpcGatewayConfig>,
+) -> std::result::Result<(), PdsAdminConfigError> {
+    if !policy.enabled {
+        return Ok(());
+    }
+    let rust = match &policy.backend {
+        Some(PdsAdminBackendConfig::Rust(r)) => r,
+        _ => return Ok(()),
+    };
+
+    // Part 1: acknowledgment flag.
+    if !rust.acknowledge_v1_8_1_audit_divergence {
+        return Err(PdsAdminConfigError::AuditDivergenceAcknowledgmentRequired);
+    }
+
+    // Part 2: no auto-mode policy-automation rules.
+    if let Some(pa) = policy_automation {
+        let auto_rules: Vec<String> = pa
+            .rules
+            .iter()
+            .filter(|(_, r)| r.mode == crate::policy::automation::PolicyMode::Auto)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !auto_rules.is_empty() {
+            return Err(
+                PdsAdminConfigError::PolicyAutoModeIncompatibleWithInspectorRustBackend(auto_rules),
+            );
+        }
+    }
+
+    // Part 3: xrpc_gateway must not be enabled.
+    if let Some(gw) = xrpc_gateway
+        && gw.enabled
+    {
+        return Err(PdsAdminConfigError::XrpcGatewayIncompatibleWithInspectorRustBackend);
+    }
+
+    Ok(())
+}
+
+/// Whether the dispatch path's admin XRPC handlers should emit
+/// the v1.8.1 RustBackend audit-divergence WARN at request-receive
+/// time.
+///
+/// Returns `true` when the bridge is enabled with the Rust
+/// backend selected. The actual WARN emission lives at the
+/// dispatch site (Step 5 wires the call); this helper is the
+/// canonical gating check, called from each handler before the
+/// dispatch fires. Defense-in-depth: the
+/// [`validate_audit_divergence_acknowledgment`] gate at startup
+/// already rejects `backend = "rust"` + `xrpc_gateway.enabled =
+/// true`, so this code path is unreachable in v1.8.1; the helper
+/// is wired now so Step 5's dispatch-side emission has a single
+/// gating point already in place.
+pub fn should_warn_rust_backend_dispatch(policy: &PdsAdminPolicy) -> bool {
+    matches!(
+        (&policy.enabled, &policy.backend),
+        (true, Some(PdsAdminBackendConfig::Rust(_)))
+    )
+}
+
+/// Reject `[pds_admin.locus]` (renamed to `[pds_admin.rust]`)
+/// and any other unrecognized sibling key under `[pds_admin]`.
+/// Runs even when `enabled = false` so operators catch typos and
+/// renamed-key migrations at config-load time, not at the
+/// eventual flip to enabled.
 fn reject_unsupported_backend_subsections(toml: &crate::config::PdsAdminConfigToml) -> Result<()> {
     if toml.locus.is_some() {
-        return Err(Error::Signing(
-            "config: backend not supported in v1.7: locus \
-             (Aurora-Locus support is deferred to v1.8; remove [pds_admin.locus] \
-             or wait for v1.8)"
-                .into(),
-        ));
+        return Err(PdsAdminConfigError::LocusBlockRenamed.into());
     }
     if let Some(unknown) = toml.other_backends.keys().next() {
-        return Err(Error::Signing(format!(
-            "config: backend not supported in v1.7: {unknown} \
-             (v1.7 supports [pds_admin.ozone] only; check for typos in subsection name)"
-        )));
+        return Err(PdsAdminConfigError::UnknownKey {
+            block: "pds_admin".to_string(),
+            key: unknown.clone(),
+        }
+        .into());
     }
     Ok(())
 }
@@ -682,6 +1293,8 @@ mod tests {
             enabled: false,
             ozone: Some(ozone_toml()),
             action_map: None,
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -700,12 +1313,17 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
         let p = from_config_test(&cfg, "secret-value").expect("full config loads");
         assert!(p.enabled);
-        let PdsAdminBackendConfig::Ozone(ozone) = p.backend.as_ref().expect("backend present");
+        let PdsAdminBackendConfig::Ozone(ozone) = p.backend.as_ref().expect("backend present")
+        else {
+            panic!("expected Ozone backend, got {:?}", p.backend);
+        };
         assert_eq!(ozone.pds_url.scheme(), "https");
         assert_eq!(ozone.pds_url.host_str(), Some("bsky.example.test"));
         assert_eq!(ozone.admin_password.as_str(), "secret-value");
@@ -732,6 +1350,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -766,6 +1386,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -786,6 +1408,8 @@ mod tests {
             enabled: true,
             ozone: None,
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -794,9 +1418,11 @@ mod tests {
     }
 
     #[test]
-    fn locus_subsection_rejects_with_v1_8_pointer() {
+    fn locus_subsection_rejects_as_renamed() {
         let cfg = config_with_pds_admin(PdsAdminConfigToml {
             enabled: false, // even when disabled — typo / staging visibility
+            backend: None,
+            rust: None,
             ozone: None,
             action_map: None,
             locus: Some(serde_json::json!({"some_field": "value"})),
@@ -806,10 +1432,9 @@ mod tests {
             .expect_err("locus rejects");
         let msg = format!("{err}");
         assert!(
-            msg.contains("backend not supported in v1.7: locus"),
+            msg.contains("[pds_admin.locus] was renamed to [pds_admin.rust]"),
             "msg={msg}"
         );
-        assert!(msg.contains("v1.8"), "msg={msg}");
     }
 
     #[test]
@@ -820,6 +1445,8 @@ mod tests {
             enabled: false,
             ozone: None,
             action_map: None,
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: other,
         });
@@ -827,7 +1454,7 @@ mod tests {
             .expect_err("unknown backend rejects");
         let msg = format!("{err}");
         assert!(
-            msg.contains("backend not supported in v1.7: ozonee"),
+            msg.contains("[pds_admin] declares unknown sibling key \"ozonee\""),
             "msg={msg}"
         );
     }
@@ -846,6 +1473,8 @@ mod tests {
                 request_timeout_seconds: 10,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -865,6 +1494,8 @@ mod tests {
                 request_timeout_seconds: 10,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -885,6 +1516,8 @@ mod tests {
                 request_timeout_seconds: 10,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -907,6 +1540,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -927,6 +1562,8 @@ mod tests {
                 request_timeout_seconds: 10,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -945,6 +1582,8 @@ mod tests {
                 request_timeout_seconds: 0,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -962,6 +1601,8 @@ mod tests {
                 request_timeout_seconds: 61,
             }),
             action_map: Some(full_action_map_skip_all()),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -985,6 +1626,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1012,6 +1655,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1030,6 +1675,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1055,6 +1702,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1083,6 +1732,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1111,6 +1762,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: Some(m),
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1130,6 +1783,8 @@ mod tests {
             enabled: true,
             ozone: Some(ozone_toml()),
             action_map: None,
+            backend: None,
+            rust: None,
             locus: None,
             other_backends: BTreeMap::new(),
         });
@@ -1177,5 +1832,561 @@ mod tests {
         assert!(BackendMethod::from_wire_str("ban_user").is_none());
         assert!(BackendMethod::from_wire_str("").is_none());
         assert!(BackendMethod::from_wire_str("skip").is_none()); // skip is handled separately
+    }
+
+    // ============================================================
+    // v1.8.1 — backend selector + Rust block + audit-divergence
+    // ============================================================
+
+    fn rust_toml() -> crate::config::PdsAdminRustToml {
+        crate::config::PdsAdminRustToml {
+            url: "https://rust-pds.example.test".into(),
+            client_id_env: "RUST_CLIENT_ID".into(),
+            client_secret_env: "RUST_CLIENT_SECRET".into(),
+            scopes: vec!["atproto:admin.moderation".into()],
+            capability_refresh_interval: None,
+            required_capabilities: None,
+            pinned_versions: None,
+            verification_persist: None,
+            acknowledge_v1_8_1_audit_divergence: None,
+        }
+    }
+
+    /// Env reader that knows the rust block's two env vars and the
+    /// ozone block's password env var. Used by tests that exercise
+    /// either or both backends.
+    fn rust_env_reader(name: &str) -> std::result::Result<String, std::env::VarError> {
+        match name {
+            "RUST_CLIENT_ID" => Ok("test-client-id".into()),
+            "RUST_CLIENT_SECRET" => Ok("test-client-secret".into()),
+            TEST_ENV_VAR => Ok("test-admin-password".into()),
+            _ => Err(std::env::VarError::NotPresent),
+        }
+    }
+
+    /// Resolve a config that may carry rust + ozone subsections.
+    fn from_config_rust_test(cfg: &crate::config::Config) -> Result<PdsAdminPolicy> {
+        PdsAdminPolicy::from_config_with_env_reader(cfg, rust_env_reader)
+    }
+
+    // ----- A. resolve_backend truth table -----
+
+    #[test]
+    fn resolve_backend_none_ozone_only_returns_ozone() {
+        let toml = PdsAdminConfigToml {
+            ozone: Some(ozone_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Ozone));
+    }
+
+    #[test]
+    fn resolve_backend_none_rust_only_returns_rust() {
+        let toml = PdsAdminConfigToml {
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Rust));
+    }
+
+    #[test]
+    fn resolve_backend_none_both_returns_ambiguous() {
+        let toml = PdsAdminConfigToml {
+            ozone: Some(ozone_toml()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::AmbiguousBackend)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_none_neither_returns_no_backend_configured() {
+        let toml = PdsAdminConfigToml::default();
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::NoBackendConfigured)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_explicit_ozone_with_ozone_only() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("ozone".into()),
+            ozone: Some(ozone_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Ozone));
+    }
+
+    #[test]
+    fn resolve_backend_explicit_ozone_with_both_resolves_ozone() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("ozone".into()),
+            ozone: Some(ozone_toml()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Ozone));
+    }
+
+    #[test]
+    fn resolve_backend_explicit_ozone_with_rust_only_rejects() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("ozone".into()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::SelectorRequiresOzoneBlock)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_explicit_ozone_with_neither_rejects() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("ozone".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::SelectorRequiresOzoneBlock)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_explicit_rust_with_rust_only() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("rust".into()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Rust));
+    }
+
+    #[test]
+    fn resolve_backend_explicit_rust_with_both_resolves_rust() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("rust".into()),
+            ozone: Some(ozone_toml()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_backend(&toml), Ok(BackendSelection::Rust));
+    }
+
+    #[test]
+    fn resolve_backend_explicit_rust_with_ozone_only_rejects() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("rust".into()),
+            ozone: Some(ozone_toml()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::SelectorRequiresRustBlock)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_explicit_rust_with_neither_rejects() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("rust".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::SelectorRequiresRustBlock)
+        );
+    }
+
+    #[test]
+    fn resolve_backend_unknown_selector_rejects() {
+        let toml = PdsAdminConfigToml {
+            backend: Some("rusty".into()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::UnknownBackend("rusty".into()))
+        );
+    }
+
+    #[test]
+    fn resolve_backend_empty_selector_rejects_distinctly() {
+        let toml = PdsAdminConfigToml {
+            backend: Some(String::new()),
+            rust: Some(rust_toml()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_backend(&toml),
+            Err(PdsAdminConfigError::EmptyBackendSelector)
+        );
+    }
+
+    // ----- B. block-validity rules -----
+
+    /// Construct a fully-valid Config with the rust block and full
+    /// action map, with the ack flag set per `ack`.
+    fn config_with_rust(rust: crate::config::PdsAdminRustToml) -> crate::config::Config {
+        config_with_pds_admin(PdsAdminConfigToml {
+            enabled: true,
+            backend: Some("rust".into()),
+            ozone: None,
+            rust: Some(rust),
+            action_map: Some(full_action_map_skip_all()),
+            locus: None,
+            other_backends: BTreeMap::new(),
+        })
+    }
+
+    #[test]
+    fn rust_missing_url_rejects() {
+        let mut t = rust_toml();
+        t.url = String::new();
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("empty url rejects");
+        assert!(format!("{err}").contains("[pds_admin.rust] is invalid"));
+    }
+
+    #[test]
+    fn rust_missing_client_id_env_rejects() {
+        let mut t = rust_toml();
+        t.client_id_env = String::new();
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("empty client_id_env rejects");
+        assert!(format!("{err}").contains("`client_id_env` must name an env var"));
+    }
+
+    #[test]
+    fn rust_empty_scopes_rejects() {
+        let mut t = rust_toml();
+        t.scopes = vec![];
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("empty scopes rejects");
+        assert!(format!("{err}").contains("must list at least one scope"));
+    }
+
+    #[test]
+    fn rust_duplicate_scopes_rejects() {
+        let mut t = rust_toml();
+        t.scopes = vec![
+            "atproto:admin.moderation".into(),
+            "atproto:admin.moderation".into(),
+        ];
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("duplicate scopes rejects");
+        assert!(format!("{err}").contains("duplicate scope"));
+    }
+
+    #[test]
+    fn rust_unknown_scope_wire_string_rejects() {
+        let mut t = rust_toml();
+        t.scopes = vec!["bogus".into()];
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("unknown scope rejects");
+        assert!(format!("{err}").contains("unrecognized scope"));
+    }
+
+    #[test]
+    fn rust_capability_refresh_interval_too_short_rejects() {
+        let mut t = rust_toml();
+        t.capability_refresh_interval = Some("5s".into());
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("5s rejects");
+        assert!(format!("{err}").contains("below the lower bound"));
+    }
+
+    #[test]
+    fn rust_capability_refresh_interval_lower_bound_accepted() {
+        let mut t = rust_toml();
+        t.capability_refresh_interval = Some("10s".into());
+        t.acknowledge_v1_8_1_audit_divergence = Some(true);
+        let cfg = config_with_rust(t);
+        let p = from_config_rust_test(&cfg).expect("10s loads");
+        let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
+            panic!("expected Rust backend");
+        };
+        assert_eq!(rust.capability_refresh_interval, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn rust_capability_refresh_interval_default_is_one_hour() {
+        let mut t = rust_toml();
+        t.acknowledge_v1_8_1_audit_divergence = Some(true);
+        let cfg = config_with_rust(t);
+        let p = from_config_rust_test(&cfg).expect("default loads");
+        let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
+            panic!("expected Rust backend");
+        };
+        assert_eq!(rust.capability_refresh_interval, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn rust_capability_refresh_interval_unparseable_rejects() {
+        let mut t = rust_toml();
+        t.capability_refresh_interval = Some("five hours".into());
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("unparseable rejects");
+        assert!(format!("{err}").contains("not a valid duration"));
+    }
+
+    #[test]
+    fn rust_pinned_versions_mismatch_rejects() {
+        // Pinned family doesn't show up in required_capabilities.
+        let mut t = rust_toml();
+        t.required_capabilities = Some(vec!["other-family-v1".into()]);
+        let mut pinned = BTreeMap::new();
+        pinned.insert("missing-family".to_string(), "v2".to_string());
+        t.pinned_versions = Some(pinned);
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("mismatch rejects");
+        assert!(format!("{err}").contains("does not appear in required_capabilities"));
+    }
+
+    #[test]
+    fn rust_env_var_reused_for_id_and_secret_rejects() {
+        let mut t = rust_toml();
+        t.client_secret_env = "RUST_CLIENT_ID".into(); // same as client_id_env
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("reuse rejects");
+        assert!(format!("{err}").contains("must be distinct"));
+    }
+
+    #[test]
+    fn rust_missing_env_var_rejects() {
+        let mut t = rust_toml();
+        t.client_id_env = "UNSET_VAR".into();
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("unset env rejects");
+        assert!(format!("{err}").contains("env var $UNSET_VAR"));
+    }
+
+    // ----- C. audit-divergence enforcement matrix -----
+    //
+    // These tests exercise validate_audit_divergence_acknowledgment
+    // directly so they don't have to round-trip every TOML field.
+    // Each builds a minimal PdsAdminPolicy + optional sibling configs.
+
+    fn policy_rust(ack: bool) -> PdsAdminPolicy {
+        PdsAdminPolicy {
+            enabled: true,
+            backend: Some(PdsAdminBackendConfig::Rust(RustBackendConfig {
+                pds_url: url::Url::parse("https://rust-pds.example.test").unwrap(),
+                client_id: "id".into(),
+                client_secret: AdminPassword::new("secret".into()),
+                scopes: vec!["atproto:admin.moderation".into()],
+                capability_refresh_interval: Duration::from_secs(3600),
+                required_capabilities: Vec::new(),
+                pinned_versions: BTreeMap::new(),
+                verification_persist: true,
+                acknowledge_v1_8_1_audit_divergence: ack,
+            })),
+            action_map: BTreeMap::new(),
+        }
+    }
+
+    fn policy_ozone() -> PdsAdminPolicy {
+        PdsAdminPolicy {
+            enabled: true,
+            backend: Some(PdsAdminBackendConfig::Ozone(OzoneBackendConfig {
+                pds_url: url::Url::parse("https://bsky.example.test").unwrap(),
+                admin_password: AdminPassword::new("secret".into()),
+                request_timeout: Duration::from_secs(10),
+            })),
+            action_map: BTreeMap::new(),
+        }
+    }
+
+    fn policy_disabled_rust() -> PdsAdminPolicy {
+        PdsAdminPolicy {
+            enabled: false,
+            backend: None,
+            action_map: BTreeMap::new(),
+        }
+    }
+
+    fn auto_mode_rule(name: &str) -> crate::policy::automation::PolicyRule {
+        crate::policy::automation::PolicyRule {
+            name: name.to_string(),
+            threshold_strikes: 1,
+            action_type: crate::moderation::types::ActionType::Warning,
+            mode: crate::policy::automation::PolicyMode::Auto,
+            reason_codes: vec!["spam".into()],
+            duration: None,
+        }
+    }
+
+    fn flag_mode_rule(name: &str) -> crate::policy::automation::PolicyRule {
+        crate::policy::automation::PolicyRule {
+            name: name.to_string(),
+            threshold_strikes: 1,
+            action_type: crate::moderation::types::ActionType::Warning,
+            mode: crate::policy::automation::PolicyMode::Flag,
+            reason_codes: vec!["spam".into()],
+            duration: None,
+        }
+    }
+
+    fn policy_automation_with_rules(
+        rules: Vec<(&str, crate::policy::automation::PolicyRule)>,
+    ) -> crate::policy::automation::PolicyAutomationPolicy {
+        let mut map = BTreeMap::new();
+        for (name, rule) in rules {
+            map.insert(name.to_string(), rule);
+        }
+        crate::policy::automation::PolicyAutomationPolicy {
+            enabled: true,
+            rules: map,
+        }
+    }
+
+    #[test]
+    fn divergence_rust_missing_ack_rejects() {
+        let policy = policy_rust(false);
+        let err = validate_audit_divergence_acknowledgment(&policy, None, None)
+            .expect_err("missing ack rejects");
+        assert_eq!(
+            err,
+            PdsAdminConfigError::AuditDivergenceAcknowledgmentRequired
+        );
+    }
+
+    #[test]
+    fn divergence_rust_with_ack_passes_alone() {
+        let policy = policy_rust(true);
+        validate_audit_divergence_acknowledgment(&policy, None, None)
+            .expect("ack-only rust passes");
+    }
+
+    #[test]
+    fn divergence_ozone_no_ack_passes() {
+        // Rust-only rule: ozone backend bypasses every part of
+        // the gate.
+        let policy = policy_ozone();
+        validate_audit_divergence_acknowledgment(&policy, None, None).expect("ozone bypasses gate");
+    }
+
+    #[test]
+    fn divergence_disabled_short_circuits() {
+        let policy = policy_disabled_rust();
+        validate_audit_divergence_acknowledgment(&policy, None, None)
+            .expect("disabled short-circuits");
+    }
+
+    #[test]
+    fn divergence_rust_with_auto_mode_rule_rejects() {
+        let policy = policy_rust(true);
+        let pa = policy_automation_with_rules(vec![("strike-warn", auto_mode_rule("x"))]);
+        let err = validate_audit_divergence_acknowledgment(&policy, Some(&pa), None)
+            .expect_err("auto mode rejects");
+        match err {
+            PdsAdminConfigError::PolicyAutoModeIncompatibleWithInspectorRustBackend(rules) => {
+                assert_eq!(rules, vec!["strike-warn".to_string()]);
+            }
+            other => panic!("expected PolicyAutoModeIncompatible, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn divergence_rust_with_flag_mode_only_passes() {
+        // Flag-mode rules don't dispatch automatically; they
+        // surface to the operator and pause for confirmation.
+        // No conflict with inspector-only RustBackend.
+        let policy = policy_rust(true);
+        let pa = policy_automation_with_rules(vec![("strike-warn", flag_mode_rule("strike-warn"))]);
+        validate_audit_divergence_acknowledgment(&policy, Some(&pa), None)
+            .expect("flag-only passes");
+    }
+
+    fn enabled_xrpc_gateway() -> crate::xrpc_gateway::XrpcGatewayConfig {
+        crate::xrpc_gateway::XrpcGatewayConfig {
+            enabled: true,
+            service_did: "did:plc:test".into(),
+            clock_skew_tolerance: Duration::from_secs(30),
+            replay_cache_ttl: Duration::from_secs(120),
+        }
+    }
+
+    #[test]
+    fn divergence_rust_with_xrpc_gateway_enabled_rejects() {
+        let policy = policy_rust(true);
+        let gw = enabled_xrpc_gateway();
+        let err = validate_audit_divergence_acknowledgment(&policy, None, Some(&gw))
+            .expect_err("xrpc_gateway enabled rejects");
+        assert_eq!(
+            err,
+            PdsAdminConfigError::XrpcGatewayIncompatibleWithInspectorRustBackend
+        );
+    }
+
+    #[test]
+    fn divergence_rust_with_xrpc_gateway_absent_passes() {
+        let policy = policy_rust(true);
+        validate_audit_divergence_acknowledgment(&policy, None, None)
+            .expect("xrpc_gateway absent passes");
+    }
+
+    // ----- D. enabled=false short-circuit -----
+
+    #[test]
+    fn enabled_false_with_invalid_rust_block_still_validates_per_block() {
+        // Per-block validation runs even when disabled — empty url
+        // surfaces at config-load.
+        let mut t = rust_toml();
+        t.url = String::new();
+        let cfg = config_with_pds_admin(PdsAdminConfigToml {
+            enabled: false,
+            backend: None,
+            ozone: None,
+            rust: Some(t),
+            action_map: None,
+            locus: None,
+            other_backends: BTreeMap::new(),
+        });
+        let err = from_config_rust_test(&cfg).expect_err("empty url rejects even disabled");
+        assert!(format!("{err}").contains("[pds_admin.rust] is invalid"));
+    }
+
+    #[test]
+    fn v1_7_compat_no_backend_key_with_only_ozone_block_resolves_to_ozone() {
+        // v1.7-style config: no `backend` key, only [pds_admin.ozone].
+        // Loads cleanly under v1.8.1 and resolves to Ozone via
+        // auto-detect.
+        let cfg = config_with_pds_admin(PdsAdminConfigToml {
+            enabled: true,
+            backend: None,
+            ozone: Some(ozone_toml()),
+            rust: None,
+            action_map: Some(full_action_map_skip_all()),
+            locus: None,
+            other_backends: BTreeMap::new(),
+        });
+        let p = from_config_rust_test(&cfg).expect("v1.7-shape loads");
+        assert!(p.enabled);
+        assert!(matches!(p.backend, Some(PdsAdminBackendConfig::Ozone(_))));
+    }
+
+    // ----- should_warn_rust_backend_dispatch helper -----
+
+    #[test]
+    fn warn_helper_returns_true_when_enabled_rust() {
+        assert!(should_warn_rust_backend_dispatch(&policy_rust(true)));
+        assert!(should_warn_rust_backend_dispatch(&policy_rust(false)));
+    }
+
+    #[test]
+    fn warn_helper_returns_false_when_ozone() {
+        assert!(!should_warn_rust_backend_dispatch(&policy_ozone()));
+    }
+
+    #[test]
+    fn warn_helper_returns_false_when_disabled() {
+        assert!(!should_warn_rust_backend_dispatch(&policy_disabled_rust()));
     }
 }
