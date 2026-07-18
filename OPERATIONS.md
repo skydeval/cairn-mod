@@ -3,8 +3,6 @@
 This document covers day-2 operational concerns for a deployed
 cairn-mod instance: production-readiness checklist, monitoring, and
 security hygiene. For initial deployment, see [SETUP.md](SETUP.md).
-For the moderator CLI reference, see
-[docs/moderator-cli.md](docs/moderator-cli.md).
 
 ## Production checklist
 

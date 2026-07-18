@@ -51,9 +51,6 @@ service verify on startup), see [SETUP.md](SETUP.md).
 For day-2 operational concerns (production checklist, monitoring,
 security hygiene), see [OPERATIONS.md](OPERATIONS.md).
 
-For the moderator CLI reference, see
-[docs/moderator-cli.md](docs/moderator-cli.md).
-
 ## Trust-chain disclosures
 
 Operators AND subscribers should understand what cairn-mod's protocol

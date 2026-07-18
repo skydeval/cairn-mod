@@ -1,42 +1,13 @@
 /target
 
-# === Chainlink managed ===
-# .chainlink/ — local-only tracker state (no remote sync by design).
-# SQLite store + WAL are per-machine; rules/ is project policy and
-# should be tracked so collaborators share workflow config.
-.chainlink/issues.db
-.chainlink/issues.db-wal
-.chainlink/issues.db-shm
-.chainlink/session.json
-.chainlink/.active-issue
+# chainlink runtime (rules/ tracked)
+.chainlink/
 
-# .chainlink/ — DO track these (project-level policy):
-#   .chainlink/rules/             — project coding standards
-
-# === Legacy crosslink leftovers (post-migration) ===
-# Pre-migration tracker state lives in .crosslink.archive/ (read-only;
-# do not modify — see docs/tracker-history.md). The .crosslink/ entry
-# remains defensively in case crosslink tooling is re-run against this
-# repo and re-creates the directory.
+# legacy crosslink
 .crosslink/
 .crosslink.archive/
 
-# .claude/ — auto-generated hooks, not project source
-.claude/hooks/
-.claude/commands/
-.claude/mcp/
+# claude runtime
+.claude/
 
-# .claude/ — DO track these (if manually configured):
-#   .claude/settings.json         — Claude Code project settings
-#   .claude/settings.local.json is per-developer, ignore separately if needed
-# Chainlink runtime artifacts (rules/ tracked, runtime state excluded)
-.chainlink/daemon.log
-.chainlink/daemon.pid
-
-# === Internal-notes docs untracked post-v1.1 ===
-# Both files were committed up through the v1.1.0 tag (which keeps the
-# historical snapshots for anyone checking out v1.1.0 or earlier).
-# Going forward they live as private working notes; future edits stay
-# off the wire. To re-track, remove the entries below and `git add` the
-# file.
-RETROSPECTIVE.md
+docs/internal/

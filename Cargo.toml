@@ -27,8 +27,6 @@ exclude = [
     # crates.io README + CHANGELOG carry what users need; the rest
     # is for contributors who clone the git repo.
     "cairn-design.md",
-    "docs/",
-    "RETROSPECTIVE.md",
     "MAINTAINERS.md",
     "CODE_OF_CONDUCT.md",
     # Tests + fixtures — `cargo install` doesn't run them; they

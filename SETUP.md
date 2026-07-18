@@ -3,8 +3,7 @@
 This guide walks through deploying a fresh cairn-mod instance from
 `cargo install` to verified service-record publishing. For day-2
 operational concerns once you're running, see
-[OPERATIONS.md](OPERATIONS.md). For the moderator CLI reference,
-see [docs/moderator-cli.md](docs/moderator-cli.md).
+[OPERATIONS.md](OPERATIONS.md).
 
 Target: a running `cairn serve` behind a reverse proxy, published
 service record, responding to `GET /.well-known/did.json`.
