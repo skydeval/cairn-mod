@@ -768,6 +768,59 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.4 moderator reads: same `Unsupported` posture as the
+    /// v1.8.3 reads (no Ozone-service URL in config; honest
+    /// "switch backends" refusal).
+    async fn get_event(
+        &self,
+        _event_id: i64,
+    ) -> Result<crate::pds_admin::rust::read_types::EventWithContext, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_subject_context(
+        &self,
+        _did: &str,
+    ) -> Result<crate::pds_admin::rust::read_types::SubjectContextResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_subject_history(
+        &self,
+        _did: &str,
+        _filter: crate::pds_admin::rust::read_types::SubjectHistoryFilter,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> Result<
+        crate::pds_admin::rust::read_types::PaginatedResponse<
+            crate::pds_admin::rust::read_types::StatusWithContext,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn list_appeals(
+        &self,
+        _filter: crate::pds_admin::rust::read_types::ListAppealsFilter,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> Result<
+        crate::pds_admin::rust::read_types::PaginatedResponse<
+            crate::pds_admin::rust::read_types::AppealView,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_appeal(
+        &self,
+        _appeal_id: i64,
+    ) -> Result<crate::pds_admin::rust::read_types::AppealDetail, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     async fn probe(&self) -> Result<ProbeReport, BackendError> {
         let url = self.xrpc_url("com.atproto.server.describeServer")?;
 

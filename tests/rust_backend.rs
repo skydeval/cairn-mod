@@ -959,3 +959,447 @@ async fn ozone_backend_reads_return_unsupported() {
         .await;
     assert!(matches!(st, Err(BackendError::Unsupported)));
 }
+
+// =========================================================================
+// v1.8.4 — moderator single-fetch / subject / appeal reads (§8)
+// =========================================================================
+
+use cairn_mod::pds_admin::rust::read_types::{
+    AppealDetail, AppealView, ListAppealsFilter, SubjectContextResponse, SubjectHistoryFilter,
+};
+
+struct MockModeratorReads {
+    /// Applied to every read endpoint (describeCapabilities is
+    /// always 200).
+    status: StatusCode,
+    get_event_body: String,
+    subject_context_body: String,
+    subject_history_body: String,
+    list_appeals_body: String,
+    get_appeal_body: String,
+    /// (path, query) pairs seen, in arrival order.
+    seen: Mutex<Vec<(String, String)>>,
+}
+
+async fn v184_read_handler(
+    State(state): State<Arc<MockModeratorReads>>,
+    uri: axum::http::Uri,
+) -> Response {
+    let path = uri.path().to_string();
+    state
+        .seen
+        .lock()
+        .unwrap()
+        .push((path.clone(), uri.query().unwrap_or("").to_string()));
+    let body = match path.rsplit('/').next().unwrap_or("") {
+        "tools.aurora.moderator.getEvent" => state.get_event_body.clone(),
+        "tools.aurora.moderator.getSubjectContext" => state.subject_context_body.clone(),
+        "tools.aurora.moderator.getSubjectHistory" => state.subject_history_body.clone(),
+        "tools.aurora.moderator.listAppeals" => state.list_appeals_body.clone(),
+        "tools.aurora.moderator.getAppeal" => state.get_appeal_body.clone(),
+        other => panic!("unexpected mock path {other}"),
+    };
+    (
+        state.status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// Mock Aurora advertising `advertised` capability strings, serving
+/// all five v1.8.4 moderator-read endpoints from one state.
+async fn spawn_v184_mock(
+    advertised: &[&str],
+    status: StatusCode,
+) -> (SocketAddr, Arc<MockModeratorReads>) {
+    let read_state = Arc::new(MockModeratorReads {
+        status,
+        get_event_body: canonical_event_detail_body(),
+        subject_context_body: canonical_subject_context_body(),
+        subject_history_body: canonical_statuses_body(),
+        list_appeals_body: canonical_appeals_page_body(),
+        get_appeal_body: canonical_appeal_detail_body(),
+        seen: Mutex::new(Vec::new()),
+    });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: json!({
+                "families": {"tools.aurora.moderator": [
+                    "queryEvents", "queryStatuses", "getEvent",
+                    "getSubjectContext", "getSubjectHistory",
+                    "listAppeals", "getAppeal"
+                ]},
+                "extensions": advertised
+                    .iter()
+                    .map(|name| json!({"name": name}))
+                    .collect::<Vec<_>>(),
+                "implementation": "aurora-locus",
+                "version": "0.11.0"
+            })
+            .to_string(),
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let mut router = Router::new().route(
+        "/xrpc/tools.aurora.describeCapabilities",
+        get(describe_capabilities).with_state(desc_state),
+    );
+    for nsid in [
+        "tools.aurora.moderator.getEvent",
+        "tools.aurora.moderator.getSubjectContext",
+        "tools.aurora.moderator.getSubjectHistory",
+        "tools.aurora.moderator.listAppeals",
+        "tools.aurora.moderator.getAppeal",
+    ] {
+        router = router.route(
+            &format!("/xrpc/{nsid}"),
+            get(v184_read_handler).with_state(read_state.clone()),
+        );
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, read_state)
+}
+
+const ALL_V184_CAPS: &[&str] = &[
+    "mod-events-emit-v1",
+    "moderator-activity-v1",
+    "subject-context-v1",
+    "subject-history-v1",
+    "appeals-v1",
+];
+
+fn canonical_event_detail_body() -> String {
+    // getEvent returns a bare EventWithContext (aurora_moderator.rs
+    // :419-423) — same item shape as queryEvents, no page wrapper.
+    json!({
+        "id": 42,
+        "eventType": "account_takedown",
+        "actorDid": "did:web:cairn-mod.example.test",
+        "actorHandle": null,
+        "subject": {"$type": "com.atproto.repo.strongRef",
+                    "uri": "at://did:plc:x/app.bsky.feed.post/r",
+                    "cid": "bafyr"},
+        "subjectHandle": null,
+        "details": {"rationale": "spam"},
+        "createdAt": "2026-07-20T12:00:00Z"
+    })
+    .to_string()
+}
+
+fn canonical_subject_context_body() -> String {
+    json!({
+        "subject": {"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:x"},
+        "primaryDid": "did:plc:x",
+        "handle": "user.example.com",
+        "currentStatus": {
+            "takedownRef": "TAKEDOWN-9",
+            "deactivatedAt": null,
+            "activeAction": "takedown"
+        },
+        "recentActions": [],
+        "relatedReports": [],
+        "relatedAppeals": [{
+            "id": 5,
+            "appellantDid": "did:plc:x",
+            "appellantHandle": null,
+            "status": "pending",
+            "submittedAt": "2026-07-20T13:00:00Z"
+        }]
+    })
+    .to_string()
+}
+
+fn canonical_appeals_page_body() -> String {
+    json!({
+        "items": [{
+            "id": 5,
+            "status": "pending",
+            "submitterDid": "did:plc:x",
+            "submitterHandle": null,
+            "subject": {"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:x"},
+            "reason": "wrongful takedown",
+            "details": null,
+            "submittedAt": "2026-07-20T13:00:00Z",
+            "originalActionSummary": {"kind": "moderation", "id": 7, "summary": "takedown: spam"},
+            "resolution": null
+        }],
+        "cursor": "appeal-page-2"
+    })
+    .to_string()
+}
+
+fn canonical_appeal_detail_body() -> String {
+    json!({
+        "id": 5,
+        "status": "approved",
+        "submitterDid": "did:plc:x",
+        "submitterHandle": null,
+        "subject": null,
+        "reason": "wrongful takedown",
+        "details": null,
+        "submittedAt": "2026-07-20T13:00:00Z",
+        "originalActionSummary": null,
+        "resolution": {
+            "reviewedBy": "did:plc:mod",
+            "reviewedByHandle": null,
+            "reviewedAt": "2026-07-21T09:00:00Z",
+            "decision": "overturned",
+            "notes": null
+        },
+        "timeline": [
+            {"kind": "submitted", "at": "2026-07-20T13:00:00Z",
+             "byDid": "did:plc:x", "byHandle": null, "note": null},
+            {"kind": "reviewed", "at": "2026-07-21T09:00:00Z",
+             "byDid": "did:plc:mod", "byHandle": null, "note": null}
+        ]
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn get_event_end_to_end() {
+    let (addr, state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::OK).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let event: EventWithContext = backend.get_event(42).await.expect("get_event succeeds");
+    assert_eq!(event.id, 42);
+    assert_eq!(event.event_type, "account_takedown");
+    assert!(matches!(
+        event.subject,
+        Some(ReadSubject::Record { ref cid, .. }) if cid == "bafyr"
+    ));
+
+    let (path, qs) = state.seen.lock().unwrap()[0].clone();
+    assert!(path.ends_with("tools.aurora.moderator.getEvent"), "{path}");
+    assert_eq!(qs, "id=42", "single-fetch: id only, no pagination");
+}
+
+#[tokio::test]
+async fn get_subject_context_end_to_end() {
+    let (addr, state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::OK).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let ctx: SubjectContextResponse = backend
+        .get_subject_context("did:plc:x")
+        .await
+        .expect("get_subject_context succeeds");
+    assert_eq!(ctx.primary_did.as_deref(), Some("did:plc:x"));
+    assert_eq!(
+        ctx.current_status.unwrap().active_action.as_deref(),
+        Some("takedown")
+    );
+    assert_eq!(ctx.related_appeals[0].id, 5);
+
+    let (path, qs) = state.seen.lock().unwrap()[0].clone();
+    assert!(
+        path.ends_with("tools.aurora.moderator.getSubjectContext"),
+        "{path}"
+    );
+    assert_eq!(qs, "did=did%3Aplc%3Ax", "plain-DID param, no pagination");
+}
+
+#[tokio::test]
+async fn get_subject_history_end_to_end_with_filters() {
+    let (addr, state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::OK).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let filter = SubjectHistoryFilter {
+        action: Some("takedown".to_string()),
+        direction: Some("asc".to_string()),
+    };
+    let page: PaginatedResponse<StatusWithContext> = backend
+        .get_subject_history("did:plc:x", filter, Some("cur0"), Some(10))
+        .await
+        .expect("get_subject_history succeeds");
+
+    // History rows are action rows — the v1.8.3 StatusWithContext
+    // shape, not events.
+    assert_eq!(page.items[0].action, "takedown");
+
+    let (path, qs) = state.seen.lock().unwrap()[0].clone();
+    assert!(
+        path.ends_with("tools.aurora.moderator.getSubjectHistory"),
+        "{path}"
+    );
+    assert!(qs.contains("did=did%3Aplc%3Ax"), "{qs}");
+    assert!(qs.contains("action=takedown"), "{qs}");
+    assert!(qs.contains("direction=asc"), "{qs}");
+    assert!(qs.contains("cursor=cur0"), "{qs}");
+    assert!(qs.contains("limit=10"), "{qs}");
+}
+
+#[tokio::test]
+async fn list_appeals_end_to_end_with_filters() {
+    let (addr, state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::OK).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let filter = ListAppealsFilter {
+        status: Some("pending".to_string()),
+        appellant: Some("did:plc:x".to_string()),
+        submitted_after: Some("2026-07-01T00:00:00Z".to_string()),
+        ..Default::default()
+    };
+    let page: PaginatedResponse<AppealView> = backend
+        .list_appeals(filter, None, Some(25))
+        .await
+        .expect("list_appeals succeeds");
+
+    assert_eq!(page.items[0].status, "pending");
+    assert_eq!(page.items[0].submitter_did, "did:plc:x");
+    assert_eq!(page.cursor.as_deref(), Some("appeal-page-2"));
+
+    let (path, qs) = state.seen.lock().unwrap()[0].clone();
+    assert!(
+        path.ends_with("tools.aurora.moderator.listAppeals"),
+        "{path}"
+    );
+    assert!(qs.contains("status=pending"), "{qs}");
+    assert!(qs.contains("appellant=did%3Aplc%3Ax"), "{qs}");
+    assert!(qs.contains("submittedAfter="), "camelCase bound: {qs}");
+    assert!(!qs.contains("reviewer"), "None omitted: {qs}");
+    assert!(qs.contains("limit=25"), "{qs}");
+}
+
+#[tokio::test]
+async fn get_appeal_end_to_end_flattened_detail() {
+    let (addr, state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::OK).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let detail: AppealDetail = backend.get_appeal(5).await.expect("get_appeal succeeds");
+    assert_eq!(detail.view.id, 5);
+    assert_eq!(detail.view.status, "approved");
+    assert_eq!(
+        detail.view.resolution.as_ref().unwrap().decision.as_deref(),
+        Some("overturned")
+    );
+    assert_eq!(detail.timeline.len(), 2);
+    assert_eq!(detail.timeline[0].kind, "submitted");
+
+    let (path, qs) = state.seen.lock().unwrap()[0].clone();
+    assert!(path.ends_with("tools.aurora.moderator.getAppeal"), "{path}");
+    assert_eq!(qs, "id=5");
+}
+
+#[tokio::test]
+async fn single_fetch_404_maps_to_terminal() {
+    // Unknown-id getEvent/getAppeal → upstream 404 → Terminal
+    // (exit 18 at the CLI) per map_rust_backend_http_error.
+    let (addr, _state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::NOT_FOUND).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let ev = backend.get_event(999_999).await.unwrap_err();
+    assert!(matches!(ev, BackendError::Terminal(_)), "{ev:?}");
+    let ap = backend.get_appeal(999_999).await.unwrap_err();
+    assert!(matches!(ap, BackendError::Terminal(_)), "{ap:?}");
+}
+
+#[tokio::test]
+async fn v184_reads_5xx_map_to_transient() {
+    let (addr, _state) = spawn_v184_mock(ALL_V184_CAPS, StatusCode::INTERNAL_SERVER_ERROR).await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let err = backend
+        .list_appeals(ListAppealsFilter::default(), None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Transient(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn capability_families_gate_independently() {
+    // Aurora advertises only the v1.8.3 families: getEvent (which
+    // shares moderator-activity) dispatches; the three new
+    // families gate their endpoints with the family-specific wire
+    // string, and no HTTP call is made for gated reads.
+    let (addr, state) = spawn_v184_mock(
+        &["mod-events-emit-v1", "moderator-activity-v1"],
+        StatusCode::OK,
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    backend
+        .get_event(42)
+        .await
+        .expect("getEvent shares moderator-activity");
+
+    let cases: [(BackendError, &str); 4] = [
+        (
+            backend.get_subject_context("did:plc:x").await.unwrap_err(),
+            "subject-context-v1",
+        ),
+        (
+            backend
+                .get_subject_history("did:plc:x", SubjectHistoryFilter::default(), None, None)
+                .await
+                .unwrap_err(),
+            "subject-history-v1",
+        ),
+        (
+            backend
+                .list_appeals(ListAppealsFilter::default(), None, None)
+                .await
+                .unwrap_err(),
+            "appeals-v1",
+        ),
+        (backend.get_appeal(5).await.unwrap_err(), "appeals-v1"),
+    ];
+    for (err, expected_wire) in cases {
+        match &err {
+            BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, expected_wire),
+            other => panic!("expected CapabilityNotAdvertised({expected_wire}), got {other:?}"),
+        }
+    }
+    // Only the successful getEvent reached the wire.
+    let seen = state.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].0.ends_with("getEvent"), "{seen:?}");
+}
+
+#[tokio::test]
+async fn ozone_backend_v1_8_4_reads_return_unsupported() {
+    let cfg = cairn_mod::pds_admin::OzoneBackendConfig {
+        pds_url: url::Url::parse("https://bsky.example.test").unwrap(),
+        admin_password: cairn_mod::pds_admin::AdminPassword::new("pw".into()),
+        request_timeout: Duration::from_secs(5),
+    };
+    let ozone = cairn_mod::pds_admin::OzoneBackend::new(&cfg).unwrap();
+    assert!(matches!(
+        ozone.get_event(1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.get_subject_context("did:plc:x").await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone
+            .get_subject_history("did:plc:x", SubjectHistoryFilter::default(), None, None)
+            .await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone
+            .list_appeals(ListAppealsFilter::default(), None, None)
+            .await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.get_appeal(1).await,
+        Err(BackendError::Unsupported)
+    ));
+}

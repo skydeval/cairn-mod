@@ -191,12 +191,46 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminStatusesSub,
     },
+    /// Subject-scoped moderation reads (v1.8.4; RustBackend via
+    /// tools.aurora.moderator.getSubjectContext /
+    /// getSubjectHistory — Unsupported on Ozone).
+    Subjects {
+        #[command(subcommand)]
+        sub: PdsAdminSubjectsSub,
+    },
+    /// Appeal reads (v1.8.4; RustBackend via
+    /// tools.aurora.moderator.listAppeals / getAppeal —
+    /// Unsupported on Ozone).
+    Appeals {
+        #[command(subcommand)]
+        sub: PdsAdminAppealsSub,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum PdsAdminEventsSub {
     /// Fetch a page of moderation events from the upstream PDS.
     Query(PdsAdminEventsQueryArgs),
+    /// Fetch a single moderation event by id (v1.8.4).
+    Get(PdsAdminEventsGetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminSubjectsSub {
+    /// Fetch contextual metadata for a subject DID: current
+    /// status, recent actions, related reports and appeals.
+    Context(PdsAdminSubjectsContextArgs),
+    /// Fetch a subject DID's moderation-action history (action
+    /// rows — same element shape as `statuses query`).
+    History(PdsAdminSubjectsHistoryArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminAppealsSub {
+    /// List appeals with filters and pagination.
+    List(PdsAdminAppealsListArgs),
+    /// Fetch a single appeal (with lifecycle timeline) by id.
+    Get(PdsAdminAppealsGetArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -259,6 +293,93 @@ struct PdsAdminStatusesQueryArgs {
     /// Page size (upstream default 50, capped at 100).
     #[arg(long)]
     limit: Option<u32>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Maps onto Aurora's `GetEventParams { id }`
+/// (aurora_moderator.rs:415-418).
+#[derive(Debug, Args)]
+struct PdsAdminEventsGetArgs {
+    /// Event id (from `events query` output).
+    id: i64,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Maps onto Aurora's `GetSubjectContextParams { did }`
+/// (aurora_moderator.rs:649-652) — account-scoped, plain DID.
+#[derive(Debug, Args)]
+struct PdsAdminSubjectsContextArgs {
+    /// Subject DID.
+    did: String,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Flags map 1:1 onto Aurora's `GetSubjectHistoryParams`
+/// (aurora_moderator.rs:839-850).
+#[derive(Debug, Args)]
+struct PdsAdminSubjectsHistoryArgs {
+    /// Subject DID.
+    did: String,
+    /// Filter by action type (e.g. `takedown`, `suspend`).
+    #[arg(long)]
+    action: Option<String>,
+    /// Sort direction: asc | desc (upstream default desc).
+    #[arg(long)]
+    direction: Option<String>,
+    /// Opaque pagination cursor from a previous page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Page size (upstream default 50, capped at 100).
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Flags map 1:1 onto Aurora's `ListAppealsParams`
+/// (aurora_moderator.rs:1226-1244).
+#[derive(Debug, Args)]
+struct PdsAdminAppealsListArgs {
+    /// Filter by appeal status (snake_case wire value: pending,
+    /// under_review, approved, denied, escalated).
+    #[arg(long)]
+    status: Option<String>,
+    /// Filter by appellant DID.
+    #[arg(long)]
+    appellant: Option<String>,
+    /// Filter by reviewer DID (matches reviewedBy).
+    #[arg(long)]
+    reviewer: Option<String>,
+    /// Lower bound on submitted_at (inclusive), RFC3339.
+    #[arg(long = "submitted-after")]
+    submitted_after: Option<String>,
+    /// Upper bound on submitted_at (inclusive), RFC3339.
+    #[arg(long = "submitted-before")]
+    submitted_before: Option<String>,
+    /// Opaque pagination cursor from a previous page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Page size (upstream default 50, capped at 100).
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Maps onto Aurora's `GetAppealParams { id }`
+/// (aurora_moderator.rs:1469-1472).
+#[derive(Debug, Args)]
+struct PdsAdminAppealsGetArgs {
+    /// Appeal id (from `appeals list` output).
+    id: i64,
     /// Path to cairn.toml (defaults to ./cairn.toml).
     #[arg(long)]
     config: Option<std::path::PathBuf>,
@@ -1242,6 +1363,36 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminStatusesSub::Query(args),
                 },
         } => run_pds_admin_statuses_query(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Events {
+                    sub: PdsAdminEventsSub::Get(args),
+                },
+        } => run_pds_admin_events_get(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Subjects {
+                    sub: PdsAdminSubjectsSub::Context(args),
+                },
+        } => run_pds_admin_subjects_context(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Subjects {
+                    sub: PdsAdminSubjectsSub::History(args),
+                },
+        } => run_pds_admin_subjects_history(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Appeals {
+                    sub: PdsAdminAppealsSub::List(args),
+                },
+        } => run_pds_admin_appeals_list(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Appeals {
+                    sub: PdsAdminAppealsSub::Get(args),
+                },
+        } => run_pds_admin_appeals_get(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -1290,6 +1441,61 @@ async fn run_pds_admin_statuses_query(args: PdsAdminStatusesQueryArgs) -> Result
     let rendered =
         cli_pds_admin_reads::statuses_query(&config, filter, args.cursor.as_deref(), args.limit)
             .await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_events_get(args: PdsAdminEventsGetArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let rendered = cli_pds_admin_reads::events_get(&config, args.id).await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_subjects_context(args: PdsAdminSubjectsContextArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let rendered = cli_pds_admin_reads::subjects_context(&config, &args.did).await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_subjects_history(args: PdsAdminSubjectsHistoryArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let filter = cairn_mod::pds_admin::rust::read_types::SubjectHistoryFilter {
+        action: args.action,
+        direction: args.direction,
+    };
+    let rendered = cli_pds_admin_reads::subjects_history(
+        &config,
+        &args.did,
+        filter,
+        args.cursor.as_deref(),
+        args.limit,
+    )
+    .await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_appeals_list(args: PdsAdminAppealsListArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let filter = cairn_mod::pds_admin::rust::read_types::ListAppealsFilter {
+        status: args.status,
+        appellant: args.appellant,
+        reviewer: args.reviewer,
+        submitted_after: args.submitted_after,
+        submitted_before: args.submitted_before,
+    };
+    let rendered =
+        cli_pds_admin_reads::appeals_list(&config, filter, args.cursor.as_deref(), args.limit)
+            .await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_appeals_get(args: PdsAdminAppealsGetArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let rendered = cli_pds_admin_reads::appeals_get(&config, args.id).await?;
     println!("{rendered}");
     Ok(())
 }

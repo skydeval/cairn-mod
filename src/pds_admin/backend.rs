@@ -19,7 +19,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::rust::read_types::{
-    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, StatusWithContext,
+    AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
+    QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
+    SubjectHistoryFilter,
 };
 use super::types::Subject;
 
@@ -752,6 +754,49 @@ pub trait PdsAdminBackend: Send + Sync {
         cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<PaginatedResponse<StatusWithContext>, BackendError>;
+
+    /// Fetch a single moderation event by id (v1.8.4) —
+    /// `tools.aurora.moderator.getEvent` on the Rust backend.
+    /// Returns the same [`EventWithContext`] shape `query_events`
+    /// items use (Aurora returns the identical struct). Gates on
+    /// the shared `moderator-activity` family. Unknown ids map to
+    /// [`BackendError::Terminal`] (upstream 404).
+    async fn get_event(&self, event_id: i64) -> Result<EventWithContext, BackendError>;
+
+    /// Fetch contextual metadata for a subject **DID** (v1.8.4) —
+    /// `tools.aurora.moderator.getSubjectContext`. Account-scoped
+    /// query parameter (plain DID; Aurora has no record/blob
+    /// addressing on this endpoint). Gates on `subject-context`.
+    async fn get_subject_context(&self, did: &str) -> Result<SubjectContextResponse, BackendError>;
+
+    /// Fetch a subject DID's moderation-action history (v1.8.4) —
+    /// `tools.aurora.moderator.getSubjectHistory`. The history is
+    /// **action rows** ([`StatusWithContext`], the same shape
+    /// `query_statuses` uses), not events. Gates on
+    /// `subject-history`.
+    async fn get_subject_history(
+        &self,
+        did: &str,
+        filter: SubjectHistoryFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<StatusWithContext>, BackendError>;
+
+    /// List appeals with filters and pagination (v1.8.4) —
+    /// `tools.aurora.moderator.listAppeals`. Gates on `appeals`.
+    async fn list_appeals(
+        &self,
+        filter: ListAppealsFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<AppealView>, BackendError>;
+
+    /// Fetch a single appeal with its lifecycle timeline (v1.8.4)
+    /// — `tools.aurora.moderator.getAppeal`. Returns
+    /// [`AppealDetail`] (list-view fields flattened + `timeline`),
+    /// a distinct type from [`AppealView`]. Gates on `appeals`
+    /// (shared with [`Self::list_appeals`]).
+    async fn get_appeal(&self, appeal_id: i64) -> Result<AppealDetail, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///

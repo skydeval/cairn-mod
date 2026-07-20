@@ -816,6 +816,61 @@ mod tests {
             unimplemented!("test backend does not stub query_statuses")
         }
 
+        async fn get_event(
+            &self,
+            _event_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::read_types::EventWithContext, BackendError>
+        {
+            unimplemented!("test backend does not stub get_event")
+        }
+
+        async fn get_subject_context(
+            &self,
+            _did: &str,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::SubjectContextResponse,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub get_subject_context")
+        }
+
+        async fn get_subject_history(
+            &self,
+            _did: &str,
+            _filter: crate::pds_admin::rust::read_types::SubjectHistoryFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::StatusWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub get_subject_history")
+        }
+
+        async fn list_appeals(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::ListAppealsFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::AppealView,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub list_appeals")
+        }
+
+        async fn get_appeal(
+            &self,
+            _appeal_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::read_types::AppealDetail, BackendError>
+        {
+            unimplemented!("test backend does not stub get_appeal")
+        }
+
         async fn takedown_record(
             &self,
             subject: &Subject,
@@ -1479,6 +1534,61 @@ mod tests {
             BackendError,
         > {
             unimplemented!("test backend does not stub query_statuses")
+        }
+
+        async fn get_event(
+            &self,
+            _event_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::read_types::EventWithContext, BackendError>
+        {
+            unimplemented!("test backend does not stub get_event")
+        }
+
+        async fn get_subject_context(
+            &self,
+            _did: &str,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::SubjectContextResponse,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub get_subject_context")
+        }
+
+        async fn get_subject_history(
+            &self,
+            _did: &str,
+            _filter: crate::pds_admin::rust::read_types::SubjectHistoryFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::StatusWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub get_subject_history")
+        }
+
+        async fn list_appeals(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::ListAppealsFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::AppealView,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub list_appeals")
+        }
+
+        async fn get_appeal(
+            &self,
+            _appeal_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::read_types::AppealDetail, BackendError>
+        {
+            unimplemented!("test backend does not stub get_appeal")
         }
 
         async fn takedown_record(

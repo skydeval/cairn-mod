@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.4 moderator read surface completion
+- RustBackend now covers every read endpoint under
+  `tools.aurora.moderator.*`. New methods: `get_event`,
+  `get_subject_context`, `get_subject_history`, `list_appeals`,
+  `get_appeal`. Subject context/history are account-scoped (plain
+  DID parameter); history rows are action rows (the same shape
+  `query_statuses` returns), and `get_appeal` returns the list-view
+  fields plus a lifecycle timeline.
+- New CLI subcommands: `cairn pds-admin events get`,
+  `subjects context`, `subjects history`, `appeals list`,
+  `appeals get`. Appeal status filters take snake_case wire values
+  (`pending`, `under_review`, `approved`, `denied`, `escalated`).
+- Three new capability families in the registry: `subject-context`,
+  `subject-history`, `appeals` (advertised as `subject-context-v1`,
+  `subject-history-v1`, `appeals-v1`; `getAppeal` shares the
+  `appeals` gate with `listAppeals`). `getEvent` shares v1.8.3's
+  `moderator-activity` family, which now gates exactly three
+  endpoints: `queryEvents`, `queryStatuses`, `getEvent`. Each family
+  gates independently — a PDS advertising `moderator-activity-v1`
+  without `subject-context-v1` keeps event/status reads working
+  while subject-context reads report the missing capability.
+- OzoneBackend returns `Unsupported` for all five new methods;
+  Ozone's read surface still requires distinct service configuration
+  (out of v1.8 scope).
+- The umbrella plan's `getReporterContext` reference is reconciled
+  as a `queryEvents` actor-filter derivation — no distinct endpoint
+  exists upstream, so no new method was added for it.
+
 ### Added — v1.8.3 read-side foundation + CID plumbing
 - RustBackend can now read the upstream PDS's moderation surface:
   `query_events` (moderation event stream) and `query_statuses`

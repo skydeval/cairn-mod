@@ -21,7 +21,9 @@ pub mod service_auth;
 
 use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventResponse, EmitEventSubject};
 use read_types::{
-    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, StatusWithContext,
+    AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
+    QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
+    SubjectHistoryFilter,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +77,20 @@ const MODERATOR_ACTIVITY_FAMILY: &str = "moderator-activity";
 /// Wire string embedded in `CapabilityNotAdvertised` returns for
 /// the read methods.
 const MODERATOR_ACTIVITY_CAPABILITY: &str = "moderator-activity-v1";
+
+/// NSIDs + capability families of the v1.8.4 moderator-read
+/// endpoints (§4.4/§4.5; attribution per Aurora `admin.rs:463-520`).
+const GET_EVENT_NSID: &str = "tools.aurora.moderator.getEvent";
+const GET_SUBJECT_CONTEXT_NSID: &str = "tools.aurora.moderator.getSubjectContext";
+const GET_SUBJECT_HISTORY_NSID: &str = "tools.aurora.moderator.getSubjectHistory";
+const LIST_APPEALS_NSID: &str = "tools.aurora.moderator.listAppeals";
+const GET_APPEAL_NSID: &str = "tools.aurora.moderator.getAppeal";
+const SUBJECT_CONTEXT_FAMILY: &str = "subject-context";
+const SUBJECT_CONTEXT_CAPABILITY: &str = "subject-context-v1";
+const SUBJECT_HISTORY_FAMILY: &str = "subject-history";
+const SUBJECT_HISTORY_CAPABILITY: &str = "subject-history-v1";
+const APPEALS_FAMILY: &str = "appeals";
+const APPEALS_CAPABILITY: &str = "appeals-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -334,6 +350,8 @@ impl RustBackend {
     /// re-declaring).
     async fn dispatch_moderator_read<F, T>(
         &self,
+        capability_family: &'static str,
+        capability_wire: &'static str,
         nsid: &'static str,
         filter: &F,
         cursor: Option<&str>,
@@ -349,15 +367,15 @@ impl RustBackend {
                 .capabilities
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !caps.has(MODERATOR_ACTIVITY_FAMILY) {
+            if !caps.has(capability_family) {
                 return Err(BackendError::CapabilityNotAdvertised(
-                    MODERATOR_ACTIVITY_CAPABILITY.to_string(),
+                    capability_wire.to_string(),
                 ));
             }
             // Version-selection trivially v1 (§5.1); the read
             // exercises the machinery for a future v2.
             let _advertised_version = caps
-                .version_of(MODERATOR_ACTIVITY_FAMILY)
+                .version_of(capability_family)
                 .expect("has() returned true for the same family");
         }
 
@@ -649,8 +667,15 @@ impl PdsAdminBackend for RustBackend {
         cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<PaginatedResponse<EventWithContext>, BackendError> {
-        self.dispatch_moderator_read(QUERY_EVENTS_NSID, &filter, cursor, limit)
-            .await
+        self.dispatch_moderator_read(
+            MODERATOR_ACTIVITY_FAMILY,
+            MODERATOR_ACTIVITY_CAPABILITY,
+            QUERY_EVENTS_NSID,
+            &filter,
+            cursor,
+            limit,
+        )
+        .await
     }
 
     /// Per-DID moderation-status read via
@@ -661,8 +686,129 @@ impl PdsAdminBackend for RustBackend {
         cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<PaginatedResponse<StatusWithContext>, BackendError> {
-        self.dispatch_moderator_read(QUERY_STATUSES_NSID, &filter, cursor, limit)
-            .await
+        self.dispatch_moderator_read(
+            MODERATOR_ACTIVITY_FAMILY,
+            MODERATOR_ACTIVITY_CAPABILITY,
+            QUERY_STATUSES_NSID,
+            &filter,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Single-event fetch via
+    /// `GET tools.aurora.moderator.getEvent` (v1.8.4). Reuses the
+    /// v1.8.3 `EventWithContext` mirror — Aurora returns the same
+    /// struct `queryEvents` items use.
+    async fn get_event(&self, event_id: i64) -> Result<EventWithContext, BackendError> {
+        #[derive(serde::Serialize)]
+        struct Params {
+            id: i64,
+        }
+        self.dispatch_moderator_read(
+            MODERATOR_ACTIVITY_FAMILY,
+            MODERATOR_ACTIVITY_CAPABILITY,
+            GET_EVENT_NSID,
+            &Params { id: event_id },
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Subject-context fetch via
+    /// `GET tools.aurora.moderator.getSubjectContext` (v1.8.4).
+    /// DID-scoped query parameter per Aurora's
+    /// `GetSubjectContextParams { did }`.
+    async fn get_subject_context(&self, did: &str) -> Result<SubjectContextResponse, BackendError> {
+        #[derive(serde::Serialize)]
+        struct Params<'a> {
+            did: &'a str,
+        }
+        self.dispatch_moderator_read(
+            SUBJECT_CONTEXT_FAMILY,
+            SUBJECT_CONTEXT_CAPABILITY,
+            GET_SUBJECT_CONTEXT_NSID,
+            &Params { did },
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Subject action-history via
+    /// `GET tools.aurora.moderator.getSubjectHistory` (v1.8.4).
+    /// History rows are `StatusWithContext` — action rows, not
+    /// events.
+    async fn get_subject_history(
+        &self,
+        did: &str,
+        filter: SubjectHistoryFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<StatusWithContext>, BackendError> {
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params<'a> {
+            did: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            action: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            direction: Option<&'a str>,
+        }
+        let params = Params {
+            did,
+            action: filter.action.as_deref(),
+            direction: filter.direction.as_deref(),
+        };
+        self.dispatch_moderator_read(
+            SUBJECT_HISTORY_FAMILY,
+            SUBJECT_HISTORY_CAPABILITY,
+            GET_SUBJECT_HISTORY_NSID,
+            &params,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Appeal listing via
+    /// `GET tools.aurora.moderator.listAppeals` (v1.8.4).
+    async fn list_appeals(
+        &self,
+        filter: ListAppealsFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<AppealView>, BackendError> {
+        self.dispatch_moderator_read(
+            APPEALS_FAMILY,
+            APPEALS_CAPABILITY,
+            LIST_APPEALS_NSID,
+            &filter,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Single-appeal fetch (with lifecycle timeline) via
+    /// `GET tools.aurora.moderator.getAppeal` (v1.8.4). Shares the
+    /// `appeals` gate with `list_appeals`.
+    async fn get_appeal(&self, appeal_id: i64) -> Result<AppealDetail, BackendError> {
+        #[derive(serde::Serialize)]
+        struct Params {
+            id: i64,
+        }
+        self.dispatch_moderator_read(
+            APPEALS_FAMILY,
+            APPEALS_CAPABILITY,
+            GET_APPEAL_NSID,
+            &Params { id: appeal_id },
+            None,
+            None,
+        )
+        .await
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

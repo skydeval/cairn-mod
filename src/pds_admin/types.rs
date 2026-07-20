@@ -317,6 +317,21 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // v1.8.3's read methods consume it. AutoAdvance: read-only
     // surface, no operator risk in advancing.
     ("moderator-activity", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `subject-context-v1` on
+    // `tools.aurora.moderator.getSubjectContext` (attribution per
+    // Aurora `admin.rs:484-502`); v1.8.4's `get_subject_context`
+    // consumes it. AutoAdvance: read-only surface.
+    ("subject-context", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `subject-history-v1` on
+    // `tools.aurora.moderator.getSubjectHistory`; v1.8.4's
+    // `get_subject_history` consumes it. AutoAdvance: read-only.
+    ("subject-history", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `appeals-v1` on
+    // `tools.aurora.moderator.listAppeals`, with `getAppeal`
+    // sharing per Aurora's attribution model (`admin.rs:503-520`);
+    // v1.8.4's `list_appeals`/`get_appeal` consume it.
+    // AutoAdvance: read-only surface.
+    ("appeals", CapabilityClassification::AutoAdvance),
 ];
 
 /// Look up a family's classification in the registry.
@@ -671,9 +686,11 @@ mod cross_release_type_tests {
         // coordinated release decision (capability-gated trait
         // surface activation, per the v1.8.x rollout plan).
         // v1.8.1 populated mod-events-emit (consumed by v1.8.2's
-        // action verbs); v1.8.3 adds moderator-activity (read
+        // action verbs); v1.8.3 adds moderator-activity; v1.8.4
+        // adds the three read families (subject-context,
+        // subject-history, appeals). All read
         // methods). Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 2);
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 5);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -681,6 +698,18 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[1],
             ("moderator-activity", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[2],
+            ("subject-context", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[3],
+            ("subject-history", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[4],
+            ("appeals", CapabilityClassification::AutoAdvance)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that
@@ -701,6 +730,18 @@ mod cross_release_type_tests {
         );
         assert_eq!(
             classification_for("moderator-activity"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            classification_for("subject-context"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            classification_for("subject-history"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            classification_for("appeals"),
             Some(CapabilityClassification::AutoAdvance)
         );
         // The wire string (with suffix) is NOT a family and must

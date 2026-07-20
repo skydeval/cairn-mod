@@ -92,6 +92,21 @@ pub enum AuroraNsid {
     /// `tools.aurora.moderator.queryStatuses` — per-DID
     /// moderation-status read (v1.8.3).
     ModeratorQueryStatuses,
+    /// `tools.aurora.moderator.getEvent` — single-event fetch
+    /// (v1.8.4).
+    ModeratorGetEvent,
+    /// `tools.aurora.moderator.getSubjectContext` — subject
+    /// contextual-metadata fetch (v1.8.4).
+    ModeratorGetSubjectContext,
+    /// `tools.aurora.moderator.getSubjectHistory` — per-DID
+    /// action-history read (v1.8.4).
+    ModeratorGetSubjectHistory,
+    /// `tools.aurora.moderator.listAppeals` — appeal listing
+    /// (v1.8.4).
+    ModeratorListAppeals,
+    /// `tools.aurora.moderator.getAppeal` — single-appeal fetch
+    /// with lifecycle timeline (v1.8.4).
+    ModeratorGetAppeal,
 }
 
 impl AuroraNsid {
@@ -105,6 +120,11 @@ impl AuroraNsid {
             Self::AdminEmitEvent => Self::NSID_STR,
             Self::ModeratorQueryEvents => "tools.aurora.moderator.queryEvents",
             Self::ModeratorQueryStatuses => "tools.aurora.moderator.queryStatuses",
+            Self::ModeratorGetEvent => "tools.aurora.moderator.getEvent",
+            Self::ModeratorGetSubjectContext => "tools.aurora.moderator.getSubjectContext",
+            Self::ModeratorGetSubjectHistory => "tools.aurora.moderator.getSubjectHistory",
+            Self::ModeratorListAppeals => "tools.aurora.moderator.listAppeals",
+            Self::ModeratorGetAppeal => "tools.aurora.moderator.getAppeal",
         }
     }
 }
@@ -161,9 +181,15 @@ impl Nsid {
             // from_path_segment); emitEvent is a mutation, the
             // moderator reads are GET.
             Self::Aurora(AuroraNsid::AdminEmitEvent) => Method::POST,
-            Self::Aurora(AuroraNsid::ModeratorQueryEvents | AuroraNsid::ModeratorQueryStatuses) => {
-                Method::GET
-            }
+            Self::Aurora(
+                AuroraNsid::ModeratorQueryEvents
+                | AuroraNsid::ModeratorQueryStatuses
+                | AuroraNsid::ModeratorGetEvent
+                | AuroraNsid::ModeratorGetSubjectContext
+                | AuroraNsid::ModeratorGetSubjectHistory
+                | AuroraNsid::ModeratorListAppeals
+                | AuroraNsid::ModeratorGetAppeal,
+            ) => Method::GET,
         }
     }
 }
@@ -232,6 +258,52 @@ mod tests {
         );
         let uri: Uri = "/xrpc/tools.aurora.admin.emitEvent".parse().unwrap();
         assert_eq!(extract_nsid_from_request_uri(&uri), None);
+    }
+
+    /// v1.8.3/v1.8.4: the seven `tools.aurora.moderator.*` read
+    /// variants — same outbound-reference-only posture as
+    /// emitEvent. All GET; none inbound-recognized.
+    #[test]
+    fn aurora_moderator_read_nsids_are_outbound_get_only() {
+        let variants = [
+            (
+                AuroraNsid::ModeratorQueryEvents,
+                "tools.aurora.moderator.queryEvents",
+            ),
+            (
+                AuroraNsid::ModeratorQueryStatuses,
+                "tools.aurora.moderator.queryStatuses",
+            ),
+            (
+                AuroraNsid::ModeratorGetEvent,
+                "tools.aurora.moderator.getEvent",
+            ),
+            (
+                AuroraNsid::ModeratorGetSubjectContext,
+                "tools.aurora.moderator.getSubjectContext",
+            ),
+            (
+                AuroraNsid::ModeratorGetSubjectHistory,
+                "tools.aurora.moderator.getSubjectHistory",
+            ),
+            (
+                AuroraNsid::ModeratorListAppeals,
+                "tools.aurora.moderator.listAppeals",
+            ),
+            (
+                AuroraNsid::ModeratorGetAppeal,
+                "tools.aurora.moderator.getAppeal",
+            ),
+        ];
+        for (variant, wire) in variants {
+            assert_eq!(variant.as_str(), wire);
+            assert_eq!(Nsid::Aurora(variant).as_path_segment(), wire);
+            assert_eq!(Nsid::Aurora(variant).http_method(), Method::GET, "{wire}");
+            // Inbound recognition deliberately absent.
+            assert_eq!(Nsid::from_path_segment(wire), None, "{wire}");
+            let uri: Uri = format!("/xrpc/{wire}").parse().unwrap();
+            assert_eq!(extract_nsid_from_request_uri(&uri), None, "{wire}");
+        }
     }
 
     #[test]

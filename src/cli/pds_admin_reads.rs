@@ -19,7 +19,9 @@
 use crate::cli::error::CliError;
 use crate::config::Config;
 use crate::pds_admin::rust::read_types::{
-    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, StatusWithContext,
+    AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
+    QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
+    SubjectHistoryFilter,
 };
 use crate::pds_admin::{
     OzoneBackend, PdsAdminBackend, PdsAdminBackendConfig, PdsAdminPolicy, RustBackend,
@@ -107,6 +109,67 @@ pub async fn statuses_query(
     let rendered = serde_json::to_string_pretty(&page)
         .map_err(|e| CliError::Config(format!("render response: {e}")))?;
     Ok(with_pagination_hint(rendered, page.cursor.as_deref()))
+}
+
+/// `cairn pds-admin events get <id>` body (v1.8.4). Single fetch —
+/// no pagination hint; the response is one `EventWithContext`.
+pub async fn events_get(config: &Config, event_id: i64) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let event: EventWithContext = backend.get_event(event_id).await?;
+    serde_json::to_string_pretty(&event)
+        .map_err(|e| CliError::Config(format!("render response: {e}")))
+}
+
+/// `cairn pds-admin subjects context <did>` body (v1.8.4).
+/// Account-scoped: the query parameter is a plain DID (Aurora's
+/// `GetSubjectContextParams { did }`).
+pub async fn subjects_context(config: &Config, did: &str) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let context: SubjectContextResponse = backend.get_subject_context(did).await?;
+    serde_json::to_string_pretty(&context)
+        .map_err(|e| CliError::Config(format!("render response: {e}")))
+}
+
+/// `cairn pds-admin subjects history <did>` body (v1.8.4). The
+/// history rows are **action rows** (`StatusWithContext`), not
+/// events — same element type as `statuses query`.
+pub async fn subjects_history(
+    config: &Config,
+    did: &str,
+    filter: SubjectHistoryFilter,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let page: PaginatedResponse<StatusWithContext> = backend
+        .get_subject_history(did, filter, cursor, limit)
+        .await?;
+    let rendered = serde_json::to_string_pretty(&page)
+        .map_err(|e| CliError::Config(format!("render response: {e}")))?;
+    Ok(with_pagination_hint(rendered, page.cursor.as_deref()))
+}
+
+/// `cairn pds-admin appeals list` body (v1.8.4).
+pub async fn appeals_list(
+    config: &Config,
+    filter: ListAppealsFilter,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let page: PaginatedResponse<AppealView> = backend.list_appeals(filter, cursor, limit).await?;
+    let rendered = serde_json::to_string_pretty(&page)
+        .map_err(|e| CliError::Config(format!("render response: {e}")))?;
+    Ok(with_pagination_hint(rendered, page.cursor.as_deref()))
+}
+
+/// `cairn pds-admin appeals get <id>` body (v1.8.4). Single fetch;
+/// the response is an `AppealDetail` (list-view fields + timeline).
+pub async fn appeals_get(config: &Config, appeal_id: i64) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let detail: AppealDetail = backend.get_appeal(appeal_id).await?;
+    serde_json::to_string_pretty(&detail)
+        .map_err(|e| CliError::Config(format!("render response: {e}")))
 }
 
 #[cfg(test)]
