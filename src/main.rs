@@ -3,7 +3,7 @@
 //! Exposes the CLI subcommands (login/logout/report) and
 //! `cairn serve` — the long-running labeler process.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use cairn_mod::cli::{
@@ -12,7 +12,8 @@ use cairn_mod::cli::{
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
     moderator, moderator_action, moderator_events, moderator_pending, operator_login,
-    pds_admin as cli_pds_admin, pds_admin_reads as cli_pds_admin_reads,
+    pds_admin as cli_pds_admin, pds_admin_actions as cli_pds_admin_actions,
+    pds_admin_reads as cli_pds_admin_reads,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
@@ -198,12 +199,35 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminSubjectsSub,
     },
-    /// Appeal reads (v1.8.4; RustBackend via
-    /// tools.aurora.moderator.listAppeals / getAppeal —
-    /// Unsupported on Ozone).
+    /// Appeal reads (v1.8.4) and appeal actions (v1.8.5:
+    /// resolve/escalate via the recordAction writer).
     Appeals {
         #[command(subcommand)]
         sub: PdsAdminAppealsSub,
+    },
+    /// Account-level destructive actions (v1.8.5; Admin+ role
+    /// upstream; via the recordAction writer).
+    Accounts {
+        #[command(subcommand)]
+        sub: PdsAdminAccountsSub,
+    },
+    /// Blob moderation actions (v1.8.5; via the recordAction
+    /// writer).
+    Blobs {
+        #[command(subcommand)]
+        sub: PdsAdminBlobsSub,
+    },
+    /// Upstream report resolution actions (v1.8.5; via the
+    /// recordAction writer).
+    Reports {
+        #[command(subcommand)]
+        sub: PdsAdminReportsSub,
+    },
+    /// Moderation email actions (v1.8.5; Admin+ role upstream;
+    /// via the recordAction writer).
+    Emails {
+        #[command(subcommand)]
+        sub: PdsAdminEmailsSub,
     },
 }
 
@@ -223,6 +247,9 @@ enum PdsAdminSubjectsSub {
     /// Fetch a subject DID's moderation-action history (action
     /// rows — same element shape as `statuses query`).
     History(PdsAdminSubjectsHistoryArgs),
+    /// Set the account's upstream moderation status (v1.8.5;
+    /// tri-state takedown | deactivated | active).
+    UpdateStatus(PdsAdminSubjectsUpdateStatusArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -231,6 +258,43 @@ enum PdsAdminAppealsSub {
     List(PdsAdminAppealsListArgs),
     /// Fetch a single appeal (with lifecycle timeline) by id.
     Get(PdsAdminAppealsGetArgs),
+    /// Resolve an appeal (v1.8.5; approve cascades a reversal of
+    /// the original action upstream).
+    Resolve(PdsAdminAppealsResolveArgs),
+    /// Escalate an appeal (v1.8.5).
+    Escalate(PdsAdminAppealsEscalateArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminAccountsSub {
+    /// Permanently delete an account at the PDS (Admin+ role
+    /// upstream).
+    Delete(PdsAdminAccountsDeleteArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminBlobsSub {
+    /// Quarantine a blob.
+    Quarantine(PdsAdminBlobsQuarantineArgs),
+    /// Restore a quarantined blob.
+    Restore(PdsAdminBlobsRestoreArgs),
+    /// Permanently delete a blob.
+    Delete(PdsAdminBlobsDeleteArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminReportsSub {
+    /// Resolve an upstream report.
+    Resolve(PdsAdminReportsResolveArgs),
+    /// Dismiss an upstream report.
+    Dismiss(PdsAdminReportsDismissArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminEmailsSub {
+    /// Send a moderation email to an account (Admin+ role
+    /// upstream).
+    Send(PdsAdminEmailsSendArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -383,6 +447,309 @@ struct PdsAdminAppealsGetArgs {
     /// Path to cairn.toml (defaults to ./cairn.toml).
     #[arg(long)]
     config: Option<std::path::PathBuf>,
+}
+
+/// v1.8.5 action subcommand args. All verbs route through the
+/// recordAction writer; there is deliberately no
+/// `--precipitating-action-id` flag (the writer derives the local
+/// row id itself).
+#[derive(Debug, Args)]
+struct PdsAdminAccountsDeleteArgs {
+    /// Subject DID.
+    did: String,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminBlobsQuarantineArgs {
+    /// Owning account DID.
+    did: String,
+    /// Blob CID.
+    #[arg(long)]
+    cid: String,
+    /// Referencing record URI, when known.
+    #[arg(long = "record-uri")]
+    record_uri: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminBlobsRestoreArgs {
+    /// Owning account DID.
+    did: String,
+    /// Blob CID.
+    #[arg(long)]
+    cid: String,
+    /// Backend action id of the prior quarantine (from the audit
+    /// row's backendActionId).
+    #[arg(long = "prior-action-id")]
+    prior_action_id: String,
+    /// Referencing record URI, when known.
+    #[arg(long = "record-uri")]
+    record_uri: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminBlobsDeleteArgs {
+    /// Owning account DID.
+    did: String,
+    /// Blob CID.
+    #[arg(long)]
+    cid: String,
+    /// Referencing record URI, when known.
+    #[arg(long = "record-uri")]
+    record_uri: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// Report/appeal subjects are full subject references: pass the
+/// account DID, add `--uri`/`--cid` for record-targeted rows or
+/// `--cid` alone for blob-targeted ones — the coordinates must
+/// match the report/appeal's stored subject exactly (Aurora
+/// validates variant AND identifier).
+#[derive(Debug, Args)]
+struct PdsAdminReportsResolveArgs {
+    /// Subject account DID (the report's subject).
+    did: String,
+    /// Upstream report id.
+    report_id: i64,
+    /// Record URI for record-targeted reports.
+    #[arg(long)]
+    uri: Option<String>,
+    /// Record/blob CID.
+    #[arg(long)]
+    cid: Option<String>,
+    /// Resolution: resolved | acknowledged | escalated.
+    #[arg(long)]
+    resolution: String,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminReportsDismissArgs {
+    /// Subject account DID (the report's subject).
+    did: String,
+    /// Upstream report id.
+    report_id: i64,
+    /// Record URI for record-targeted reports.
+    #[arg(long)]
+    uri: Option<String>,
+    /// Record/blob CID.
+    #[arg(long)]
+    cid: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminAppealsResolveArgs {
+    /// Appeal target subject DID (appellant account for
+    /// moderation-appeals; the reported subject for
+    /// report-appeals).
+    did: String,
+    /// Upstream appeal id.
+    appeal_id: i64,
+    /// Record URI when the appeal targets a record.
+    #[arg(long)]
+    uri: Option<String>,
+    /// Record/blob CID when the appeal targets a record or blob.
+    #[arg(long)]
+    cid: Option<String>,
+    /// Decision: approve | deny (approve cascades a reversal).
+    #[arg(long)]
+    decision: String,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminAppealsEscalateArgs {
+    /// Appeal target subject DID.
+    did: String,
+    /// Upstream appeal id.
+    appeal_id: i64,
+    /// Record URI when the appeal targets a record.
+    #[arg(long)]
+    uri: Option<String>,
+    /// Record/blob CID when the appeal targets a record or blob.
+    #[arg(long)]
+    cid: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminEmailsSendArgs {
+    /// Recipient account DID.
+    did: String,
+    /// Email subject line (Aurora wire field `subject`).
+    #[arg(long)]
+    subject: String,
+    /// Email body.
+    #[arg(long)]
+    body: String,
+    /// Optional upstream template identifier.
+    #[arg(long)]
+    template: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminSubjectsUpdateStatusArgs {
+    /// Subject account DID.
+    did: String,
+    /// Status: takedown | deactivated | active.
+    #[arg(long)]
+    status: String,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1393,6 +1760,66 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminAppealsSub::Get(args),
                 },
         } => run_pds_admin_appeals_get(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Accounts {
+                    sub: PdsAdminAccountsSub::Delete(args),
+                },
+        } => run_pds_admin_accounts_delete(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::Quarantine(args),
+                },
+        } => run_pds_admin_blobs_quarantine(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::Restore(args),
+                },
+        } => run_pds_admin_blobs_restore(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::Delete(args),
+                },
+        } => run_pds_admin_blobs_delete(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Reports {
+                    sub: PdsAdminReportsSub::Resolve(args),
+                },
+        } => run_pds_admin_reports_resolve(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Reports {
+                    sub: PdsAdminReportsSub::Dismiss(args),
+                },
+        } => run_pds_admin_reports_dismiss(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Appeals {
+                    sub: PdsAdminAppealsSub::Resolve(args),
+                },
+        } => run_pds_admin_appeals_resolve(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Appeals {
+                    sub: PdsAdminAppealsSub::Escalate(args),
+                },
+        } => run_pds_admin_appeals_escalate(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Emails {
+                    sub: PdsAdminEmailsSub::Send(args),
+                },
+        } => run_pds_admin_emails_send(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Subjects {
+                    sub: PdsAdminSubjectsSub::UpdateStatus(args),
+                },
+        } => run_pds_admin_subjects_update_status(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -1498,6 +1925,279 @@ async fn run_pds_admin_appeals_get(args: PdsAdminAppealsGetArgs) -> Result<(), C
     let rendered = cli_pds_admin_reads::appeals_get(&config, args.id).await?;
     println!("{rendered}");
     Ok(())
+}
+
+/// Shared v1.8.5 action-runner scaffolding: config + policy gate +
+/// pool + session, then submit + print.
+async fn run_v185_action(
+    config_path: Option<&Path>,
+    cairn_server: Option<String>,
+    summary: bool,
+    reason: Option<String>,
+    build: impl FnOnce(String) -> cli_pds_admin_actions::ActionSubmission,
+) -> Result<(), CliError> {
+    let config = load_config(config_path)?;
+    cli_pds_admin::verify_pds_admin_enabled(&config)?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+    let session_path = session_path()?;
+    let mut session = session::SessionFile::load(&session_path)?.ok_or(CliError::NotLoggedIn)?;
+
+    let reason =
+        reason.unwrap_or_else(|| cli_pds_admin::PDS_ADMIN_DEFAULT_REASON_CODE.to_string());
+    let mut submission = build(reason);
+    submission.cairn_server_override = cairn_server;
+
+    let outcome =
+        cli_pds_admin_actions::submit(&pool, &mut session, &session_path, submission).await?;
+    if summary {
+        println!(
+            "{}",
+            cli_pds_admin_actions::format_action_summary(&outcome)
+        );
+    } else {
+        println!("{}", cli_pds_admin_actions::format_action_json(&outcome));
+    }
+    Ok(())
+}
+
+/// Subject string for report/appeal verbs: at-URI when the target
+/// is a record (writer routes `at://` to subject_uri and extracts
+/// the parent DID), bare DID otherwise. Blob-targeted rows pass
+/// the DID plus `--cid`.
+fn subject_ref_string(did: &str, uri: Option<&str>) -> String {
+    uri.map(str::to_string).unwrap_or_else(|| did.to_string())
+}
+
+async fn run_pds_admin_accounts_delete(args: PdsAdminAccountsDeleteArgs) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "delete_account",
+            subject: args.did,
+            cid: None,
+            detail: None,
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_blobs_quarantine(
+    args: PdsAdminBlobsQuarantineArgs,
+) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "quarantine_blob",
+            subject: subject_ref_string(&args.did, args.record_uri.as_deref()),
+            cid: Some(args.cid),
+            detail: None,
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_blobs_restore(args: PdsAdminBlobsRestoreArgs) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "restore_blob",
+            subject: subject_ref_string(&args.did, args.record_uri.as_deref()),
+            cid: Some(args.cid),
+            detail: Some(serde_json::json!({ "priorActionId": args.prior_action_id })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_blobs_delete(args: PdsAdminBlobsDeleteArgs) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "delete_blob",
+            subject: subject_ref_string(&args.did, args.record_uri.as_deref()),
+            cid: Some(args.cid),
+            detail: None,
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_reports_resolve(args: PdsAdminReportsResolveArgs) -> Result<(), CliError> {
+    if cairn_mod::pds_admin::rust::action_types::ReportResolution::from_wire_str(&args.resolution)
+        .is_none()
+    {
+        return Err(CliError::Config(format!(
+            "--resolution must be one of resolved/acknowledged/escalated; got {:?}",
+            args.resolution
+        )));
+    }
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "resolve_report",
+            subject: subject_ref_string(&args.did, args.uri.as_deref()),
+            cid: args.cid,
+            detail: Some(serde_json::json!({
+                "reportId": args.report_id,
+                "resolution": args.resolution,
+            })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_reports_dismiss(args: PdsAdminReportsDismissArgs) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "dismiss_report",
+            subject: subject_ref_string(&args.did, args.uri.as_deref()),
+            cid: args.cid,
+            detail: Some(serde_json::json!({ "reportId": args.report_id })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_appeals_resolve(args: PdsAdminAppealsResolveArgs) -> Result<(), CliError> {
+    if cairn_mod::pds_admin::rust::action_types::AppealDecision::from_wire_str(&args.decision)
+        .is_none()
+    {
+        return Err(CliError::Config(format!(
+            "--decision must be approve or deny; got {:?}",
+            args.decision
+        )));
+    }
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "resolve_appeal",
+            subject: subject_ref_string(&args.did, args.uri.as_deref()),
+            cid: args.cid,
+            detail: Some(serde_json::json!({
+                "appealId": args.appeal_id,
+                "decision": args.decision,
+            })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_appeals_escalate(
+    args: PdsAdminAppealsEscalateArgs,
+) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "escalate_appeal",
+            subject: subject_ref_string(&args.did, args.uri.as_deref()),
+            cid: args.cid,
+            detail: Some(serde_json::json!({ "appealId": args.appeal_id })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_emails_send(args: PdsAdminEmailsSendArgs) -> Result<(), CliError> {
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "send_email",
+            subject: args.did,
+            cid: None,
+            detail: Some(serde_json::json!({
+                "template": args.template,
+                "subject": args.subject,
+                "body": args.body,
+            })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_subjects_update_status(
+    args: PdsAdminSubjectsUpdateStatusArgs,
+) -> Result<(), CliError> {
+    if cairn_mod::pds_admin::rust::action_types::SubjectStatus::from_wire_str(&args.status)
+        .is_none()
+    {
+        return Err(CliError::Config(format!(
+            "--status must be one of takedown/deactivated/active; got {:?}",
+            args.status
+        )));
+    }
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "update_subject_status",
+            subject: args.did,
+            cid: None,
+            detail: Some(serde_json::json!({ "status": args.status })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
 }
 
 // ===========================================================================
@@ -2151,6 +2851,8 @@ async fn run_moderator_action(args: ModeratorActionArgs) -> Result<(), CliError>
             duration: args.duration,
             note: args.note,
             report_ids: args.report,
+            cid: None,
+            detail: None,
             cairn_server_override: args.cairn_server,
         },
     )
@@ -2177,6 +2879,8 @@ async fn run_moderator_warn(args: ModeratorWarnArgs) -> Result<(), CliError> {
             duration: None,
             note: args.note,
             report_ids: vec![],
+            cid: None,
+            detail: None,
             cairn_server_override: args.cairn_server,
         },
     )
@@ -2209,6 +2913,8 @@ async fn run_moderator_note(args: ModeratorNoteArgs) -> Result<(), CliError> {
             duration: None,
             note: Some(args.text),
             report_ids: vec![],
+            cid: None,
+            detail: None,
             cairn_server_override: args.cairn_server,
         },
     )

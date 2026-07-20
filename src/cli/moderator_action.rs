@@ -65,6 +65,13 @@ pub struct RecordActionInput {
     pub note: Option<String>,
     /// Optional list of report row ids that motivated this action.
     pub report_ids: Vec<i64>,
+    /// Record/blob CID for record- or blob-targeted actions
+    /// (v1.8.3 `cid` wire field).
+    pub cid: Option<String>,
+    /// v1.8.5 variant-specific payload for the backend-dispatched
+    /// verbs (wire field `detail`; stored on
+    /// `subject_actions.action_detail`).
+    pub detail: Option<serde_json::Value>,
     /// Per-invocation override of the session's stored Cairn URL.
     pub cairn_server_override: Option<String>,
 }
@@ -130,6 +137,12 @@ pub async fn record(
     }
     if !input.report_ids.is_empty() {
         body["reportIds"] = json!(input.report_ids);
+    }
+    if let Some(cid) = &input.cid {
+        body["cid"] = json!(cid);
+    }
+    if let Some(detail) = &input.detail {
+        body["detail"] = detail.clone();
     }
 
     let url = format!("{cairn_server}/xrpc/{RECORD_ACTION_LXM}");
@@ -983,6 +996,8 @@ mod tests {
                     duration: None,
                     note: None,
                     report_ids: vec![],
+                    cid: None,
+                    detail: None,
                     cairn_server_override: None,
                 },
             ))
@@ -1018,6 +1033,8 @@ mod tests {
                     duration: None,
                     note: None,
                     report_ids: vec![],
+                    cid: None,
+                    detail: None,
                     cairn_server_override: None,
                 },
             ))

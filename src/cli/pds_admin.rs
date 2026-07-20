@@ -254,6 +254,8 @@ pub async fn takedown(
             duration: None,
             note: notes,
             report_ids: Vec::new(),
+            cid: None,
+            detail: None,
             cairn_server_override,
         },
     )
@@ -303,6 +305,8 @@ pub async fn suspend(
             duration,
             note: notes,
             report_ids: Vec::new(),
+            cid: None,
+            detail: None,
             cairn_server_override,
         },
     )
