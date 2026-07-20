@@ -40,6 +40,7 @@ pub mod backend;
 pub mod config;
 pub mod dispatch;
 pub mod ozone;
+pub mod rust;
 pub mod types;
 
 pub use audit::{
@@ -57,8 +58,11 @@ pub use dispatch::{
     dispatch_after_revoke_action,
 };
 pub use ozone::OzoneBackend;
+pub use rust::RustBackend;
+pub use rust::service_auth::{ServiceAuthError, mint_service_auth_jwt};
 pub use types::{
-    AuditTrailEntryRead, AuditTrailEntryWrite, CAPABILITY_CLASSIFICATIONS,
-    CapabilityClassification, CapabilityVersion, PaginationCursor, Subject, classification_for,
+    AuditTrailEntryRead, AuditTrailEntryWrite, CAPABILITY_CLASSIFICATIONS, Capability,
+    CapabilityClassification, CapabilityExtension, CapabilityParseError, CapabilitySet,
+    CapabilityVersion, DescribeCapabilitiesResponse, PaginationCursor, Subject, classification_for,
     parse_capability_string,
 };

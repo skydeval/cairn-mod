@@ -282,6 +282,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "include_dir",
+ "k256",
  "lru",
  "proto-blue-crypto",
  "proto-blue-lex-cbor",

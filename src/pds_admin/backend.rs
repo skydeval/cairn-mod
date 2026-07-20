@@ -548,11 +548,10 @@ pub struct ProbeReport {
 ///
 /// Distinct from [`BackendError`] (which is per-call): these
 /// are configuration-time failures that prevent a backend from
-/// existing in the first place. v1.7 only has one variant
+/// existing in the first place. v1.7 had one variant
 /// ([`Self::HttpClient`]) since `OzoneBackend::new` only owns
-/// HTTP-client construction; v1.8's `LocusBackend` will likely
-/// add variants for JWT-secret resolution and other key-material
-/// loading.
+/// HTTP-client construction; v1.8.1 adds [`Self::Rust`] for the
+/// Rust backend's key-material loading and DID validation.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendInitError {
     /// `reqwest::Client::builder().build()` failed. Almost
@@ -563,6 +562,12 @@ pub enum BackendInitError {
     /// errors cleanly.
     #[error("failed to build HTTP client: {0}")]
     HttpClient(String),
+    /// Rust-backend construction failed (v1.8.1): signing-key
+    /// env var missing/malformed, or a DID failed the syntactic
+    /// check. The inner string is the operator-facing detail,
+    /// naming the field or env var that failed.
+    #[error("rust backend initialization failed: {0}")]
+    Rust(String),
 }
 
 /// Trait implemented by PDS-side enforcement backends.

@@ -402,20 +402,26 @@ fn build_pds_admin_bridge(
             );
             Arc::new(backend)
         }
-        crate::pds_admin::PdsAdminBackendConfig::Rust(_rust_cfg) => {
-            // RustBackend skeleton lands at Step 5 of v1.8.1; for now,
-            // the audit-divergence validation gate at startup already
-            // rejects this combination unless the operator
-            // acknowledged inspector-only mode AND no other gate-stop
-            // applies. Fail loudly here rather than silently
-            // proceeding without a backend — operators reaching this
-            // line have a config that passed earlier validation but
-            // hit a backend that isn't yet implemented.
-            return Err(CliError::Startup(
-                "pds_admin: backend = \"rust\" selected but RustBackend is not implemented \
-                 in this v1.8.1 build (Step 5 introduces the skeleton)"
-                    .into(),
-            ));
+        crate::pds_admin::PdsAdminBackendConfig::Rust(rust_cfg) => {
+            // v1.8.1: real construction. Boot requires all three
+            // gates to have passed: validated_rust_from_toml (config
+            // resolution), validate_audit_divergence_acknowledgment
+            // (inspector-only posture), and RustBackend::new (key
+            // load + DID checks) here.
+            let backend = crate::pds_admin::RustBackend::new(rust_cfg)
+                .map_err(|e| CliError::Startup(format!("pds_admin rust backend: {e}")))?;
+            let backend = Arc::new(backend);
+            // Background capability refresh (§5.2): holds only a
+            // Weak, so the task exits when the bridge drops.
+            crate::pds_admin::RustBackend::spawn_capability_refresh(
+                &backend,
+                rust_cfg.capability_refresh_interval,
+            );
+            tracing::info!(
+                pds_url = %rust_cfg.pds_url,
+                "pds_admin: Rust backend (inspector-only in v1.8.1) initialized"
+            );
+            backend
         }
     };
     Ok(Some(crate::pds_admin::PdsAdminBridge {

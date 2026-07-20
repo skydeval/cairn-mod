@@ -53,6 +53,6 @@ pub use membership::{
     MembershipRow, add_known_caller, add_trusted_pds, is_known_caller, is_trusted_pds,
     list_known_callers, list_trusted_pdses, revoke_known_caller, revoke_trusted_pds,
 };
-pub use nsid::{Nsid, extract_nsid_from_request_uri};
+pub use nsid::{AuroraNsid, Nsid, OzoneModerationNsid, extract_nsid_from_request_uri};
 pub use replay::{ReplayCheck, XrpcReplayCache};
 pub use router::build_router;

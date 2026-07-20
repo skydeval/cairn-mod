@@ -97,7 +97,7 @@ pub enum PdsAdminBackendConfig {
     /// Rust-PDS backend (v1.8.1+). Inspector-only in v1.8.1
     /// per the audit-divergence acknowledgment posture; v1.8.2
     /// lifts the restriction once protocol parity ships.
-    Rust(RustBackendConfig),
+    Rust(Box<RustBackendConfig>),
 }
 
 /// Resolved bsky-PDS backend config.
@@ -118,30 +118,43 @@ pub struct OzoneBackendConfig {
 /// Resolved Rust-PDS backend config.
 ///
 /// Built from [`crate::config::PdsAdminRustToml`] by the
-/// resolver. Holds the parsed URL, OAuth client credentials
-/// (resolved from env vars at config load), validated scope
-/// list, refresh cadence, and the audit-divergence
-/// acknowledgment flag that gates the v1.8.1 inspector-only
-/// posture.
+/// resolver. v1.8.1 shape: ES256K service-auth identity fields
+/// (the OAuth-model residue — `client_id`/`client_secret`/
+/// `scopes` — was dropped before ever shipping to a live
+/// deployment), plus refresh cadence, capability declarations,
+/// and the audit-divergence acknowledgment flag that gates the
+/// v1.8.1 inspector-only posture.
+///
+/// The signing key itself is deliberately NOT resolved here —
+/// config holds only the env-var *name*
+/// ([`Self::service_signing_key_env`]); `RustBackend::new` reads
+/// and parses the key material at construction so key bytes
+/// never sit in the resolved-config layer.
 #[derive(Debug, Clone)]
 pub struct RustBackendConfig {
-    /// Parsed PDS base URL.
+    /// Parsed PDS base URL. TOML wire key: `url`.
     pub pds_url: url::Url,
-    /// OAuth client identifier resolved from the env var
-    /// named by `client_id_env` at config load. Stored as a
-    /// plain `String` because client identifiers are not
-    /// secret in OAuth 2.1; the redacting wrapper is reserved
-    /// for the secret.
-    pub client_id: String,
-    /// OAuth client secret resolved from the env var named
-    /// by `client_secret_env`. Wrapped for redacting Debug +
-    /// zero-on-drop.
-    pub client_secret: AdminPassword,
-    /// Validated scope wire strings. Each entry is non-empty
-    /// and prefixed with `atproto:` per the v1.8.1 structural
-    /// validation; typed `OAuthScope` parsing lands at the
-    /// OAuth flow's first consumer step.
-    pub scopes: Vec<String>,
+    /// cairn-mod's service DID — the `iss` of every minted
+    /// service-auth JWT. Literal, not env-indirected: DIDs are
+    /// not secrets.
+    pub service_did: String,
+    /// Name of the env var holding the hex-encoded secp256k1
+    /// private key. The `_env` indirection mirrors the
+    /// [`AdminPassword`] pattern for secret material.
+    pub service_signing_key_env: String,
+    /// Where cairn-mod's DID doc is resolvable, when the DID
+    /// method needs an operator-supplied URL (`did:web`
+    /// typically does; `did:plc` resolves via the PLC
+    /// directory). Informational at v1.8.1 — Aurora does the
+    /// resolving, not cairn-mod.
+    pub service_did_document_url: Option<url::Url>,
+    /// The target PDS's service DID — the `aud` of every minted
+    /// JWT. Mandatory operator-configured; there is no
+    /// discovery endpoint (umbrella §5.2).
+    pub target_service_did: String,
+    /// Per-request HTTP timeout. Default 30s; bounds 1s..=5m at
+    /// validation.
+    pub request_timeout: Duration,
     /// Cap-set refresh cadence. Default 1 hour; lower bound
     /// 10 seconds.
     pub capability_refresh_interval: Duration,
@@ -155,9 +168,10 @@ pub struct RustBackendConfig {
     /// default. Family names cross-validated against
     /// `required_capabilities` for consistency.
     pub pinned_versions: BTreeMap<String, String>,
-    /// Whether to persist OAuth state across cairn-mod
-    /// restarts. Default `true`. Consumed starting at the
-    /// OAuth flow's first consumer step.
+    /// Parse+store at v1.8.1 — no runtime code path reads it.
+    /// Default `true`. The consumer wires in at v1.8.6
+    /// alongside audit-trail verification work (umbrella §5.2);
+    /// accepted now so operators can pre-configure.
     pub verification_persist: bool,
     /// Operator's explicit acknowledgment of the v1.8.1
     /// inspector-only audit divergence. **Required `true`**
@@ -260,32 +274,22 @@ pub enum PdsAdminConfigError {
         key: String,
     },
     /// An env var named by `admin_password_env` /
-    /// `client_id_env` / `client_secret_env` is unset or
-    /// empty at process startup.
+    /// `service_signing_key_env` is unset or empty at process
+    /// startup.
     #[error("config: env var ${0} is not set or is empty")]
     MissingEnvVar(String),
-    /// The same env var name was supplied for both
-    /// `client_id_env` and `client_secret_env`. Distinct
-    /// secrets per OAuth 2.1; reusing one env var is a
-    /// misconfiguration.
+    /// A `[pds_admin.rust]` key that was removed in the v1.8.1
+    /// service-auth rewrite (`client_id_env`,
+    /// `client_secret_env`, `scopes`) is still present. The
+    /// OAuth-shaped config never shipped to a live deployment;
+    /// the error points operators at the replacement fields.
     #[error(
-        "config: [pds_admin.rust].client_id_env and client_secret_env both name \
-         env var ${0} — OAuth client id and secret must be distinct"
+        "config: [pds_admin.rust].{0} was removed in v1.8.1 — RustBackend \
+         authenticates via ES256K service-auth JWTs, not OAuth. Remove the key \
+         and configure `service_did`, `service_signing_key_env`, and \
+         `target_service_did` instead"
     )]
-    EnvVarReused(String),
-    /// A scope wire string failed structural validation.
-    /// **v1.8.1 structural-only**: typed `OAuthScope` parsing
-    /// lands at the OAuth flow's first consumer step (chainlink
-    /// #G).
-    #[error(
-        "config: [pds_admin.rust].scopes contains unrecognized scope {0:?} \
-         (expected non-empty string with `atproto:` prefix)"
-    )]
-    UnknownScope(String),
-    /// `[pds_admin.rust].scopes` contains the same wire
-    /// string twice.
-    #[error("config: [pds_admin.rust].scopes contains duplicate scope {0:?}")]
-    DuplicateScope(String),
+    RemovedOAuthField(&'static str),
     /// `capability_refresh_interval` resolves to less than
     /// the lower bound (10 seconds).
     #[error(
@@ -631,7 +635,7 @@ impl PdsAdminPolicy {
             BackendSelection::Rust => {
                 let rust = resolved_rust
                     .expect("resolve_backend returns Rust only when [pds_admin.rust] is present");
-                PdsAdminBackendConfig::Rust(rust)
+                PdsAdminBackendConfig::Rust(Box::new(rust))
             }
         };
 
@@ -716,6 +720,31 @@ pub fn resolve_backend(
     }
 }
 
+/// Syntactic DID check shared by the `service_did` /
+/// `target_service_did` validation rules: `did:` prefix,
+/// non-empty method, non-empty method-specific identifier.
+/// Resolution is deliberately not attempted — Aurora resolves
+/// cairn-mod's DID doc when verifying a service-auth JWT.
+fn validate_did_field(field: &str, value: &str) -> std::result::Result<(), PdsAdminConfigError> {
+    if value.is_empty() {
+        return Err(PdsAdminConfigError::RustBlockInvalid(format!(
+            "`{field}` must be set (got empty string)"
+        )));
+    }
+    let Some(rest) = value.strip_prefix("did:") else {
+        return Err(PdsAdminConfigError::RustBlockInvalid(format!(
+            "`{field}` = {value:?} is not a DID (expected `did:<method>:<identifier>`)"
+        )));
+    };
+    match rest.split_once(':') {
+        Some((method, identifier)) if !method.is_empty() && !identifier.is_empty() => Ok(()),
+        _ => Err(PdsAdminConfigError::RustBlockInvalid(format!(
+            "`{field}` = {value:?} lacks a DID method or identifier \
+             (expected `did:<method>:<identifier>`)"
+        ))),
+    }
+}
+
 /// Validate `[pds_admin.rust]` per the v1.8.1 block-validity
 /// rules and resolve into a [`RustBackendConfig`].
 ///
@@ -723,13 +752,18 @@ pub fn resolve_backend(
 /// - `url` parses via [`url::Url::parse`]; no scheme constraint
 ///   in v1.8.1 (the protocol-parity work that locks scheme posture
 ///   ships in v1.8.2).
-/// - `client_id_env` and `client_secret_env` name distinct,
-///   non-empty env vars whose values are non-empty at process
-///   startup.
-/// - `scopes` is non-empty; each entry passes the structural
-///   scope check (non-empty wire string with `atproto:` prefix);
-///   no duplicates. Typed `OAuthScope` parsing lands at the
-///   OAuth flow's first consumer step.
+/// - Removed v1.7-era OAuth keys (`client_id_env`,
+///   `client_secret_env`, `scopes`) present in TOML surface as
+///   [`PdsAdminConfigError::RemovedOAuthField`] naming the key.
+/// - `service_did` and `target_service_did` pass the syntactic
+///   DID check (`did:<method>:<identifier>`).
+/// - `service_signing_key_env` is non-empty, matches the
+///   env-var-name pattern (`[A-Z][A-Z_0-9]*`), and names an env
+///   var that is set and non-empty at process startup. The key
+///   *bytes* are parsed later by `RustBackend::new`, not here.
+/// - `service_did_document_url` parses as a URL when present.
+/// - `request_timeout` parses as a duration string (default
+///   `"30s"`, bounds 1s..=5m).
 /// - `capability_refresh_interval` parses as a duration string
 ///   (default `"1h"`, lower-bound `"10s"`).
 /// - `required_capabilities` is structurally validated (each
@@ -753,46 +787,73 @@ where
     let pds_url = url::Url::parse(&toml.url)
         .map_err(|e| E::RustBlockInvalid(format!("`url` is not a valid URL: {e}")))?;
 
-    if toml.client_id_env.is_empty() {
-        return Err(E::RustBlockInvalid(
-            "`client_id_env` must name an env var (got empty string)".into(),
-        )
-        .into());
+    // Migration guard: the OAuth-shaped keys were removed in the
+    // v1.8.1 service-auth rewrite. Named individually so the
+    // operator-facing error points at the exact offending key.
+    if toml.client_id_env.is_some() {
+        return Err(E::RemovedOAuthField("client_id_env").into());
     }
-    if toml.client_secret_env.is_empty() {
-        return Err(E::RustBlockInvalid(
-            "`client_secret_env` must name an env var (got empty string)".into(),
-        )
-        .into());
+    if toml.client_secret_env.is_some() {
+        return Err(E::RemovedOAuthField("client_secret_env").into());
     }
-    if toml.client_id_env == toml.client_secret_env {
-        return Err(E::EnvVarReused(toml.client_id_env.clone()).into());
-    }
-    let client_id =
-        read_env(&toml.client_id_env).map_err(|_| E::MissingEnvVar(toml.client_id_env.clone()))?;
-    if client_id.is_empty() {
-        return Err(E::MissingEnvVar(toml.client_id_env.clone()).into());
-    }
-    let client_secret = read_env(&toml.client_secret_env)
-        .map_err(|_| E::MissingEnvVar(toml.client_secret_env.clone()))?;
-    if client_secret.is_empty() {
-        return Err(E::MissingEnvVar(toml.client_secret_env.clone()).into());
+    if toml.scopes.is_some() {
+        return Err(E::RemovedOAuthField("scopes").into());
     }
 
-    if toml.scopes.is_empty() {
+    validate_did_field("service_did", &toml.service_did)?;
+    validate_did_field("target_service_did", &toml.target_service_did)?;
+
+    let key_env = &toml.service_signing_key_env;
+    if key_env.is_empty() {
         return Err(E::RustBlockInvalid(
-            "`scopes` must list at least one scope (got empty array)".into(),
+            "`service_signing_key_env` must name an env var (got empty string)".into(),
         )
         .into());
     }
-    let mut seen_scopes: BTreeSet<&str> = BTreeSet::new();
-    for scope in &toml.scopes {
-        if scope.is_empty() || !scope.starts_with("atproto:") {
-            return Err(E::UnknownScope(scope.clone()).into());
-        }
-        if !seen_scopes.insert(scope.as_str()) {
-            return Err(E::DuplicateScope(scope.clone()).into());
-        }
+    let valid_env_name = key_env
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && key_env
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if !valid_env_name {
+        return Err(E::RustBlockInvalid(format!(
+            "`service_signing_key_env` = {key_env:?} is not a valid env-var name \
+             (expected pattern [A-Z][A-Z_0-9]*)"
+        ))
+        .into());
+    }
+    // Presence check only — RustBackend::new parses the key bytes.
+    let key_value = read_env(key_env).map_err(|_| E::MissingEnvVar(key_env.clone()))?;
+    if key_value.is_empty() {
+        return Err(E::MissingEnvVar(key_env.clone()).into());
+    }
+
+    let service_did_document_url = toml
+        .service_did_document_url
+        .as_deref()
+        .map(|raw| {
+            url::Url::parse(raw).map_err(|e| {
+                E::RustBlockInvalid(format!(
+                    "`service_did_document_url` is not a valid URL: {e}"
+                ))
+            })
+        })
+        .transpose()?;
+
+    let timeout_str = toml.request_timeout.as_deref().unwrap_or("30s");
+    let request_timeout = parse_duration_string(timeout_str).ok_or_else(|| {
+        E::RustBlockInvalid(format!(
+            "`request_timeout` = {timeout_str:?} is not a valid duration \
+             (expected forms like \"30s\", \"2m\")"
+        ))
+    })?;
+    if request_timeout < Duration::from_secs(1) || request_timeout > Duration::from_secs(300) {
+        return Err(E::RustBlockInvalid(format!(
+            "`request_timeout` = {timeout_str:?} is out of bounds (allowed range 1s..=5m)"
+        ))
+        .into());
     }
 
     let refresh_str = toml.capability_refresh_interval.as_deref().unwrap_or("1h");
@@ -873,9 +934,11 @@ where
 
     Ok(RustBackendConfig {
         pds_url,
-        client_id,
-        client_secret: AdminPassword::new(client_secret),
-        scopes: toml.scopes.clone(),
+        service_did: toml.service_did.clone(),
+        service_signing_key_env: key_env.clone(),
+        service_did_document_url,
+        target_service_did: toml.target_service_did.clone(),
+        request_timeout,
         capability_refresh_interval: refresh,
         required_capabilities,
         pinned_versions,
@@ -1841,9 +1904,14 @@ mod tests {
     fn rust_toml() -> crate::config::PdsAdminRustToml {
         crate::config::PdsAdminRustToml {
             url: "https://rust-pds.example.test".into(),
-            client_id_env: "RUST_CLIENT_ID".into(),
-            client_secret_env: "RUST_CLIENT_SECRET".into(),
-            scopes: vec!["atproto:admin.moderation".into()],
+            service_did: "did:web:cairn-mod.example.test".into(),
+            service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),
+            service_did_document_url: None,
+            target_service_did: "did:web:rust-pds.example.test".into(),
+            request_timeout: None,
+            client_id_env: None,
+            client_secret_env: None,
+            scopes: None,
             capability_refresh_interval: None,
             required_capabilities: None,
             pinned_versions: None,
@@ -1852,13 +1920,16 @@ mod tests {
         }
     }
 
-    /// Env reader that knows the rust block's two env vars and the
-    /// ozone block's password env var. Used by tests that exercise
-    /// either or both backends.
+    /// Env reader that knows the rust block's signing-key env var
+    /// and the ozone block's password env var. Used by tests that
+    /// exercise either or both backends.
     fn rust_env_reader(name: &str) -> std::result::Result<String, std::env::VarError> {
         match name {
-            "RUST_CLIENT_ID" => Ok("test-client-id".into()),
-            "RUST_CLIENT_SECRET" => Ok("test-client-secret".into()),
+            // 64 hex chars — presence-checked at config load; only
+            // RustBackend::new parses the bytes.
+            "RUST_SERVICE_SIGNING_KEY" => {
+                Ok("4242424242424242424242424242424242424242424242424242424242424242".into())
+            }
             TEST_ENV_VAR => Ok("test-admin-password".into()),
             _ => Err(std::env::VarError::NotPresent),
         }
@@ -2055,42 +2126,140 @@ mod tests {
     }
 
     #[test]
-    fn rust_missing_client_id_env_rejects() {
+    fn rust_missing_service_did_rejects() {
         let mut t = rust_toml();
-        t.client_id_env = String::new();
+        t.service_did = String::new();
         let cfg = config_with_rust(t);
-        let err = from_config_rust_test(&cfg).expect_err("empty client_id_env rejects");
-        assert!(format!("{err}").contains("`client_id_env` must name an env var"));
+        let err = from_config_rust_test(&cfg).expect_err("empty service_did rejects");
+        assert!(format!("{err}").contains("`service_did` must be set"));
     }
 
     #[test]
-    fn rust_empty_scopes_rejects() {
-        let mut t = rust_toml();
-        t.scopes = vec![];
-        let cfg = config_with_rust(t);
-        let err = from_config_rust_test(&cfg).expect_err("empty scopes rejects");
-        assert!(format!("{err}").contains("must list at least one scope"));
+    fn rust_invalid_service_did_syntax_rejects() {
+        for bad in [
+            "cairn-mod.example.test",
+            "did:",
+            "did:web",
+            "did:web:",
+            "did::x",
+        ] {
+            let mut t = rust_toml();
+            t.service_did = bad.into();
+            let cfg = config_with_rust(t);
+            let err =
+                from_config_rust_test(&cfg).expect_err(&format!("service_did {bad:?} rejects"));
+            assert!(
+                format!("{err}").contains("service_did"),
+                "error names the field for {bad:?}: {err}"
+            );
+        }
     }
 
     #[test]
-    fn rust_duplicate_scopes_rejects() {
+    fn rust_invalid_target_service_did_rejects() {
         let mut t = rust_toml();
-        t.scopes = vec![
-            "atproto:admin.moderation".into(),
-            "atproto:admin.moderation".into(),
-        ];
+        t.target_service_did = "not-a-did".into();
         let cfg = config_with_rust(t);
-        let err = from_config_rust_test(&cfg).expect_err("duplicate scopes rejects");
-        assert!(format!("{err}").contains("duplicate scope"));
+        let err = from_config_rust_test(&cfg).expect_err("bad target_service_did rejects");
+        assert!(format!("{err}").contains("target_service_did"));
     }
 
     #[test]
-    fn rust_unknown_scope_wire_string_rejects() {
+    fn rust_removed_oauth_fields_reject_with_migration_error() {
+        // Each removed key errors individually, naming the key and
+        // the service-auth replacements (§4.5 migration path).
         let mut t = rust_toml();
-        t.scopes = vec!["bogus".into()];
+        t.client_id_env = Some("RUST_CLIENT_ID".into());
         let cfg = config_with_rust(t);
-        let err = from_config_rust_test(&cfg).expect_err("unknown scope rejects");
-        assert!(format!("{err}").contains("unrecognized scope"));
+        let err = from_config_rust_test(&cfg).expect_err("client_id_env rejects");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("client_id_env") && msg.contains("removed in v1.8.1"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("service_signing_key_env"),
+            "points at replacements: {msg}"
+        );
+
+        let mut t = rust_toml();
+        t.client_secret_env = Some("RUST_CLIENT_SECRET".into());
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("client_secret_env rejects");
+        assert!(format!("{err}").contains("client_secret_env"));
+
+        let mut t = rust_toml();
+        t.scopes = Some(vec!["atproto:admin.moderation".into()]);
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("scopes rejects");
+        assert!(format!("{err}").contains("scopes"));
+    }
+
+    #[test]
+    fn rust_invalid_signing_key_env_name_rejects() {
+        for bad in ["lowercase", "1STARTS_WITH_DIGIT", "HAS-DASH", "HAS SPACE"] {
+            let mut t = rust_toml();
+            t.service_signing_key_env = bad.into();
+            let cfg = config_with_rust(t);
+            let err = from_config_rust_test(&cfg).expect_err(&format!("env name {bad:?} rejects"));
+            assert!(
+                format!("{err}").contains("not a valid env-var name"),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_bad_did_document_url_rejects() {
+        let mut t = rust_toml();
+        t.service_did_document_url = Some("not a url".into());
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("bad did-doc url rejects");
+        assert!(format!("{err}").contains("service_did_document_url"));
+    }
+
+    #[test]
+    fn rust_request_timeout_default_is_thirty_seconds() {
+        let mut t = rust_toml();
+        t.acknowledge_v1_8_1_audit_divergence = Some(true);
+        let cfg = config_with_rust(t);
+        let p = from_config_rust_test(&cfg).expect("default loads");
+        let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
+            panic!("expected Rust backend");
+        };
+        assert_eq!(rust.request_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn rust_request_timeout_out_of_bounds_rejects() {
+        for bad in ["0s", "6m", "301s"] {
+            let mut t = rust_toml();
+            t.request_timeout = Some(bad.into());
+            let cfg = config_with_rust(t);
+            let err =
+                from_config_rust_test(&cfg).expect_err(&format!("request_timeout {bad:?} rejects"));
+            assert!(format!("{err}").contains("out of bounds"), "{err}");
+        }
+        let mut t = rust_toml();
+        t.request_timeout = Some("soonish".into());
+        let cfg = config_with_rust(t);
+        let err = from_config_rust_test(&cfg).expect_err("unparseable rejects");
+        assert!(format!("{err}").contains("not a valid duration"));
+    }
+
+    #[test]
+    fn rust_request_timeout_bounds_accepted() {
+        for (raw, secs) in [("1s", 1u64), ("5m", 300)] {
+            let mut t = rust_toml();
+            t.request_timeout = Some(raw.into());
+            t.acknowledge_v1_8_1_audit_divergence = Some(true);
+            let cfg = config_with_rust(t);
+            let p = from_config_rust_test(&cfg).expect("in-bounds loads");
+            let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
+                panic!("expected Rust backend");
+            };
+            assert_eq!(rust.request_timeout, Duration::from_secs(secs), "{raw}");
+        }
     }
 
     #[test]
@@ -2150,18 +2319,9 @@ mod tests {
     }
 
     #[test]
-    fn rust_env_var_reused_for_id_and_secret_rejects() {
-        let mut t = rust_toml();
-        t.client_secret_env = "RUST_CLIENT_ID".into(); // same as client_id_env
-        let cfg = config_with_rust(t);
-        let err = from_config_rust_test(&cfg).expect_err("reuse rejects");
-        assert!(format!("{err}").contains("must be distinct"));
-    }
-
-    #[test]
     fn rust_missing_env_var_rejects() {
         let mut t = rust_toml();
-        t.client_id_env = "UNSET_VAR".into();
+        t.service_signing_key_env = "UNSET_VAR".into();
         let cfg = config_with_rust(t);
         let err = from_config_rust_test(&cfg).expect_err("unset env rejects");
         assert!(format!("{err}").contains("env var $UNSET_VAR"));
@@ -2176,17 +2336,19 @@ mod tests {
     fn policy_rust(ack: bool) -> PdsAdminPolicy {
         PdsAdminPolicy {
             enabled: true,
-            backend: Some(PdsAdminBackendConfig::Rust(RustBackendConfig {
+            backend: Some(PdsAdminBackendConfig::Rust(Box::new(RustBackendConfig {
                 pds_url: url::Url::parse("https://rust-pds.example.test").unwrap(),
-                client_id: "id".into(),
-                client_secret: AdminPassword::new("secret".into()),
-                scopes: vec!["atproto:admin.moderation".into()],
+                service_did: "did:web:cairn-mod.example.test".into(),
+                service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),
+                service_did_document_url: None,
+                target_service_did: "did:web:rust-pds.example.test".into(),
+                request_timeout: Duration::from_secs(30),
                 capability_refresh_interval: Duration::from_secs(3600),
                 required_capabilities: Vec::new(),
                 pinned_versions: BTreeMap::new(),
                 verification_persist: true,
                 acknowledge_v1_8_1_audit_divergence: ack,
-            })),
+            }))),
             action_map: BTreeMap::new(),
         }
     }

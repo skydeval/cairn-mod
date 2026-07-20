@@ -24,6 +24,7 @@
 //!
 //! [`PdsAdminBackend`]: crate::pds_admin::PdsAdminBackend
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -282,13 +283,19 @@ pub enum CapabilityClassification {
 
 /// Static registry mapping capability family → classification.
 ///
-/// Empty in v1.8.1: no family has a consumer yet, so classifying
-/// hypothetically would be theatre. Later v1.8.x releases populate
-/// this slice as they introduce consumers:
+/// Populated at v1.8.1 with the families v1.8.2's protocol-parity
+/// release consumes for its emitEvent-mapped action verbs. Entries
+/// are **suffix-less family names** (no `-vN`) — Aurora advertises
+/// wire strings like `mod-events-emit-v1`; [`parse_capability_string`]
+/// yields the family and version separately, and
+/// [`classification_for`] exact-matches on the family alone.
+/// v1.8.1 has no runtime consumer of these entries beyond the
+/// probe's advertised-set bookkeeping; v1.8.2 wires the real
+/// consumers. Later v1.8.x releases extend the slice as they
+/// introduce consumers:
 ///
 // v1.8.3: tools.aurora.moderator.* (queryStatuses, queryEvents)
 // v1.8.4: tools.aurora.moderator.* (getSubjectContext)
-// v1.8.5: tools.aurora.admin.* (emitEvent variants)
 // v1.8.6: tools.aurora.admin.* (audit-trail family)
 // v1.8.8: tools.aurora.admin.* (subscribeModEvents)
 // v1.8.9: tools.aurora.admin.* (instance-metrics, runtime-settings)
@@ -297,7 +304,13 @@ pub enum CapabilityClassification {
 /// `tools.aurora.describeCapabilities` is intentionally NOT a
 /// capability — it's the probe NSID itself, not a feature gated by
 /// advertisement.
-pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[];
+pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
+    // Aurora advertises `mod-events-emit-v1` (recon §1b); v1.8.2's
+    // emitEvent-mapped action verbs consume this family. AutoAdvance:
+    // read-side detection of a monotonically-versioned surface with
+    // no operator risk in moving forward.
+    ("mod-events-emit", CapabilityClassification::AutoAdvance),
+];
 
 /// Look up a family's classification in the registry.
 ///
@@ -310,6 +323,146 @@ pub fn classification_for(family: &str) -> Option<CapabilityClassification> {
         .iter()
         .find(|(name, _)| *name == family)
         .map(|(_, c)| *c)
+}
+
+/// One advertised capability, split into its family + version
+/// coordinates (v1.8.1, §4.3).
+///
+/// `family` is the **suffix-less** family name (e.g.
+/// `mod-events-emit`); the version travels separately. Produced by
+/// parsing an Aurora-advertised wire string (`mod-events-emit-v1`)
+/// via [`parse_capability_string`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capability {
+    /// Suffix-less family name (e.g. `mod-events-emit`).
+    pub family: String,
+    /// Version parsed from the wire string's `-vN` tail.
+    pub version: CapabilityVersion,
+}
+
+/// Errors from building a [`CapabilitySet`] out of a
+/// `describeCapabilities` response.
+///
+/// Reserved surface: at v1.8.1 [`CapabilitySet::from_describe_capabilities`]
+/// never produces it — malformed extension names are *ignored*
+/// (advisory-advertisement posture per umbrella §5.3), not fatal.
+/// The variant exists so a future strict mode can fail the probe
+/// without changing the constructor's signature.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityParseError {
+    /// The response was structurally unusable. Never produced at
+    /// v1.8.1; reserved for future strict parsing modes.
+    #[error("malformed describeCapabilities response: {0}")]
+    MalformedResponse(String),
+}
+
+/// The last-refreshed capability advertisement from the upstream
+/// PDS (v1.8.1, §4.3).
+///
+/// Built from a [`DescribeCapabilitiesResponse`] by
+/// [`Self::from_describe_capabilities`]; consulted by the probe's
+/// required-capability check and (v1.8.2+) by capability-gated
+/// trait methods. `inner` keeps the **highest** advertised version
+/// per family so auto-advance selection (umbrella §5.3) is a plain
+/// map lookup; `raw` keeps every advertised wire string verbatim
+/// for debugging and operator-facing probe reports.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapabilitySet {
+    /// family → highest advertised version.
+    inner: BTreeMap<String, CapabilityVersion>,
+    /// Raw advertised strings as received, in wire order.
+    raw: Vec<String>,
+}
+
+impl CapabilitySet {
+    /// The empty set — the state between construction and the
+    /// first successful probe.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build a set from Aurora's `describeCapabilities` response.
+    ///
+    /// Walks `extensions`, parsing each `name` via
+    /// [`parse_capability_string`]. Names that don't match the
+    /// `<family>-v<int>` shape are kept in the raw list but do not
+    /// enter the family map — cairn-mod does not fail the probe on
+    /// malformed advertisements (advisory posture, umbrella §5.3).
+    /// When a family is advertised at multiple versions, the
+    /// highest wins (auto-advance selection input).
+    pub fn from_describe_capabilities(
+        response: &DescribeCapabilitiesResponse,
+    ) -> Result<Self, CapabilityParseError> {
+        let mut inner: BTreeMap<String, CapabilityVersion> = BTreeMap::new();
+        let mut raw = Vec::with_capacity(response.extensions.len());
+        for ext in &response.extensions {
+            raw.push(ext.name.clone());
+            if let Some((family, version)) = parse_capability_string(&ext.name) {
+                inner
+                    .entry(family)
+                    .and_modify(|v| *v = (*v).max(version))
+                    .or_insert(version);
+            }
+        }
+        Ok(Self { inner, raw })
+    }
+
+    /// Whether the upstream advertises any version of `family`.
+    /// `family` is suffix-less (`mod-events-emit`, not
+    /// `mod-events-emit-v1`).
+    pub fn has(&self, family: &str) -> bool {
+        self.inner.contains_key(family)
+    }
+
+    /// Highest advertised version for `family`, if advertised.
+    pub fn version_of(&self, family: &str) -> Option<CapabilityVersion> {
+        self.inner.get(family).copied()
+    }
+
+    /// Raw advertised strings as received from the upstream.
+    pub fn advertised_strings(&self) -> &[String] {
+        &self.raw
+    }
+}
+
+/// cairn-mod-side mirror of Aurora's `describeCapabilities` wire
+/// response (recon §1b; Aurora `src/api/admin.rs` — fields
+/// `families`, `extensions`, `implementation`, `version`,
+/// `camelCase` on the wire).
+///
+/// `families` is deliberately opaque: per umbrella §5.3 the
+/// advertised list is an advisory capability-detection signal, not
+/// an endpoint enumeration — cairn-mod's own
+/// [`CAPABILITY_CLASSIFICATIONS`] registry is authoritative for
+/// what the backend knows about.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DescribeCapabilitiesResponse {
+    /// Namespace → leaf-method-name arrays. Opaque at v1.8.1;
+    /// cairn-mod doesn't consume this directly.
+    pub families: serde_json::Value,
+    /// Advertised capability strings (each `name` follows the
+    /// `<kebab-family>-v<int>` convention).
+    pub extensions: Vec<CapabilityExtension>,
+    /// Upstream implementation identifier (`"aurora-locus"`).
+    pub implementation: String,
+    /// Upstream package version (e.g. `"0.10.0"`).
+    pub version: String,
+}
+
+/// One advertised extension entry in
+/// [`DescribeCapabilitiesResponse::extensions`].
+///
+/// Aurora omits `value` from the wire when not applicable
+/// (`skip_serializing_if` on its side); serde's `Option` default
+/// handles the absent key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CapabilityExtension {
+    /// Capability wire string, e.g. `mod-events-emit-v1`.
+    pub name: String,
+    /// Optional structured payload (e.g. an event-variant list).
+    /// `None` when absent from the wire.
+    pub value: Option<serde_json::Value>,
 }
 
 /// Opaque pagination cursor.
@@ -506,11 +659,37 @@ mod cross_release_type_tests {
     // ----- CapabilityClassification + registry -----
 
     #[test]
-    fn capability_classifications_registry_is_empty_in_v1_8_1() {
+    fn capability_classifications_registry_v1_8_1_shape() {
         // Pinned: any change to this constant requires a
         // coordinated release decision (capability-gated trait
         // surface activation, per the v1.8.x rollout plan).
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 0);
+        // v1.8.1 populates the families v1.8.2 consumes; entries
+        // are suffix-less family names.
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 1);
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[0],
+            ("mod-events-emit", CapabilityClassification::AutoAdvance)
+        );
+        // No entry may carry a version suffix — classification_for
+        // exact-matches on the suffix-less family that
+        // parse_capability_string yields.
+        for (family, _) in CAPABILITY_CLASSIFICATIONS {
+            assert!(
+                parse_capability_string(family).is_none(),
+                "registry entry {family:?} carries a -vN suffix; entries must be suffix-less families"
+            );
+        }
+    }
+
+    #[test]
+    fn classification_for_finds_v1_8_1_entries() {
+        assert_eq!(
+            classification_for("mod-events-emit"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        // The wire string (with suffix) is NOT a family and must
+        // not match.
+        assert_eq!(classification_for("mod-events-emit-v1"), None);
     }
 
     #[test]
@@ -543,6 +722,133 @@ mod cross_release_type_tests {
             Some(CapabilityClassification::OperatorOptIn)
         );
         assert_eq!(lookup("unknown"), None);
+    }
+
+    // ----- Capability / CapabilitySet (§8, v1.8.1) -----
+
+    fn response_with(extensions: &[&str]) -> DescribeCapabilitiesResponse {
+        DescribeCapabilitiesResponse {
+            families: serde_json::json!({}),
+            extensions: extensions
+                .iter()
+                .map(|n| CapabilityExtension {
+                    name: (*n).to_string(),
+                    value: None,
+                })
+                .collect(),
+            implementation: "aurora-locus".to_string(),
+            version: "0.10.0".to_string(),
+        }
+    }
+
+    #[test]
+    fn capability_set_empty_has_no_capabilities() {
+        let set = CapabilitySet::empty();
+        assert!(!set.has("mod-events-emit"));
+        assert_eq!(set.version_of("mod-events-emit"), None);
+        assert!(set.advertised_strings().is_empty());
+    }
+
+    #[test]
+    fn capability_set_builds_from_mock_response() {
+        let set = CapabilitySet::from_describe_capabilities(&response_with(&[
+            "mod-events-emit-v1",
+            "audit-trail-v1",
+        ]))
+        .unwrap();
+        assert!(set.has("mod-events-emit"));
+        assert!(set.has("audit-trail"));
+        assert_eq!(
+            set.version_of("mod-events-emit"),
+            Some(CapabilityVersion(1))
+        );
+    }
+
+    #[test]
+    fn capability_set_ignores_malformed_extension_names() {
+        // Missing -v<int> suffix → kept in raw, absent from the
+        // family map; the probe does not fail.
+        let set = CapabilitySet::from_describe_capabilities(&response_with(&[
+            "mod-events-emit-v1",
+            "not-a-versioned-string",
+            "trailing-v",
+        ]))
+        .unwrap();
+        assert!(set.has("mod-events-emit"));
+        assert!(!set.has("not-a-versioned-string"));
+        assert!(!set.has("trailing"));
+        assert_eq!(set.advertised_strings().len(), 3);
+    }
+
+    #[test]
+    fn capability_set_has_is_false_for_absent_families() {
+        let set =
+            CapabilitySet::from_describe_capabilities(&response_with(&["mod-events-emit-v1"]))
+                .unwrap();
+        assert!(!set.has("audit-trail"));
+        assert!(!set.has(""));
+        // Wire string with suffix is not a family.
+        assert!(!set.has("mod-events-emit-v1"));
+    }
+
+    #[test]
+    fn capability_set_version_of_returns_advertised_version() {
+        let set =
+            CapabilitySet::from_describe_capabilities(&response_with(&["queue-stats-v3"])).unwrap();
+        assert_eq!(set.version_of("queue-stats"), Some(CapabilityVersion(3)));
+        assert_eq!(set.version_of("absent-family"), None);
+    }
+
+    #[test]
+    fn capability_set_multi_version_keeps_highest() {
+        let set = CapabilitySet::from_describe_capabilities(&response_with(&[
+            "mod-events-emit-v1",
+            "mod-events-emit-v2",
+        ]))
+        .unwrap();
+        // Both parsed (raw keeps both); version_of returns the
+        // highest per the auto-advance selection input.
+        assert_eq!(set.advertised_strings().len(), 2);
+        assert_eq!(
+            set.version_of("mod-events-emit"),
+            Some(CapabilityVersion(2))
+        );
+    }
+
+    #[test]
+    fn capability_set_advertised_strings_returns_raw_list() {
+        let names = ["mod-events-emit-v1", "audit-trail-v1", "garbage"];
+        let set = CapabilitySet::from_describe_capabilities(&response_with(&names)).unwrap();
+        assert_eq!(
+            set.advertised_strings(),
+            names
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn describe_capabilities_response_deserializes_aurora_wire_shape() {
+        // Mirrors Aurora's serialization: camelCase keys, `value`
+        // omitted when None (recon §1b).
+        let wire = serde_json::json!({
+            "families": {"tools.aurora.admin": ["emitEvent"]},
+            "extensions": [
+                {"name": "mod-events-emit-v1"},
+                {"name": "runtime-settings-v1", "value": {"note": "x"}}
+            ],
+            "implementation": "aurora-locus",
+            "version": "0.10.0"
+        });
+        let resp: DescribeCapabilitiesResponse = serde_json::from_value(wire).unwrap();
+        assert_eq!(resp.implementation, "aurora-locus");
+        assert_eq!(resp.version, "0.10.0");
+        assert_eq!(resp.extensions.len(), 2);
+        assert_eq!(resp.extensions[0].name, "mod-events-emit-v1");
+        assert!(resp.extensions[0].value.is_none());
+        assert!(resp.extensions[1].value.is_some());
     }
 
     // ----- PaginationCursor -----

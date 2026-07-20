@@ -168,7 +168,7 @@ struct AuthErrorEnvelope {
 /// [`xrpc_replay_middleware`] (so unauthorized callers don't
 /// pollute the replay cache).
 ///
-/// For [`Nsid::ComAtprotoModerationCreateReport`]: checks
+/// For [`Nsid::CreateReport`]: checks
 /// `claims.iss` against `xrpc_trusted_pdses` (the JWT issuer is
 /// the PDS forwarding the report).
 ///
@@ -216,10 +216,13 @@ pub(crate) async fn xrpc_membership_middleware(
     let iss = claims.iss.clone();
 
     let allowed = match nsid {
-        Nsid::ComAtprotoModerationCreateReport => membership::is_trusted_pds(&pool, &iss).await,
-        Nsid::ToolsOzoneModerationEmitEvent
-        | Nsid::ToolsOzoneModerationQueryStatuses
-        | Nsid::ToolsOzoneModerationQueryEvents => membership::is_known_caller(&pool, &iss).await,
+        Nsid::CreateReport => membership::is_trusted_pds(&pool, &iss).await,
+        // The whole ozone dialect shares the known-caller gate.
+        Nsid::Ozone(_) => membership::is_known_caller(&pool, &iss).await,
+        // Uninhabited at v1.8.1 (§4.6 dual-dialect foundation);
+        // v1.8.2+ decides the aurora dialect's membership gate
+        // when its first NSID lands.
+        Nsid::Aurora(a) => match a {},
     };
 
     match allowed {

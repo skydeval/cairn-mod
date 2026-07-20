@@ -20,8 +20,8 @@
 //! [`Nsid::from_path_segment`] and the router's `Router::route`
 //! match case-sensitively (the latter is axum 0.8's default).
 //! `tools.ozone.moderation.EmitEvent` (capital E) does NOT match
-//! [`Nsid::ToolsOzoneModerationEmitEvent`] — it falls through to
-//! the unknown-NSID handler and returns 501. Tested.
+//! `Nsid::Ozone(OzoneModerationNsid::EmitEvent)` — it falls
+//! through to the unknown-NSID handler and returns 501. Tested.
 
 use axum::http::{Method, Uri};
 
@@ -29,47 +29,75 @@ use axum::http::{Method, Uri};
 ///
 /// v1.7 ships four endpoints — two POST mutations and two GET
 /// reads — covering the proxied moderation surface (per §A6). The
-/// per-NSID handlers in #95-#98 fill in real bodies; #92 (this
-/// issue) lands the named-but-unimplemented stubs that return 501
-/// with NSID-specific envelope wording.
+/// per-NSID handlers in #95-#98 fill in real bodies; #92 lands the
+/// named-but-unimplemented stubs that return 501 with
+/// NSID-specific envelope wording.
+///
+/// **Dual-dialect layout (v1.8.1, §4.6).** The enum nests a
+/// dialect discriminator so subsequent Workstream A releases can
+/// slot `tools.aurora.*` NSIDs in as pure additions
+/// ([`AuroraNsid`] is uninhabited at v1.8.1; v1.8.2 adds its
+/// first variant). The refactor is structural only — the accepted
+/// set is byte-identical to v1.7's four NSIDs, and
+/// `com.atproto.moderation.createReport` stays a top-level
+/// variant because it belongs to neither moderation dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Nsid {
+    /// `tools.ozone.moderation.*` dialect (the v1.7 surface).
+    Ozone(OzoneModerationNsid),
+    /// `tools.aurora.*` dialect — no variants at v1.8.1;
+    /// populated from v1.8.2 as consumed capabilities land.
+    Aurora(AuroraNsid),
     /// `com.atproto.moderation.createReport` — PDS-forwarded user
     /// reports. Auth: PDS-signed service-auth JWT (the PDS attests
-    /// to who `reportedBy` is). Body lands in #96.
-    ComAtprotoModerationCreateReport,
+    /// to who `reportedBy` is). Body landed in #96.
+    CreateReport,
+}
 
+/// The `tools.ozone.moderation.*` dialect's allowlisted NSIDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OzoneModerationNsid {
     /// `tools.ozone.moderation.emitEvent` — User-originated
     /// proxied mutations. Auth: user-signed service-auth JWT (the
-    /// user is the issuer). Body lands in #95.
-    ToolsOzoneModerationEmitEvent,
-
+    /// user is the issuer). Body landed in #95.
+    EmitEvent,
     /// `tools.ozone.moderation.queryStatuses` — Read-only state
-    /// queries. Auth: user-signed service-auth JWT. Body lands in
-    /// #97.
-    ToolsOzoneModerationQueryStatuses,
-
+    /// queries. Auth: user-signed service-auth JWT. Body landed
+    /// in #97.
+    QueryStatuses,
     /// `tools.ozone.moderation.queryEvents` — Read-only audit-log
-    /// queries. Auth: user-signed service-auth JWT. Body lands in
-    /// #98.
-    ToolsOzoneModerationQueryEvents,
+    /// queries. Auth: user-signed service-auth JWT. Body landed
+    /// in #98.
+    QueryEvents,
 }
+
+/// The `tools.aurora.*` dialect's allowlisted NSIDs.
+///
+/// **Uninhabited at v1.8.1** — the dual-dialect foundation is
+/// prepared, not populated (umbrella §5.9; population starts at
+/// v1.8.2). Uninhabited-ness is pinned by a compile-time test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AuroraNsid {}
 
 impl Nsid {
     /// Map a URL path segment to an [`Nsid`] variant. `None` for
-    /// any NSID not on the v1.7 allowlist (the caller responds
-    /// with the standard `MethodNotImplemented` 501 envelope per
-    /// the [`crate::xrpc_gateway::router`]).
+    /// any NSID not on the allowlist (the caller responds with
+    /// the standard `MethodNotImplemented` 501 envelope per the
+    /// [`crate::xrpc_gateway::router`]).
     ///
     /// Case-sensitive. `tools.ozone.moderation.EmitEvent` (capital
     /// E) returns `None` — NSIDs are case-sensitive per the
     /// ATProto spec.
     pub fn from_path_segment(s: &str) -> Option<Self> {
         match s {
-            "com.atproto.moderation.createReport" => Some(Self::ComAtprotoModerationCreateReport),
-            "tools.ozone.moderation.emitEvent" => Some(Self::ToolsOzoneModerationEmitEvent),
-            "tools.ozone.moderation.queryStatuses" => Some(Self::ToolsOzoneModerationQueryStatuses),
-            "tools.ozone.moderation.queryEvents" => Some(Self::ToolsOzoneModerationQueryEvents),
+            "com.atproto.moderation.createReport" => Some(Self::CreateReport),
+            "tools.ozone.moderation.emitEvent" => Some(Self::Ozone(OzoneModerationNsid::EmitEvent)),
+            "tools.ozone.moderation.queryStatuses" => {
+                Some(Self::Ozone(OzoneModerationNsid::QueryStatuses))
+            }
+            "tools.ozone.moderation.queryEvents" => {
+                Some(Self::Ozone(OzoneModerationNsid::QueryEvents))
+            }
             _ => None,
         }
     }
@@ -78,26 +106,29 @@ impl Nsid {
     /// and 501 / 405 envelope construction.
     pub fn as_path_segment(self) -> &'static str {
         match self {
-            Self::ComAtprotoModerationCreateReport => "com.atproto.moderation.createReport",
-            Self::ToolsOzoneModerationEmitEvent => "tools.ozone.moderation.emitEvent",
-            Self::ToolsOzoneModerationQueryStatuses => "tools.ozone.moderation.queryStatuses",
-            Self::ToolsOzoneModerationQueryEvents => "tools.ozone.moderation.queryEvents",
+            Self::CreateReport => "com.atproto.moderation.createReport",
+            Self::Ozone(OzoneModerationNsid::EmitEvent) => "tools.ozone.moderation.emitEvent",
+            Self::Ozone(OzoneModerationNsid::QueryStatuses) => {
+                "tools.ozone.moderation.queryStatuses"
+            }
+            Self::Ozone(OzoneModerationNsid::QueryEvents) => "tools.ozone.moderation.queryEvents",
+            // Uninhabited — no Aurora NSIDs exist at v1.8.1.
+            Self::Aurora(a) => match a {},
         }
     }
 
-    /// HTTP method this NSID accepts. v1.7's two mutating NSIDs
-    /// are POST; the two read NSIDs are GET, matching bsky-PDS's
+    /// HTTP method this NSID accepts. The two mutating NSIDs are
+    /// POST; the two read NSIDs are GET, matching bsky-PDS's
     /// shapes per findings §6.3. Used by the router's per-NSID
     /// MethodRouter to return 405 (with the XRPC-shape envelope)
     /// for method mismatches.
     pub fn http_method(self) -> Method {
         match self {
-            Self::ComAtprotoModerationCreateReport | Self::ToolsOzoneModerationEmitEvent => {
-                Method::POST
-            }
-            Self::ToolsOzoneModerationQueryStatuses | Self::ToolsOzoneModerationQueryEvents => {
+            Self::CreateReport | Self::Ozone(OzoneModerationNsid::EmitEvent) => Method::POST,
+            Self::Ozone(OzoneModerationNsid::QueryStatuses | OzoneModerationNsid::QueryEvents) => {
                 Method::GET
             }
+            Self::Aurora(a) => match a {},
         }
     }
 }
@@ -129,30 +160,42 @@ mod tests {
     /// here so a future variant addition forces test coverage.
     fn all_variants() -> [Nsid; 4] {
         [
-            Nsid::ComAtprotoModerationCreateReport,
-            Nsid::ToolsOzoneModerationEmitEvent,
-            Nsid::ToolsOzoneModerationQueryStatuses,
-            Nsid::ToolsOzoneModerationQueryEvents,
+            Nsid::CreateReport,
+            Nsid::Ozone(OzoneModerationNsid::EmitEvent),
+            Nsid::Ozone(OzoneModerationNsid::QueryStatuses),
+            Nsid::Ozone(OzoneModerationNsid::QueryEvents),
         ]
+    }
+
+    /// Compile-time pin: `AuroraNsid` is uninhabited at v1.8.1
+    /// (§4.6 — the dual-dialect foundation is prepared, not
+    /// populated). An uninhabited enum admits an empty match
+    /// returning `!`-coercible values; adding a variant at
+    /// v1.8.2+ makes this function stop compiling until the
+    /// match is updated, forcing a deliberate review of every
+    /// dialect-dispatch site.
+    #[allow(dead_code)]
+    fn _aurora_nsid_is_uninhabited_at_v1_8_1(a: AuroraNsid) -> core::convert::Infallible {
+        match a {}
     }
 
     #[test]
     fn from_path_segment_recognizes_all_v1_7_nsids() {
         assert_eq!(
             Nsid::from_path_segment("com.atproto.moderation.createReport"),
-            Some(Nsid::ComAtprotoModerationCreateReport)
+            Some(Nsid::CreateReport)
         );
         assert_eq!(
             Nsid::from_path_segment("tools.ozone.moderation.emitEvent"),
-            Some(Nsid::ToolsOzoneModerationEmitEvent)
+            Some(Nsid::Ozone(OzoneModerationNsid::EmitEvent))
         );
         assert_eq!(
             Nsid::from_path_segment("tools.ozone.moderation.queryStatuses"),
-            Some(Nsid::ToolsOzoneModerationQueryStatuses)
+            Some(Nsid::Ozone(OzoneModerationNsid::QueryStatuses))
         );
         assert_eq!(
             Nsid::from_path_segment("tools.ozone.moderation.queryEvents"),
-            Some(Nsid::ToolsOzoneModerationQueryEvents)
+            Some(Nsid::Ozone(OzoneModerationNsid::QueryEvents))
         );
     }
 
@@ -214,7 +257,7 @@ mod tests {
         let uri: Uri = "/xrpc/tools.ozone.moderation.emitEvent".parse().unwrap();
         assert_eq!(
             extract_nsid_from_request_uri(&uri),
-            Some(Nsid::ToolsOzoneModerationEmitEvent)
+            Some(Nsid::Ozone(OzoneModerationNsid::EmitEvent))
         );
     }
 
@@ -241,7 +284,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             extract_nsid_from_request_uri(&uri),
-            Some(Nsid::ToolsOzoneModerationQueryStatuses)
+            Some(Nsid::Ozone(OzoneModerationNsid::QueryStatuses))
         );
     }
 
@@ -251,20 +294,17 @@ mod tests {
         // and emitEvent are mutating (POST); queryStatuses /
         // queryEvents are reads (GET). #92's router uses these to
         // produce 405 for method mismatches.
+        assert_eq!(Nsid::CreateReport.http_method(), Method::POST);
         assert_eq!(
-            Nsid::ComAtprotoModerationCreateReport.http_method(),
+            Nsid::Ozone(OzoneModerationNsid::EmitEvent).http_method(),
             Method::POST
         );
         assert_eq!(
-            Nsid::ToolsOzoneModerationEmitEvent.http_method(),
-            Method::POST
-        );
-        assert_eq!(
-            Nsid::ToolsOzoneModerationQueryStatuses.http_method(),
+            Nsid::Ozone(OzoneModerationNsid::QueryStatuses).http_method(),
             Method::GET
         );
         assert_eq!(
-            Nsid::ToolsOzoneModerationQueryEvents.http_method(),
+            Nsid::Ozone(OzoneModerationNsid::QueryEvents).http_method(),
             Method::GET
         );
     }

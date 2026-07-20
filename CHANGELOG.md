@@ -41,13 +41,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block` error.
 - `[pds_admin.rust]` configuration block — declares a Rust-PDS
   backend (Aurora-Locus or another ATProto Rust PDS). Required
-  keys: `url`, `client_id_env`, `client_secret_env`, `scopes`.
-  Optional keys: `capability_refresh_interval` (default `"1h"`,
-  lower-bound `"10s"`), `required_capabilities`,
-  `pinned_versions`, `verification_persist` (default `true`),
-  `acknowledge_v1_8_1_audit_divergence`. The OAuth credential env
-  vars must name distinct, non-empty environment variables;
-  reusing one env var for both id and secret is rejected.
+  keys: `url`, `service_did`, `service_signing_key_env`,
+  `target_service_did`. Optional keys: `service_did_document_url`,
+  `request_timeout` (default `"30s"`, bounds 1s..=5m),
+  `capability_refresh_interval` (default `"1h"`, lower-bound
+  `"10s"`), `required_capabilities`, `pinned_versions`,
+  `verification_persist` (default `true`),
+  `acknowledge_v1_8_1_audit_divergence`. The env var named by
+  `service_signing_key_env` must hold a hex-encoded 32-byte
+  secp256k1 private key and be set at startup. (An earlier
+  unreleased draft of this block used OAuth-shaped keys —
+  `client_id_env` / `client_secret_env` / `scopes`; those keys
+  were removed before release and now produce a boot-time
+  migration error naming the replacement fields.)
+- `RustBackend` — the second `PdsAdminBackend` implementation
+  (`backend = "rust"` now boots instead of hard-erroring).
+  **Inspector-only in v1.8.1**: the only live upstream call is the
+  `tools.aurora.describeCapabilities` probe; every enforcement
+  method returns `CapabilityNotAdvertised` (audit `outcome =
+  'validation'`) until v1.8.2's protocol-parity work, and label
+  methods hard-refuse per the label-bridge invariant, same as the
+  Ozone backend. Dispatches that hit the capability gap emit an
+  operator-visible WARN on the
+  `cairn_mod::pds_admin::rust::capability` log target.
+- ES256K service-auth JWT signing for Rust-PDS calls. Per-call
+  short-lived tokens (`iss` = cairn-mod's service DID, `aud` = the
+  target PDS's service DID, `lxm` = the called NSID, 1-hour
+  expiry), signed with cairn-mod's secp256k1 key and DER-encoded
+  to match Aurora-Locus's verifier. No OAuth, no token cache. The
+  operator publishes cairn-mod's DID document and grants the
+  Aurora-side `admin_roles` role out-of-band.
+- Capability detection goes live: the `describeCapabilities` probe
+  runs at startup and every `capability_refresh_interval`,
+  verifies operator-declared `required_capabilities` against the
+  advertised set, and warns about advertised capability families
+  cairn-mod's registry doesn't know. The capability registry gains
+  its first entry (`mod-events-emit`, auto-advance — consumed by
+  v1.8.2's action verbs).
 - **Inspector-only audit-divergence enforcement when `[pds_admin]`
   is enabled with `backend = "rust"`.** v1.8.1's RustBackend is
   inspector-only — every dispatch produces a `BackendError`

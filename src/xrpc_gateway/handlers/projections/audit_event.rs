@@ -48,13 +48,36 @@
 
 use serde_json::{Value, json};
 
-/// Ozone event $type discriminators used by the projection.
+/// Event $type discriminators used by the projection, grouped by
+/// dialect (dual-dialect layout per v1.8.1 §4.6 / umbrella §5.9).
 mod ev_type {
+    // ----- OZONE_MODERATION_TYPE_CONSTANTS -----
+    // `tools.ozone.moderation.defs#*` — the v1.7 dialect. The
+    // projection emits exactly these; the slice below pins the
+    // set for the dual-dialect layout.
     pub const LABEL: &str = "tools.ozone.moderation.defs#modEventLabel";
     pub const TAKEDOWN: &str = "tools.ozone.moderation.defs#modEventTakedown";
     pub const REVERSE_TAKEDOWN: &str = "tools.ozone.moderation.defs#modEventReverseTakedown";
     pub const COMMENT: &str = "tools.ozone.moderation.defs#modEventComment";
 }
+
+/// Ozone-dialect projection `$type` constants, as a pinned set
+/// (dual-dialect layout, v1.8.1 §4.6). The projection functions
+/// reference the individual `ev_type` constants; this slice
+/// exists so the dialect's surface is enumerable and
+/// test-pinnable alongside [`AURORA_TYPE_CONSTANTS`].
+pub const OZONE_MODERATION_TYPE_CONSTANTS: &[&str] = &[
+    ev_type::LABEL,
+    ev_type::TAKEDOWN,
+    ev_type::REVERSE_TAKEDOWN,
+    ev_type::COMMENT,
+];
+
+/// Aurora-dialect projection `$type` constants — **empty at
+/// v1.8.1**. The dual-dialect foundation is prepared, not
+/// populated; v1.8.2+ adds `tools.aurora.*`-dialect entries as
+/// their consumed capabilities land (umbrella §5.9).
+pub const AURORA_TYPE_CONSTANTS: &[&str] = &[];
 
 /// Subject discriminators reused from #97's projection convention.
 const SUBJECT_TYPE_REPO_REF: &str = "com.atproto.admin.defs#repoRef";
@@ -646,5 +669,30 @@ mod tests {
     fn revoked_reason_extraction_handles_malformed_json() {
         assert_eq!(revoked_reason_from_audit_reason(Some("not json")), None);
         assert_eq!(revoked_reason_from_audit_reason(None), None);
+    }
+
+    // ----- dual-dialect $type constant layout (v1.8.1 §4.6) -----
+
+    #[test]
+    fn ozone_type_constants_resolve_identically_to_v1_7() {
+        // Pinned byte-for-byte: the §4.6 refactor is structural
+        // only; the ozone dialect's wire strings must not move.
+        assert_eq!(
+            OZONE_MODERATION_TYPE_CONSTANTS,
+            &[
+                "tools.ozone.moderation.defs#modEventLabel",
+                "tools.ozone.moderation.defs#modEventTakedown",
+                "tools.ozone.moderation.defs#modEventReverseTakedown",
+                "tools.ozone.moderation.defs#modEventComment",
+            ]
+        );
+    }
+
+    #[test]
+    fn aurora_type_constants_empty_at_v1_8_1() {
+        // The dual-dialect foundation is prepared, not populated;
+        // any entry here requires a coordinated release decision
+        // (v1.8.2+ population per umbrella §5.9).
+        assert!(AURORA_TYPE_CONSTANTS.is_empty());
     }
 }

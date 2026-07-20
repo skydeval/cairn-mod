@@ -202,6 +202,7 @@ pub async fn dispatch_after_record_action(
     let completed_at = crate::writer::epoch_ms_now();
 
     log_call_outcome(method, ctx.action_id, ctx.subject_did, &call_result);
+    warn_rust_backend_capability_gap(bridge, method, ctx.action_id, &call_result);
 
     // Project the per-method success into the unified
     // `Option<BackendActionId>` shape that
@@ -405,6 +406,12 @@ pub async fn dispatch_after_revoke_action(
         ctx.subject_did,
         &call_result,
     );
+    warn_rust_backend_capability_gap(
+        bridge,
+        BackendMethod::RestoreAccount,
+        ctx.action_id,
+        &call_result,
+    );
 
     // Project Result<(), BackendError> into the unified
     // Result<Option<BackendActionId>, BackendError> shape.
@@ -436,6 +443,39 @@ pub async fn dispatch_after_revoke_action(
              remains committed"
         );
     }
+}
+
+/// v1.8.1 §4.7: operator-visible warning when a RustBackend
+/// dispatch returns [`BackendError::CapabilityNotAdvertised`].
+///
+/// Gated on [`should_warn_rust_backend_dispatch`] — a stateless
+/// predicate over `(enabled, backend = Rust)`; one warning per
+/// dispatched call (per-family dedup is deliberately deferred —
+/// it would require call-site state the umbrella doesn't commit
+/// at v1.8.1). Warning target matches the capability-refresh
+/// warning channel (umbrella §5.2) so operators watch one scope.
+fn warn_rust_backend_capability_gap<T>(
+    bridge: &PdsAdminBridge,
+    method: BackendMethod,
+    action_id: i64,
+    result: &std::result::Result<T, BackendError>,
+) {
+    let Err(BackendError::CapabilityNotAdvertised(capability)) = result else {
+        return;
+    };
+    if !crate::pds_admin::config::should_warn_rust_backend_dispatch(&bridge.policy) {
+        return;
+    }
+    tracing::warn!(
+        target: "cairn_mod::pds_admin::rust::capability",
+        action_id,
+        method = method.as_wire_str(),
+        capability = %capability,
+        "pds_admin: RustBackend dispatch skipped — the target PDS does not advertise \
+         capability \"{capability}\". v1.8.1's RustBackend is inspector-only; every \
+         dispatch records an audit-failure row until v1.8.2's protocol-parity work \
+         lands (see acknowledge_v1_8_1_audit_divergence)."
+    );
 }
 
 /// Emit a structured tracing log line summarizing the call

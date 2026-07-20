@@ -25,7 +25,7 @@
 //! | other `/xrpc/*` | any | 501 via fallback (`MethodNotImplemented`) |
 //! | known NSID + wrong method | other | 405 (`MethodNotAllowed`) |
 //!
-//! `Nsid::ComAtprotoModerationCreateReport` remains in the
+//! `Nsid::CreateReport` remains in the
 //! NSID enum because the membership middleware's NSID-aware
 //! dispatch still references it (different membership table for
 //! createReport vs the tools.ozone NSIDs); the gateway router
@@ -173,7 +173,7 @@ fn routes() -> Router {
     // when the JWT issuer is in `xrpc_trusted_pdses`. Mounting on
     // both routers panicked at startup via `Router::merge`'s
     // duplicate-route detector. The membership middleware's
-    // NSID-aware dispatch retains the `Nsid::ComAtprotoModerationCreateReport`
+    // NSID-aware dispatch retains the `Nsid::CreateReport`
     // arm — the variant is still part of the closed enum even
     // though the gateway router doesn't route to it.
     Router::new()

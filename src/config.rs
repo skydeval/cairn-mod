@@ -303,14 +303,17 @@ pub struct PdsAdminOzoneToml {
 ///   scheme constraint at this layer — protocol parity with
 ///   `pds_url` will tighten in v1.8.2 once Aurora-Locus
 ///   advertises a stable scheme posture);
-/// - reads the env vars named by `client_id_env` and
-///   `client_secret_env`, rejecting empty/unset values and
-///   the same-env-var-twice misconfiguration;
-/// - validates each scope as a non-empty wire string with the
-///   `atproto:` prefix (typed validation lands at the OAuth
-///   flow's first consumer step);
-/// - parses `capability_refresh_interval` as a duration string
-///   (default `"1h"`, lower-bound `"10s"`);
+/// - rejects the removed v1.7-era OAuth keys (`client_id_env`,
+///   `client_secret_env`, `scopes`) with an error naming the
+///   offending key and the service-auth replacements;
+/// - syntactically validates `service_did` and
+///   `target_service_did` (`did:<method>:<identifier>`);
+/// - checks the env var named by `service_signing_key_env` is
+///   set and non-empty (the key bytes themselves are parsed by
+///   `RustBackend::new` at construction);
+/// - parses `request_timeout` (default `"30s"`, bounds 1s..=5m)
+///   and `capability_refresh_interval` (default `"1h"`,
+///   lower-bound `"10s"`) as duration strings;
 /// - cross-validates `pinned_versions` against
 ///   `required_capabilities` for family-name consistency;
 /// - enforces `acknowledge_v1_8_1_audit_divergence = true`
@@ -318,10 +321,10 @@ pub struct PdsAdminOzoneToml {
 ///   (the v1.8.1 inspector-mode hard-stop).
 ///
 /// Fields use serde defaults where possible to keep the TOML
-/// surface ergonomic. The `#[serde(rename = "url")]` on
-/// `pds_url` matches the v1.8 umbrella's wire-key choice while
-/// keeping the Rust field name distinct from the [`url::Url`]
-/// type that wraps it at the runtime layer.
+/// surface ergonomic. The wire key for the URL field is `url`
+/// (per the v1.8 umbrella's `[pds_admin.rust]` surface
+/// decision); the runtime [`crate::pds_admin::RustBackendConfig`]
+/// holds it as a parsed [`url::Url`] under the `pds_url` name.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct PdsAdminRustToml {
     /// Base URL of the Rust PDS this cairn-mod talks to.
@@ -330,20 +333,39 @@ pub struct PdsAdminRustToml {
     /// while the runtime [`crate::pds_admin::RustBackendConfig`]
     /// holds it as a parsed [`url::Url`].
     pub url: String,
-    /// Name of the env var holding the OAuth client identifier
-    /// for cairn-mod's RustBackend client. Empty or unset
-    /// values are rejected at config load.
-    pub client_id_env: String,
-    /// Name of the env var holding the OAuth client secret.
-    /// Distinct from `client_id_env`; naming both fields with
-    /// the same env-var name is rejected as a misconfiguration.
-    pub client_secret_env: String,
-    /// OAuth scopes to request from the Rust PDS's issuer.
-    /// Required, non-empty. Each scope is validated
-    /// structurally (non-empty wire string, `atproto:` family
-    /// prefix); the typed `OAuthScope` parse lands at the
-    /// OAuth flow's first consumer step.
-    pub scopes: Vec<String>,
+    /// cairn-mod's service DID — the `iss` of every minted
+    /// ES256K service-auth JWT. A literal DID string (DIDs are
+    /// not secrets, so no env indirection).
+    pub service_did: String,
+    /// Name of the env var holding cairn-mod's hex-encoded
+    /// secp256k1 private key (64 hex chars / 32 bytes). Empty
+    /// or unset values are rejected at config load; the key
+    /// bytes are parsed at backend construction.
+    pub service_signing_key_env: String,
+    /// Where cairn-mod's DID document is resolvable, for DID
+    /// methods that need an operator-supplied URL (`did:web`
+    /// typically does; `did:plc` resolves via the PLC
+    /// directory). Optional.
+    #[serde(default)]
+    pub service_did_document_url: Option<String>,
+    /// The target PDS's service DID — the `aud` of every minted
+    /// JWT. Mandatory; there is no discovery endpoint for it.
+    pub target_service_did: String,
+    /// Per-request HTTP timeout. Default `"30s"`; bounds
+    /// 1s..=5m. Parses as a human-readable duration string.
+    #[serde(default)]
+    pub request_timeout: Option<String>,
+    /// REMOVED in v1.8.1 (OAuth → service-auth rewrite).
+    /// Accepted at the serde layer only so config load can
+    /// reject it with a migration error naming the key.
+    #[serde(default)]
+    pub client_id_env: Option<String>,
+    /// REMOVED in v1.8.1 — see `client_id_env`.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    /// REMOVED in v1.8.1 — see `client_id_env`.
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
     /// Cap-set refresh cadence. Default `"1h"`. Parses as a
     /// human-readable duration string (e.g. `"30m"`,
     /// `"2h"`). Lower bound `"10s"`; below → config-load
@@ -368,11 +390,11 @@ pub struct PdsAdminRustToml {
     /// `required_capabilities` for family-name consistency.
     #[serde(default)]
     pub pinned_versions: Option<BTreeMap<String, String>>,
-    /// Whether to persist OAuth state (refresh tokens, access
-    /// tokens) across cairn-mod restarts. Default `true`.
-    /// Reading this field is deferred to the OAuth flow's
-    /// first consumer step; v1.8.1 accepts it in config so
-    /// operators can pre-configure.
+    /// Parse+store at v1.8.1 — no runtime code path reads it.
+    /// Default `true`. The consumer wires in at v1.8.6
+    /// alongside audit-trail verification work (umbrella §5.2);
+    /// v1.8.1 accepts it in config so operators can
+    /// pre-configure.
     #[serde(default)]
     pub verification_persist: Option<bool>,
     /// **Required when `enabled = true` and this backend is

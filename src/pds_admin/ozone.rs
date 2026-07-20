@@ -236,7 +236,7 @@ fn synthesize_action_id(did: &str, precipitating_action_id: i64) -> BackendActio
 ///
 /// `message` is optional in the wire shape; the helper substitutes
 /// an empty string when absent.
-fn decode_xrpc_error_envelope(body: &[u8]) -> Option<(String, String)> {
+pub(crate) fn decode_xrpc_error_envelope(body: &[u8]) -> Option<(String, String)> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     let code = v.get("error")?.as_str()?.to_string();
     let message = v
@@ -253,7 +253,7 @@ fn decode_xrpc_error_envelope(body: &[u8]) -> Option<(String, String)> {
 /// HTTP-date. v1.7 only handles integer-seconds — bsky-PDS sends
 /// integers in practice, and the HTTP-date form is rare enough to
 /// punt. `None` on parse failure (caller treats as "no hint").
-fn parse_retry_after_seconds(header: &reqwest::header::HeaderValue) -> Option<u32> {
+pub(crate) fn parse_retry_after_seconds(header: &reqwest::header::HeaderValue) -> Option<u32> {
     header.to_str().ok()?.trim().parse::<u32>().ok()
 }
 

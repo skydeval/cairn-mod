@@ -314,6 +314,7 @@ mod tests {
     use proto_blue_crypto::{K256Keypair, Keypair as _, Signer as _, format_multikey};
 
     use crate::auth::did::{DidDocument, DidResolver, ResolveError, VerificationMethod};
+    use crate::xrpc_gateway::OzoneModerationNsid;
 
     const TEST_PRIV_HEX: &str = "b7e3f1c9a2d84ef50712436589bc1d8f023147b68cafed94a8b603c7159d4e2a";
     const SERVICE_DID: &str = "did:web:cairn.example.com";
@@ -410,12 +411,12 @@ mod tests {
         let svc = build_service();
         let jwt = build_jwt(&valid_claims("tools.ozone.moderation.emitEvent"), "ES256K");
         let claims = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect("valid JWT should verify");
         assert_eq!(claims.iss, ISSUER_DID);
         assert_eq!(claims.aud, SERVICE_DID);
-        assert_eq!(claims.lxm, Nsid::ToolsOzoneModerationEmitEvent);
+        assert_eq!(claims.lxm, Nsid::Ozone(OzoneModerationNsid::EmitEvent));
         assert_eq!(claims.exp, FIXED_NOW + 60);
         assert_eq!(claims.jti, "jti-fixture-1");
         assert_eq!(claims.iat, Some(FIXED_NOW - 5));
@@ -428,7 +429,7 @@ mod tests {
         let svc = build_service();
         let jwt = build_jwt(&valid_claims("tools.ozone.moderation.emitEvent"), "HS256");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("HS256 must be rejected");
         assert!(matches!(err, XrpcAuthError::UnsupportedAlgorithm(ref a) if a == "HS256"));
@@ -439,7 +440,7 @@ mod tests {
         let svc = build_service();
         let jwt = build_jwt(&valid_claims("tools.ozone.moderation.emitEvent"), "RS256");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("RS256 must be rejected");
         assert!(matches!(err, XrpcAuthError::UnsupportedAlgorithm(_)));
@@ -450,7 +451,7 @@ mod tests {
         let svc = build_service();
         let jwt = build_jwt(&valid_claims("tools.ozone.moderation.emitEvent"), "none");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("alg=none must be rejected (the load-bearing check)");
         assert!(matches!(err, XrpcAuthError::UnsupportedAlgorithm(_)));
@@ -477,7 +478,7 @@ mod tests {
         let other_parts: Vec<&str> = other.split('.').collect();
         let tampered = format!("{}.{}.{}", valid_parts[0], valid_parts[1], other_parts[2]);
         let err = svc
-            .verify(&tampered, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&tampered, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("tampered signature must fail verification");
         assert!(matches!(
@@ -495,7 +496,7 @@ mod tests {
         claims["aud"] = serde_json::json!("did:web:other.example.com");
         let jwt = build_jwt(&claims, "ES256K");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("aud mismatch must be rejected");
         match err {
@@ -519,7 +520,7 @@ mod tests {
             "ES256K",
         );
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("lxm mismatch must be rejected");
         assert!(matches!(err, XrpcAuthError::MethodMismatch { .. }));
@@ -535,7 +536,7 @@ mod tests {
             "ES256K",
         );
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("lxm not on v1.7 allowlist must be rejected");
         match err {
@@ -556,7 +557,7 @@ mod tests {
         claims["exp"] = serde_json::json!(FIXED_NOW - 100);
         let jwt = build_jwt(&claims, "ES256K");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("expired JWT must be rejected");
         match err {
@@ -577,7 +578,9 @@ mod tests {
         let mut claims = valid_claims("tools.ozone.moderation.emitEvent");
         claims["exp"] = serde_json::json!(FIXED_NOW - 10); // 10s ago, well within 30s skew
         let jwt = build_jwt(&claims, "ES256K");
-        let res = svc.verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent).await;
+        let res = svc
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
+            .await;
         assert!(
             res.is_ok(),
             "exp 10s ago should pass within 30s skew: got {res:?}"
@@ -604,7 +607,7 @@ mod tests {
         });
         let jwt = build_jwt(&claims, "ES256K");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("missing aud must be rejected");
         assert!(matches!(err, XrpcAuthError::InvalidJwtStructure(_)));
@@ -621,7 +624,7 @@ mod tests {
         claims["iss"] = serde_json::json!("did:plc:notinresolver000000000000");
         let jwt = build_jwt(&claims, "ES256K");
         let err = svc
-            .verify(&jwt, Nsid::ToolsOzoneModerationEmitEvent)
+            .verify(&jwt, Nsid::Ozone(OzoneModerationNsid::EmitEvent))
             .await
             .expect_err("unknown issuer DID must fail resolution");
         assert!(matches!(err, XrpcAuthError::DidResolutionFailed { .. }));

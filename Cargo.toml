@@ -81,6 +81,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
 ] }
 lru = "0.16"
+# secp256k1 for ES256K service-auth JWT signing (v1.8.1, §4.2).
+# Version matches Aurora-Locus's pin so both sides produce/parse the
+# same ECDSA signature encoding (DER, per Aurora's verify_service_jwt).
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
 url = "2"
 async-trait = "0.1"
 dirs = "6"
