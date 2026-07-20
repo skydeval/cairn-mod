@@ -60,6 +60,26 @@ pub mod code {
     /// exit code so monitoring/CI can branch on integrity-failure
     /// (chain broken — operational alert) vs. generic CLI error.
     pub const AUDIT_DIVERGENCE: i32 = 15;
+    /// v1.8.3 read subcommands: the configured PDS doesn't
+    /// advertise the capability the command needs
+    /// (`moderator-activity` for the query surfaces). Operators
+    /// re-check after the PDS upgrades or the next capability
+    /// refresh.
+    ///
+    /// NOTE: the v1.8.3 design doc assigned 14/15/16 for the three
+    /// backend codes, but 14 (`SERVICE_RECORD_UNREACHABLE`) and 15
+    /// (`AUDIT_DIVERGENCE`) were already taken above — corrected
+    /// to 16/17/18 at implementation.
+    pub const BACKEND_CAPABILITY_NOT_ADVERTISED: i32 = 16;
+    /// v1.8.3 read subcommands: the configured backend does not
+    /// implement the method (`OzoneBackend` read stubs return
+    /// this — the Ozone read surface is not colocated with
+    /// bsky-PDS). Switch backends if the surface is needed.
+    pub const BACKEND_UNSUPPORTED: i32 = 17;
+    /// v1.8.3 read subcommands: non-retryable upstream-state
+    /// rejection (`BackendError::Terminal`). Investigate before
+    /// re-invoking.
+    pub const BACKEND_TERMINAL: i32 = 18;
 }
 
 /// Error sources the CLI dispatcher knows about. The human-readable
@@ -108,6 +128,13 @@ pub enum CliError {
         #[source]
         source: serde_json::Error,
     },
+    /// A `PdsAdminBackend` call made directly by a CLI subcommand
+    /// failed (v1.8.3 read surfaces). Wraps the backend's own
+    /// error taxonomy; [`CliError::exit_code`] maps variants onto
+    /// the [`code`] table (Auth→AUTH, Validation→SERVER_4XX,
+    /// Transient→NETWORK, plus the three v1.8.3 backend codes).
+    #[error("backend call failed: {0}")]
+    Backend(#[from] crate::pds_admin::BackendError),
     /// Argument-shape failure — malformed CLI inputs, config
     /// validation failures.
     #[error("{0}")]
@@ -266,6 +293,19 @@ impl CliError {
             CliError::KeyLoad(_) => code::INTERNAL,
             CliError::MigrationFailed(_) => code::INTERNAL,
             CliError::LeaseConflict { .. } => code::LEASE_CONFLICT,
+            CliError::Backend(e) => match e {
+                crate::pds_admin::BackendError::Auth(_) => code::AUTH,
+                crate::pds_admin::BackendError::Validation(_) => code::SERVER_4XX,
+                crate::pds_admin::BackendError::Transient(_) => code::NETWORK,
+                crate::pds_admin::BackendError::CapabilityNotAdvertised(_) => {
+                    code::BACKEND_CAPABILITY_NOT_ADVERTISED
+                }
+                crate::pds_admin::BackendError::Unsupported => code::BACKEND_UNSUPPORTED,
+                crate::pds_admin::BackendError::Terminal(_)
+                | crate::pds_admin::BackendError::ArchitecturallyForbidden(_) => {
+                    code::BACKEND_TERMINAL
+                }
+            },
             CliError::BindFailed { .. } => code::NETWORK,
             CliError::Startup(_) => code::INTERNAL,
             CliError::ServiceRecordDrift { .. } => code::SERVICE_RECORD_DRIFT,

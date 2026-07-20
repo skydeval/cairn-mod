@@ -404,6 +404,10 @@ async fn handle_label(
         duration_iso: None,
         notes: comment,
         report_ids: Vec::new(),
+        // Inbound emitEvent is repoRef-only (account subjects; see
+        // the subject validation above) — no record CID exists on
+        // this path (v1.8.3 §4.5).
+        subject_cid: None,
     };
 
     match writer.record_action(req).await {
@@ -443,6 +447,10 @@ async fn handle_takedown(
         duration_iso,
         notes: comment,
         report_ids: Vec::new(),
+        // Inbound emitEvent is repoRef-only (account subjects; see
+        // the subject validation above) — no record CID exists on
+        // this path (v1.8.3 §4.5).
+        subject_cid: None,
     };
 
     match writer.record_action(req).await {
@@ -512,6 +520,10 @@ async fn handle_comment(
         duration_iso: None,
         notes: Some(comment),
         report_ids: Vec::new(),
+        // Inbound emitEvent is repoRef-only (account subjects; see
+        // the subject validation above) — no record CID exists on
+        // this path (v1.8.3 §4.5).
+        subject_cid: None,
     };
 
     match writer.record_action(req).await {

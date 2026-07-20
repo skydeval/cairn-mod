@@ -12,7 +12,7 @@ use cairn_mod::cli::{
     login::{self, post_login_warning},
     logout::{self, LogoutOutcome},
     moderator, moderator_action, moderator_events, moderator_pending, operator_login,
-    pds_admin as cli_pds_admin,
+    pds_admin as cli_pds_admin, pds_admin_reads as cli_pds_admin_reads,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, trust_chain,
@@ -177,6 +177,91 @@ enum PdsAdminSub {
     /// no first-class "restore" action_type — this resolves to a
     /// `revoke_action` of the most-recent suspension row.
     Restore(PdsAdminRestoreArgs),
+    /// Query the configured PDS-admin backend's moderation event
+    /// stream (v1.8.3; RustBackend via
+    /// tools.aurora.moderator.queryEvents — Unsupported on Ozone).
+    Events {
+        #[command(subcommand)]
+        sub: PdsAdminEventsSub,
+    },
+    /// Query the configured PDS-admin backend's per-DID moderation
+    /// statuses (v1.8.3; RustBackend via
+    /// tools.aurora.moderator.queryStatuses — Unsupported on Ozone).
+    Statuses {
+        #[command(subcommand)]
+        sub: PdsAdminStatusesSub,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminEventsSub {
+    /// Fetch a page of moderation events from the upstream PDS.
+    Query(PdsAdminEventsQueryArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminStatusesSub {
+    /// Fetch a page of per-DID moderation statuses from the
+    /// upstream PDS.
+    Query(PdsAdminStatusesQueryArgs),
+}
+
+/// Flags map 1:1 onto Aurora's `QueryEventsParams`
+/// (aurora_moderator.rs:188-206); values pass through verbatim.
+#[derive(Debug, Args)]
+struct PdsAdminEventsQueryArgs {
+    /// Filter by event type (snake_case value, e.g. `account_takedown`).
+    #[arg(long = "event-type")]
+    event_type: Option<String>,
+    /// Filter by actor DID.
+    #[arg(long)]
+    actor: Option<String>,
+    /// Filter by subject DID.
+    #[arg(long = "subject-did")]
+    subject_did: Option<String>,
+    /// Lower bound on created_at (inclusive), RFC3339.
+    #[arg(long)]
+    after: Option<String>,
+    /// Upper bound on created_at (inclusive), RFC3339.
+    #[arg(long)]
+    before: Option<String>,
+    /// Opaque pagination cursor from a previous page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Page size (upstream default 50, capped at 100).
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Flags map 1:1 onto Aurora's `QueryStatusesParams`
+/// (aurora_moderator.rs:480-499).
+#[derive(Debug, Args)]
+struct PdsAdminStatusesQueryArgs {
+    /// Filter by subject DID.
+    #[arg(long)]
+    did: Option<String>,
+    /// Subject category: account | record | blob (lowercase wire
+    /// values; record/blob currently yield empty results upstream).
+    #[arg(long = "subject-type")]
+    subject_type: Option<String>,
+    /// Filter by action type (e.g. `takedown`, `suspend`).
+    #[arg(long)]
+    action: Option<String>,
+    /// Include reversed actions (upstream default: true).
+    #[arg(long = "include-reversed")]
+    include_reversed: Option<bool>,
+    /// Opaque pagination cursor from a previous page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Page size (upstream default 50, capped at 100).
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1145,6 +1230,18 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::PdsAdmin {
             sub: PdsAdminSub::Restore(args),
         } => run_pds_admin_restore(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Events {
+                    sub: PdsAdminEventsSub::Query(args),
+                },
+        } => run_pds_admin_events_query(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Statuses {
+                    sub: PdsAdminStatusesSub::Query(args),
+                },
+        } => run_pds_admin_statuses_query(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -1164,6 +1261,37 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
             sub: XrpcMembershipSub::List(args),
         } => run_xrpc_pdses_list(args).await,
     }
+}
+
+async fn run_pds_admin_events_query(args: PdsAdminEventsQueryArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let filter = cairn_mod::pds_admin::rust::read_types::QueryEventsFilter {
+        event_type: args.event_type,
+        actor: args.actor,
+        subject_did: args.subject_did,
+        after: args.after,
+        before: args.before,
+    };
+    let rendered =
+        cli_pds_admin_reads::events_query(&config, filter, args.cursor.as_deref(), args.limit)
+            .await?;
+    println!("{rendered}");
+    Ok(())
+}
+
+async fn run_pds_admin_statuses_query(args: PdsAdminStatusesQueryArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let filter = cairn_mod::pds_admin::rust::read_types::QueryStatusesFilter {
+        did: args.did,
+        subject_type: args.subject_type,
+        action: args.action,
+        include_reversed: args.include_reversed,
+    };
+    let rendered =
+        cli_pds_admin_reads::statuses_query(&config, filter, args.cursor.as_deref(), args.limit)
+            .await?;
+    println!("{rendered}");
+    Ok(())
 }
 
 // ===========================================================================

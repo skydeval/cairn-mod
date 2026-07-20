@@ -185,6 +185,7 @@ async fn record(
         duration_iso: duration_iso.map(String::from),
         notes: notes.map(String::from),
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     h.writer.record_action(req).await.expect("record").action_id
 }
@@ -527,6 +528,7 @@ async fn created_by_filter_narrows_to_one_moderator() {
         duration_iso: None,
         notes: None,
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     h.writer.record_action(req).await.expect("record");
 
@@ -674,6 +676,7 @@ async fn record_level_subject_yields_strong_ref_in_event_view() {
         duration_iso: None,
         notes: None,
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     h.writer.record_action(req).await.expect("record");
 
@@ -713,6 +716,7 @@ async fn include_all_user_records_expands_subject_filter() {
         duration_iso: None,
         notes: None,
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     h.writer.record_action(req).await.expect("record");
 

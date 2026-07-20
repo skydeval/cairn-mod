@@ -18,6 +18,9 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::rust::read_types::{
+    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, StatusWithContext,
+};
 use super::types::Subject;
 
 /// Backend-specific identifier for a recorded enforcement
@@ -719,6 +722,36 @@ pub trait PdsAdminBackend: Send + Sync {
     /// [`apply_label`](Self::apply_label) — cairn-mod's
     /// `subscribeLabels` is the canonical surface.
     async fn negate_label(&self, subject: &Subject, val: &str) -> Result<(), BackendError>;
+
+    /// Read the upstream PDS's moderation event stream (v1.8.3,
+    /// §4.1) — `tools.aurora.moderator.queryEvents` on the Rust
+    /// backend. Non-mutating; writes no `pds_admin_audit` row.
+    ///
+    /// `filter` narrows by event type / actor / subject / time
+    /// range; `cursor` and `limit` ride Aurora's standard
+    /// pagination (`limit` default 50, capped at 100 upstream).
+    /// `OzoneBackend` returns [`BackendError::Unsupported`] —
+    /// the Ozone read surface is not colocated with bsky-PDS and
+    /// v1.7's config has no separate Ozone-service URL.
+    async fn query_events(
+        &self,
+        filter: QueryEventsFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<EventWithContext>, BackendError>;
+
+    /// Read the upstream PDS's per-DID moderation status rows
+    /// (v1.8.3, §4.1) — `tools.aurora.moderator.queryStatuses` on
+    /// the Rust backend. Account-scoped only on Aurora's side
+    /// (record/blob filters yield empty results upstream). Same
+    /// non-mutating / `Unsupported`-on-Ozone posture as
+    /// [`Self::query_events`].
+    async fn query_statuses(
+        &self,
+        filter: QueryStatusesFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<StatusWithContext>, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///

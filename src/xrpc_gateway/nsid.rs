@@ -86,6 +86,12 @@ pub enum AuroraNsid {
     /// dispatches takedowns/suspensions/restores/record
     /// takedowns to.
     AdminEmitEvent,
+    /// `tools.aurora.moderator.queryEvents` — moderator
+    /// event-stream read (v1.8.3).
+    ModeratorQueryEvents,
+    /// `tools.aurora.moderator.queryStatuses` — per-DID
+    /// moderation-status read (v1.8.3).
+    ModeratorQueryStatuses,
 }
 
 impl AuroraNsid {
@@ -97,6 +103,8 @@ impl AuroraNsid {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::AdminEmitEvent => Self::NSID_STR,
+            Self::ModeratorQueryEvents => "tools.aurora.moderator.queryEvents",
+            Self::ModeratorQueryStatuses => "tools.aurora.moderator.queryStatuses",
         }
     }
 }
@@ -149,9 +157,13 @@ impl Nsid {
             Self::Ozone(OzoneModerationNsid::QueryStatuses | OzoneModerationNsid::QueryEvents) => {
                 Method::GET
             }
-            // Outbound-referenced only at v1.8.2 (never produced by
-            // from_path_segment); emitEvent is a mutation.
+            // Outbound-referenced only (never produced by
+            // from_path_segment); emitEvent is a mutation, the
+            // moderator reads are GET.
             Self::Aurora(AuroraNsid::AdminEmitEvent) => Method::POST,
+            Self::Aurora(AuroraNsid::ModeratorQueryEvents | AuroraNsid::ModeratorQueryStatuses) => {
+                Method::GET
+            }
         }
     }
 }

@@ -309,6 +309,7 @@ fn takedown_request() -> RecordActionRequest {
         duration_iso: None,
         notes: Some("repeat offender".into()),
         report_ids: vec![],
+        subject_cid: None,
     }
 }
 
@@ -576,6 +577,7 @@ fn temp_suspension_request(duration_iso: &str) -> RecordActionRequest {
         duration_iso: Some(duration_iso.into()),
         notes: Some("repeat offender".into()),
         report_ids: vec![],
+        subject_cid: None,
     }
 }
 

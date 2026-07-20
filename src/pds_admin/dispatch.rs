@@ -788,6 +788,34 @@ mod tests {
             unimplemented!("RecordingBackend test stub: probe not exercised by dispatch tests")
         }
 
+        async fn query_events(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::QueryEventsFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::EventWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub query_events")
+        }
+
+        async fn query_statuses(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::QueryStatusesFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::StatusWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub query_statuses")
+        }
+
         async fn takedown_record(
             &self,
             subject: &Subject,
@@ -1424,6 +1452,35 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
             unreachable!("SuspensionRecordingBackend test stub: probe not exercised here")
         }
+
+        async fn query_events(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::QueryEventsFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::EventWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub query_events")
+        }
+
+        async fn query_statuses(
+            &self,
+            _filter: crate::pds_admin::rust::read_types::QueryStatusesFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::read_types::PaginatedResponse<
+                crate::pds_admin::rust::read_types::StatusWithContext,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub query_statuses")
+        }
+
         async fn takedown_record(
             &self,
             _subject: &Subject,

@@ -310,6 +310,13 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // read-side detection of a monotonically-versioned surface with
     // no operator risk in moving forward.
     ("mod-events-emit", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `moderator-activity-v1` on
+    // tools.aurora.moderator.queryEvents; queryStatuses (and
+    // getEvent, unconsumed until v1.8.4) share the family without
+    // re-declaring it (Aurora route attribution, admin.rs:471-491).
+    // v1.8.3's read methods consume it. AutoAdvance: read-only
+    // surface, no operator risk in advancing.
+    ("moderator-activity", CapabilityClassification::AutoAdvance),
 ];
 
 /// Look up a family's classification in the registry.
@@ -659,16 +666,21 @@ mod cross_release_type_tests {
     // ----- CapabilityClassification + registry -----
 
     #[test]
-    fn capability_classifications_registry_v1_8_1_shape() {
+    fn capability_classifications_registry_shape() {
         // Pinned: any change to this constant requires a
         // coordinated release decision (capability-gated trait
         // surface activation, per the v1.8.x rollout plan).
-        // v1.8.1 populates the families v1.8.2 consumes; entries
-        // are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 1);
+        // v1.8.1 populated mod-events-emit (consumed by v1.8.2's
+        // action verbs); v1.8.3 adds moderator-activity (read
+        // methods). Entries are suffix-less family names.
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 2);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[1],
+            ("moderator-activity", CapabilityClassification::AutoAdvance)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that
@@ -685,6 +697,10 @@ mod cross_release_type_tests {
     fn classification_for_finds_v1_8_1_entries() {
         assert_eq!(
             classification_for("mod-events-emit"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            classification_for("moderator-activity"),
             Some(CapabilityClassification::AutoAdvance)
         );
         // The wire string (with suffix) is NOT a family and must

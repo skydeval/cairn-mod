@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_cid FROM reports\n                     WHERE id = ?1 AND subject_uri = ?2 AND subject_cid IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_cid",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9f0e14461cf86a26832862d4f6bfbe09bbd06b347923960b501e5fa3fcf0d918"
+}

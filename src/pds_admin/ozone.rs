@@ -732,6 +732,42 @@ impl PdsAdminBackend for OzoneBackend {
     ///   `map_status_to_backend_error` and `map_reqwest_error`
     ///   helpers (same helpers the mutating methods use; one
     ///   source of truth for error classification).
+    /// v1.8.3 read surface: **not supported on Ozone.** The
+    /// `tools.ozone.moderation.*` read endpoints are an
+    /// Ozone-service surface, not established to be served at the
+    /// operator's bsky-PDS `pds_url`, and v1.7's config has no
+    /// separate Ozone-service URL to target. Honest posture per
+    /// v1.8.3 §4.1/§5.8: `Unsupported` ("switch backends if you
+    /// need this").
+    async fn query_events(
+        &self,
+        _filter: crate::pds_admin::rust::read_types::QueryEventsFilter,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> Result<
+        crate::pds_admin::rust::read_types::PaginatedResponse<
+            crate::pds_admin::rust::read_types::EventWithContext,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Same `Unsupported` posture as [`Self::query_events`].
+    async fn query_statuses(
+        &self,
+        _filter: crate::pds_admin::rust::read_types::QueryStatusesFilter,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> Result<
+        crate::pds_admin::rust::read_types::PaginatedResponse<
+            crate::pds_admin::rust::read_types::StatusWithContext,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
+    }
+
     async fn probe(&self) -> Result<ProbeReport, BackendError> {
         let url = self.xrpc_url("com.atproto.server.describeServer")?;
 

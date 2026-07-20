@@ -43,6 +43,10 @@ struct Input {
     note: Option<String>,
     #[serde(rename = "reportIds", default)]
     report_ids: Vec<i64>,
+    /// Record CID for record-targeted actions (v1.8.3). Optional;
+    /// when absent the writer attempts the report-join fallback.
+    #[serde(default)]
+    cid: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -96,6 +100,7 @@ pub(super) async fn handler(
         duration_iso: input.duration,
         notes: input.note,
         report_ids: input.report_ids,
+        subject_cid: input.cid,
     };
 
     let recorded = match state.writer.record_action(req).await {

@@ -194,6 +194,7 @@ async fn record(
         duration_iso: duration_iso.map(String::from),
         notes: notes.map(String::from),
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     let r = h.writer.record_action(req).await.expect("record action");
     r.action_id
@@ -604,6 +605,7 @@ async fn record_level_subject_yields_strong_ref() {
         duration_iso: None,
         notes: Some("record warning".into()),
         report_ids: Vec::new(),
+        subject_cid: None,
     };
     h.writer.record_action(req).await.expect("record");
 

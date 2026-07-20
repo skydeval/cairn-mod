@@ -449,6 +449,15 @@ pub struct RecordActionRequest {
     pub notes: Option<String>,
     /// Optional report row ids that motivated this action.
     pub report_ids: Vec<i64>,
+    /// Record CID for record-targeted actions (v1.8.3, §4.5).
+    /// `None` for account-level subjects, or when the caller
+    /// doesn't know the CID — the writer then attempts the
+    /// report-join fallback (`reports.subject_cid` via
+    /// `report_ids`) before storing NULL. Both backends' record
+    /// takedown wire shapes require a CID, so a record-targeted
+    /// row that ends up NULL here rejects at dispatch with a
+    /// `validation` outcome (v1.8.2's no-fallback routing).
+    pub subject_cid: Option<String>,
 }
 
 /// Result of a successful [`WriterHandle::record_action`]. The
@@ -2296,17 +2305,45 @@ impl Writer {
         let strike_base_i64 = strike_base as i64;
         let strike_applied_i64 = strike_applied as i64;
         let actor_kind_moderator = "moderator";
+
+        // v1.8.3 §4.5 dual CID sourcing: request-level CID wins;
+        // for record-targeted rows without one, fall back to the
+        // referenced reports' subject_cid (first report whose
+        // subject_uri matches this action's record — matching on
+        // URI so a report about a *different* record can never
+        // donate a wrong CID). Account-level rows stay NULL.
+        let mut resolved_subject_cid: Option<String> = req.subject_cid.clone();
+        if resolved_subject_cid.is_none()
+            && let Some(uri) = subject_uri.as_deref()
+        {
+            for report_id in &req.report_ids {
+                let joined = sqlx::query_scalar!(
+                    "SELECT subject_cid FROM reports
+                     WHERE id = ?1 AND subject_uri = ?2 AND subject_cid IS NOT NULL",
+                    report_id,
+                    uri,
+                )
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(cid) = joined.flatten() {
+                    resolved_subject_cid = Some(cid);
+                    break;
+                }
+            }
+        }
+
         let inserted_id = sqlx::query_scalar!(
             "INSERT INTO subject_actions (
-                subject_did, subject_uri, actor_did, action_type, reason_codes,
+                subject_did, subject_uri, subject_cid, actor_did, action_type, reason_codes,
                 duration, effective_at, expires_at, notes, report_ids,
                 strike_value_base, strike_value_applied, was_dampened,
                 strikes_at_time_of_action, audit_log_id, created_at,
                 actor_kind, triggered_by_policy_rule
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, NULL)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL)
              RETURNING id",
             subject_did,
             subject_uri,
+            resolved_subject_cid,
             req.actor_did,
             action_type_str,
             reason_codes_json,
@@ -2580,12 +2617,12 @@ impl Writer {
                 action_type: req.action_type,
                 subject_did: &subject_did,
                 subject_uri: subject_uri.as_deref(),
-                // subject_actions has no CID column (v1.8.2 §4.5.1
-                // note): the pipeline can never supply a record
-                // CID, so record-targeting rows reject at dispatch
-                // with Validation rather than auto-elevating. A
-                // future CID source slots in here.
-                subject_cid: None,
+                // v1.8.3 §4.5: populated at the write site from the
+                // in-scope value the writer just stored (request
+                // CID or report-join fallback) — no SELECT. Fully
+                // record-shaped rows (uri + cid) now auto-elevate
+                // to takedown_record in the dispatch routing.
+                subject_cid: resolved_subject_cid.as_deref(),
                 reason_codes: &req.reason_codes,
                 notes: req.notes.as_deref(),
                 duration_iso: req.duration_iso.as_deref(),

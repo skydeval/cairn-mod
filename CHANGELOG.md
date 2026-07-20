@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.3 read-side foundation + CID plumbing
+- RustBackend can now read the upstream PDS's moderation surface:
+  `query_events` (moderation event stream) and `query_statuses`
+  (per-DID status rows) via `tools.aurora.moderator.queryEvents` /
+  `queryStatuses`. Both gate on the shared `moderator-activity`
+  capability. OzoneBackend returns `Unsupported` for both (the Ozone
+  read surface is not colocated with bsky-PDS).
+- New CLI subcommands: `cairn pds-admin events query` and
+  `cairn pds-admin statuses query` — query the configured backend
+  directly and print the page as JSON. Filters map 1:1 onto the
+  upstream parameters (`--event-type` takes snake_case values like
+  `account_takedown`; `--subject-type` takes `account`/`record`/`blob`).
+  New exit codes: 16 (capability not advertised), 17 (backend
+  unsupported), 18 (terminal backend error). The v1.8.3 design draft
+  assigned 14/15 but those were already taken by
+  `SERVICE_RECORD_UNREACHABLE`/`AUDIT_DIVERGENCE`.
+- Added `subject_cid` column to `subject_actions` (migration `0009`;
+  the append-only trigger is rebuilt to guard the new column, all
+  existing clauses preserved). Record-targeted actions can now carry
+  the record CID: supply it on `recordAction` (`cid` field), or let
+  the writer derive it from a referenced report about the same record
+  (`reports.subject_cid` join, URI-matched). Fully record-shaped rows
+  (URI + CID) now auto-elevate to `takedown_record` at dispatch;
+  legacy rows without a CID continue to reject with a `validation`
+  outcome rather than escalating to account-level takedown.
+
 ### Added — v1.8.2 protocol parity
 - RustBackend can now execute account takedowns, suspensions, restorations,
   and record takedowns against Rust PDSes (Aurora-Locus and compatible) via

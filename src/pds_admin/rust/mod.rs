@@ -16,9 +16,13 @@
 //! `admin_roles` grant out-of-band (§5.1 of the v1.8.1 doc).
 
 mod emit_event;
+pub mod read_types;
 pub mod service_auth;
 
 use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventResponse, EmitEventSubject};
+use read_types::{
+    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, StatusWithContext,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -57,6 +61,20 @@ const EMIT_EVENT_FAMILY: &str = "mod-events-emit";
 /// Wire string embedded in `CapabilityNotAdvertised` returns when
 /// the target PDS doesn't advertise the emitEvent family.
 const ACCOUNT_ACTION_CAPABILITY: &str = "mod-events-emit-v1";
+
+/// NSIDs of the moderator-read endpoints (v1.8.3, §4.4).
+const QUERY_EVENTS_NSID: &str = "tools.aurora.moderator.queryEvents";
+const QUERY_STATUSES_NSID: &str = "tools.aurora.moderator.queryStatuses";
+
+/// Capability family gating the moderator-read endpoints —
+/// `moderator-activity-v1` ships on queryEvents and is shared by
+/// queryStatuses (and getEvent, unconsumed at v1.8.3) per Aurora's
+/// route attribution at `admin.rs:471-491`.
+const MODERATOR_ACTIVITY_FAMILY: &str = "moderator-activity";
+
+/// Wire string embedded in `CapabilityNotAdvertised` returns for
+/// the read methods.
+const MODERATOR_ACTIVITY_CAPABILITY: &str = "moderator-activity-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -305,6 +323,97 @@ impl RustBackend {
         Ok(parsed.event_id)
     }
 
+    /// Shared moderator-read dispatch (v1.8.3, §4.4): capability
+    /// gate → per-call JWT → **GET with URL query parameters**
+    /// (Aurora's read endpoints take axum `Query` extractors, not
+    /// JSON bodies) → HTTP error mapping → response parse.
+    ///
+    /// Both read endpoints gate on the single shared
+    /// `moderator-activity` family (Aurora attributes the
+    /// extension to queryEvents; queryStatuses shares it without
+    /// re-declaring).
+    async fn dispatch_moderator_read<F, T>(
+        &self,
+        nsid: &'static str,
+        filter: &F,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<T, BackendError>
+    where
+        F: serde::Serialize + Sync,
+        T: serde::de::DeserializeOwned,
+    {
+        // Blocking read — guards never cross an await point.
+        {
+            let caps = self
+                .capabilities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !caps.has(MODERATOR_ACTIVITY_FAMILY) {
+                return Err(BackendError::CapabilityNotAdvertised(
+                    MODERATOR_ACTIVITY_CAPABILITY.to_string(),
+                ));
+            }
+            // Version-selection trivially v1 (§5.1); the read
+            // exercises the machinery for a future v2.
+            let _advertised_version = caps
+                .version_of(MODERATOR_ACTIVITY_FAMILY)
+                .expect("has() returned true for the same family");
+        }
+
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            nsid,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        // Pagination params ride the same query string as the
+        // filter (Aurora flattens PaginationParams into both
+        // param structs).
+        let mut pagination: Vec<(&str, String)> = Vec::with_capacity(2);
+        if let Some(c) = cursor {
+            pagination.push(("cursor", c.to_string()));
+        }
+        if let Some(n) = limit {
+            pagination.push(("limit", n.to_string()));
+        }
+
+        let url = self.xrpc_url(nsid)?;
+        let response = self
+            .client
+            .get(url)
+            .query(filter)
+            .query(&pagination)
+            .bearer_auth(&jwt)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("{nsid} response parse: {e}")))
+    }
+
     /// Construct the full URL for an XRPC method. Same shape as
     /// `OzoneBackend::xrpc_url` — ensure trailing slash, then join
     /// `xrpc/<nsid>`.
@@ -530,6 +639,30 @@ impl PdsAdminBackend for RustBackend {
         Err(BackendError::ArchitecturallyForbidden(
             LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
+    }
+
+    /// Moderator event-stream read via
+    /// `GET tools.aurora.moderator.queryEvents` (v1.8.3).
+    async fn query_events(
+        &self,
+        filter: QueryEventsFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<EventWithContext>, BackendError> {
+        self.dispatch_moderator_read(QUERY_EVENTS_NSID, &filter, cursor, limit)
+            .await
+    }
+
+    /// Per-DID moderation-status read via
+    /// `GET tools.aurora.moderator.queryStatuses` (v1.8.3).
+    async fn query_statuses(
+        &self,
+        filter: QueryStatusesFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PaginatedResponse<StatusWithContext>, BackendError> {
+        self.dispatch_moderator_read(QUERY_STATUSES_NSID, &filter, cursor, limit)
+            .await
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

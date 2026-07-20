@@ -74,6 +74,7 @@ async fn record_takedown(h: &Harness, reasons: &[&str]) -> i64 {
         duration_iso: None,
         notes: None,
         report_ids: vec![],
+        subject_cid: None,
     };
     let resp = h.writer.record_action(req).await.unwrap();
     resp.action_id

@@ -662,3 +662,300 @@ async fn unprobed_backend_still_gates_on_capability() {
         "no HTTP call made"
     );
 }
+
+// =========================================================================
+// v1.8.3 — moderator-read dispatch end-to-end (per-release doc §8)
+// =========================================================================
+
+use cairn_mod::pds_admin::rust::read_types::{
+    EventWithContext, PaginatedResponse, QueryEventsFilter, QueryStatusesFilter, ReadSubject,
+    StatusWithContext,
+};
+
+struct MockReadAurora {
+    events_status: StatusCode,
+    events_body: String,
+    statuses_body: String,
+    /// Full query strings seen, in arrival order.
+    seen_queries: Mutex<Vec<String>>,
+}
+
+async fn read_events_handler(
+    State(state): State<Arc<MockReadAurora>>,
+    uri: axum::http::Uri,
+) -> Response {
+    state
+        .seen_queries
+        .lock()
+        .unwrap()
+        .push(uri.query().unwrap_or("").to_string());
+    (
+        state.events_status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.events_body.clone(),
+    )
+        .into_response()
+}
+
+async fn read_statuses_handler(
+    State(state): State<Arc<MockReadAurora>>,
+    uri: axum::http::Uri,
+) -> Response {
+    state
+        .seen_queries
+        .lock()
+        .unwrap()
+        .push(uri.query().unwrap_or("").to_string());
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.statuses_body.clone(),
+    )
+        .into_response()
+}
+
+/// Mock Aurora with describeCapabilities (canonical, advertising
+/// `moderator-activity-v1`) + both GET read endpoints.
+async fn spawn_read_mock(
+    events_status: StatusCode,
+    events_body: String,
+    statuses_body: String,
+) -> (SocketAddr, Arc<MockReadAurora>) {
+    let read_state = Arc::new(MockReadAurora {
+        events_status,
+        events_body,
+        statuses_body,
+        seen_queries: Mutex::new(Vec::new()),
+    });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: json!({
+                "families": {"tools.aurora.moderator": ["queryEvents", "queryStatuses"]},
+                "extensions": [
+                    {"name": "mod-events-emit-v1"},
+                    {"name": "moderator-activity-v1"}
+                ],
+                "implementation": "aurora-locus",
+                "version": "0.10.0"
+            })
+            .to_string(),
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(describe_capabilities).with_state(desc_state),
+        )
+        .route(
+            "/xrpc/tools.aurora.moderator.queryEvents",
+            get(read_events_handler).with_state(read_state.clone()),
+        )
+        .route(
+            "/xrpc/tools.aurora.moderator.queryStatuses",
+            get(read_statuses_handler).with_state(read_state.clone()),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, read_state)
+}
+
+fn canonical_events_body() -> String {
+    json!({
+        "items": [
+            {
+                "id": 42,
+                "eventType": "account_takedown",
+                "actorDid": "did:web:cairn-mod.example.test",
+                "actorHandle": null,
+                "subject": {"$type": "com.atproto.repo.strongRef",
+                            "uri": "at://did:plc:x/app.bsky.feed.post/r",
+                            "cid": "bafyr"},
+                "subjectHandle": null,
+                "details": {"rationale": "spam"},
+                "createdAt": "2026-07-20T12:00:00Z"
+            }
+        ],
+        "cursor": "next-page"
+    })
+    .to_string()
+}
+
+fn canonical_statuses_body() -> String {
+    json!({
+        "items": [
+            {
+                "id": 7,
+                "did": "did:plc:x",
+                "handle": null,
+                "action": "takedown",
+                "reason": "spam",
+                "moderatedBy": "did:plc:mod",
+                "moderatedByHandle": null,
+                "moderatedAt": "2026-07-20T12:00:00Z",
+                "expiresAt": null,
+                "reversed": false,
+                "reversedAt": null,
+                "reportId": null
+            }
+        ],
+        "cursor": null
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn query_events_end_to_end_with_camel_case_params() {
+    let (addr, state) = spawn_read_mock(
+        StatusCode::OK,
+        canonical_events_body(),
+        canonical_statuses_body(),
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    backend
+        .probe()
+        .await
+        .expect("probe populates capability set");
+
+    let filter = QueryEventsFilter {
+        event_type: Some("account_takedown".to_string()),
+        subject_did: Some("did:plc:x".to_string()),
+        ..Default::default()
+    };
+    let page: PaginatedResponse<EventWithContext> = backend
+        .query_events(filter, Some("cur0"), Some(25))
+        .await
+        .expect("query succeeds");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_type, "account_takedown");
+    assert!(matches!(
+        page.items[0].subject,
+        Some(ReadSubject::Record { ref cid, .. }) if cid == "bafyr"
+    ));
+    assert_eq!(page.cursor.as_deref(), Some("next-page"));
+
+    // Wire query string: camelCase param names, snake_case
+    // event-type VALUE, pagination appended, no fabricated params.
+    let qs = state.seen_queries.lock().unwrap()[0].clone();
+    assert!(qs.contains("eventType=account_takedown"), "{qs}");
+    assert!(qs.contains("subjectDid=did%3Aplc%3Ax"), "{qs}");
+    assert!(qs.contains("cursor=cur0"), "{qs}");
+    assert!(qs.contains("limit=25"), "{qs}");
+    assert!(!qs.contains("sortOrder"), "{qs}");
+}
+
+#[tokio::test]
+async fn query_statuses_end_to_end() {
+    let (addr, state) = spawn_read_mock(
+        StatusCode::OK,
+        canonical_events_body(),
+        canonical_statuses_body(),
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let filter = QueryStatusesFilter {
+        did: Some("did:plc:x".to_string()),
+        subject_type: Some("account".to_string()),
+        include_reversed: Some(true),
+        ..Default::default()
+    };
+    let page: PaginatedResponse<StatusWithContext> = backend
+        .query_statuses(filter, None, None)
+        .await
+        .expect("query succeeds");
+
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].action, "takedown");
+    assert!(page.cursor.is_none());
+
+    let qs = state.seen_queries.lock().unwrap()[0].clone();
+    assert!(qs.contains("subjectType=account"), "{qs}");
+    assert!(qs.contains("includeReversed=true"), "{qs}");
+}
+
+#[tokio::test]
+async fn query_events_outdated_cursor_maps_to_validation_with_error_code() {
+    // OutdatedCursor is HTTP 400 with error field "OutdatedCursor"
+    // (aurora defs.rs:342-350) → Validation with the RemoteError
+    // marker carrying the code (detectable via error_code()).
+    let (addr, _state) = spawn_read_mock(
+        StatusCode::BAD_REQUEST,
+        json!({"error": "OutdatedCursor"}).to_string(),
+        canonical_statuses_body(),
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+
+    let err = backend
+        .query_events(QueryEventsFilter::default(), Some("stale"), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Validation(_)), "{err:?}");
+    assert_eq!(err.error_code(), Some("OutdatedCursor"));
+}
+
+#[tokio::test]
+async fn query_events_5xx_and_429_map_like_v1_8_2() {
+    let (addr, _state) = spawn_read_mock(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        String::new(),
+        canonical_statuses_body(),
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe");
+    let err = backend
+        .query_events(QueryEventsFilter::default(), None, None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Transient(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn unprobed_backend_gates_reads_on_moderator_activity() {
+    let (addr, state) = spawn_read_mock(
+        StatusCode::OK,
+        canonical_events_body(),
+        canonical_statuses_body(),
+    )
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    // No probe → empty capability set → CapabilityNotAdvertised,
+    // and no read HTTP call is made.
+    let err = backend
+        .query_events(QueryEventsFilter::default(), None, None)
+        .await
+        .unwrap_err();
+    match &err {
+        BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "moderator-activity-v1"),
+        other => panic!("expected CapabilityNotAdvertised, got {other:?}"),
+    }
+    assert!(state.seen_queries.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ozone_backend_reads_return_unsupported() {
+    let cfg = cairn_mod::pds_admin::OzoneBackendConfig {
+        pds_url: url::Url::parse("https://bsky.example.test").unwrap(),
+        admin_password: cairn_mod::pds_admin::AdminPassword::new("pw".into()),
+        request_timeout: Duration::from_secs(5),
+    };
+    let ozone = cairn_mod::pds_admin::OzoneBackend::new(&cfg).unwrap();
+    let ev = ozone
+        .query_events(QueryEventsFilter::default(), None, None)
+        .await;
+    assert!(matches!(ev, Err(BackendError::Unsupported)));
+    let st = ozone
+        .query_statuses(QueryStatusesFilter::default(), None, None)
+        .await;
+    assert!(matches!(st, Err(BackendError::Unsupported)));
+}
