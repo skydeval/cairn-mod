@@ -1944,18 +1944,14 @@ async fn run_v185_action(
     let session_path = session_path()?;
     let mut session = session::SessionFile::load(&session_path)?.ok_or(CliError::NotLoggedIn)?;
 
-    let reason =
-        reason.unwrap_or_else(|| cli_pds_admin::PDS_ADMIN_DEFAULT_REASON_CODE.to_string());
+    let reason = reason.unwrap_or_else(|| cli_pds_admin::PDS_ADMIN_DEFAULT_REASON_CODE.to_string());
     let mut submission = build(reason);
     submission.cairn_server_override = cairn_server;
 
     let outcome =
         cli_pds_admin_actions::submit(&pool, &mut session, &session_path, submission).await?;
     if summary {
-        println!(
-            "{}",
-            cli_pds_admin_actions::format_action_summary(&outcome)
-        );
+        println!("{}", cli_pds_admin_actions::format_action_summary(&outcome));
     } else {
         println!("{}", cli_pds_admin_actions::format_action_json(&outcome));
     }
@@ -1989,9 +1985,7 @@ async fn run_pds_admin_accounts_delete(args: PdsAdminAccountsDeleteArgs) -> Resu
     .await
 }
 
-async fn run_pds_admin_blobs_quarantine(
-    args: PdsAdminBlobsQuarantineArgs,
-) -> Result<(), CliError> {
+async fn run_pds_admin_blobs_quarantine(args: PdsAdminBlobsQuarantineArgs) -> Result<(), CliError> {
     run_v185_action(
         args.config.as_deref(),
         args.cairn_server,
@@ -2127,9 +2121,7 @@ async fn run_pds_admin_appeals_resolve(args: PdsAdminAppealsResolveArgs) -> Resu
     .await
 }
 
-async fn run_pds_admin_appeals_escalate(
-    args: PdsAdminAppealsEscalateArgs,
-) -> Result<(), CliError> {
+async fn run_pds_admin_appeals_escalate(args: PdsAdminAppealsEscalateArgs) -> Result<(), CliError> {
     run_v185_action(
         args.config.as_deref(),
         args.cairn_server,

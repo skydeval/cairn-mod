@@ -736,7 +736,8 @@ mod tests {
             Ok(Some(BackendActionId::new(synthetic_id))),
             None,
             started_at,
-            completed_at)
+            completed_at,
+        )
         .await
         .unwrap()
         .id

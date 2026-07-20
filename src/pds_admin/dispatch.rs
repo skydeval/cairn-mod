@@ -408,12 +408,15 @@ fn detail_i64(
     key: &str,
     method: BackendMethod,
 ) -> std::result::Result<i64, BackendError> {
-    detail.get(key).and_then(serde_json::Value::as_i64).ok_or_else(|| {
-        BackendError::Validation(format!(
-            "{} dispatch: action_detail.{key} missing or not an integer",
-            method.as_wire_str()
-        ))
-    })
+    detail
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| {
+            BackendError::Validation(format!(
+                "{} dispatch: action_detail.{key} missing or not an integer",
+                method.as_wire_str()
+            ))
+        })
 }
 
 /// Extract a required string field from an action_detail object.
@@ -422,12 +425,15 @@ fn detail_str<'v>(
     key: &str,
     method: BackendMethod,
 ) -> std::result::Result<&'v str, BackendError> {
-    detail.get(key).and_then(serde_json::Value::as_str).ok_or_else(|| {
-        BackendError::Validation(format!(
-            "{} dispatch: action_detail.{key} missing or not a string",
-            method.as_wire_str()
-        ))
-    })
+    detail
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            BackendError::Validation(format!(
+                "{} dispatch: action_detail.{key} missing or not a string",
+                method.as_wire_str()
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -448,12 +454,10 @@ async fn invoke_backend_method(
     };
     match (method, subject_uri, subject_cid) {
         // Account-verb, account-shaped row.
-        (BackendMethod::TakedownAccount, None, None) => {
-            backend
-                .takedown_account(did, reason, notes, action_id)
-                .await
-                .map(CallOutcome::Id)
-        }
+        (BackendMethod::TakedownAccount, None, None) => backend
+            .takedown_account(did, reason, notes, action_id)
+            .await
+            .map(CallOutcome::Id),
         // Account-verb, fully record-shaped row: auto-elevate.
         // Explicit record-verb, fully record-shaped row: direct.
         (BackendMethod::TakedownAccount, Some(uri), Some(cid))
@@ -479,12 +483,10 @@ async fn invoke_backend_method(
         ))),
         // Suspend: account-level semantics regardless of row shape
         // (v1.7 behavior unchanged per §4.5.1 "other methods").
-        (BackendMethod::SuspendAccount, _, _) => {
-            backend
-                .suspend_account(did, reason, duration_days, notes, action_id)
-                .await
-                .map(CallOutcome::Id)
-        }
+        (BackendMethod::SuspendAccount, _, _) => backend
+            .suspend_account(did, reason, duration_days, notes, action_id)
+            .await
+            .map(CallOutcome::Id),
         // ---- v1.8.5 dispatched verbs ----
         // Account-scoped verbs: account-shaped row required (a
         // record/blob-shaped row under these verbs is operator
@@ -937,6 +939,19 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    /// Canned v1.8.5 ActionResponse for the recording mocks.
+    fn canned_action_response(
+        event_id: &str,
+        cascades: &[&str],
+    ) -> crate::pds_admin::rust::action_types::ActionResponse {
+        crate::pds_admin::rust::action_types::ActionResponse {
+            event_id: event_id.to_string(),
+            audit_entry_id: format!("chain-{event_id}"),
+            snapshots: Vec::new(),
+            cascading_actions: cascades.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     /// Test backend that records every call and returns a
     /// canned response. Lets us verify the dispatch fires the
     /// right method without making any HTTP calls.
@@ -1137,26 +1152,45 @@ mod tests {
             _did: &str,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
         async fn quarantine_blob(
             &self,
-            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
-            _rationale: &str,
-            _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
-            unimplemented!("test backend does not stub v1.8.5 action methods")
+            subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            rationale: &str,
+            precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "quarantine_blob",
+                did: format!("{}#{}", subject.did, subject.cid),
+                reason: rationale.to_string(),
+                action_id: precipitating_action_id,
+            });
+            Ok(canned_action_response("evt-quarantine", &[]))
         }
 
         async fn restore_blob(
             &self,
-            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
-            _prior_action_id: &BackendActionId,
-            _rationale: &str,
+            subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            prior_action_id: &BackendActionId,
+            rationale: &str,
         ) -> std::result::Result<(), BackendError> {
-            unimplemented!("test backend does not stub v1.8.5 action methods")
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "restore_blob",
+                did: format!(
+                    "{}#{}<-{}",
+                    subject.did,
+                    subject.cid,
+                    prior_action_id.as_str()
+                ),
+                reason: rationale.to_string(),
+                action_id: 0,
+            });
+            Ok(())
         }
 
         async fn delete_blob(
@@ -1164,19 +1198,35 @@ mod tests {
             _subject: &crate::pds_admin::rust::action_types::BlobSubject,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
         async fn resolve_report(
             &self,
-            _subject: &Subject,
-            _report_id: i64,
-            _resolution: crate::pds_admin::rust::action_types::ReportResolution,
-            _rationale: &str,
-            _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
-            unimplemented!("test backend does not stub v1.8.5 action methods")
+            subject: &Subject,
+            report_id: i64,
+            resolution: crate::pds_admin::rust::action_types::ReportResolution,
+            rationale: &str,
+            precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "resolve_report",
+                did: format!(
+                    "{}|report={report_id}|{}|uri={:?}",
+                    subject.did,
+                    resolution.as_wire_str(),
+                    subject.at_uri
+                ),
+                reason: rationale.to_string(),
+                action_id: precipitating_action_id,
+            });
+            Ok(canned_action_response(
+                "evt-resolve-report",
+                &["evt-cascade-1"],
+            ))
         }
 
         async fn dismiss_report(
@@ -1185,7 +1235,8 @@ mod tests {
             _report_id: i64,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1196,7 +1247,8 @@ mod tests {
             _decision: crate::pds_admin::rust::action_types::AppealDecision,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1206,7 +1258,8 @@ mod tests {
             _appeal_id: i64,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1218,7 +1271,8 @@ mod tests {
             _body: &str,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1228,7 +1282,8 @@ mod tests {
             _status: crate::pds_admin::rust::action_types::SubjectStatus,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1404,6 +1459,255 @@ mod tests {
             audit_rows[0].backend_action_id.as_ref().unwrap().as_str(),
             "ozone:did:plc:s:42"
         );
+    }
+
+    /// v1.8.5: fixture row for a backend verb (zero strikes,
+    /// optional detail/cid).
+    async fn fixture_verb_action(
+        pool: &Pool<Sqlite>,
+        action_type: &str,
+        subject_cid: Option<&str>,
+        detail: Option<&str>,
+    ) -> i64 {
+        sqlx::query_scalar!(
+            r#"INSERT INTO subject_actions (
+                subject_did, subject_uri, subject_cid, actor_did, action_type, reason_codes,
+                duration, effective_at, expires_at, notes, report_ids,
+                strike_value_base, strike_value_applied, was_dampened,
+                strikes_at_time_of_action, audit_log_id, created_at,
+                actor_kind, triggered_by_policy_rule, action_detail
+             ) VALUES ('did:plc:s', NULL, ?2, 'did:plc:m', ?1, '["spam"]',
+                       NULL, ?4, NULL, NULL, NULL, 0, 0, 0, 0, NULL, ?4,
+                       'moderator', NULL, ?3)
+             RETURNING id AS "id!""#,
+            action_type,
+            subject_cid,
+            detail,
+            1_700_000_000_000_i64
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    fn verb_ctx<'a>(
+        action_id: i64,
+        action_type: ActionType,
+        subject_cid: Option<&'a str>,
+        detail: Option<&'a str>,
+    ) -> DispatchContext<'a> {
+        static REASONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let reasons = REASONS.get_or_init(|| vec!["spam".into()]);
+        DispatchContext {
+            action_id,
+            action_type,
+            subject_did: "did:plc:s",
+            subject_uri: None,
+            subject_cid,
+            reason_codes: reasons,
+            notes: None,
+            duration_iso: None,
+            action_detail: detail,
+        }
+    }
+
+    fn verb_map(
+        action_type: ActionType,
+        method: BackendMethod,
+    ) -> BTreeMap<ActionType, ActionMapEntry> {
+        let mut map = BTreeMap::new();
+        map.insert(action_type, ActionMapEntry::Method(method));
+        map
+    }
+
+    /// v1.8.5: resolve_report happy path — detail parsed, the
+    /// exact subject forwarded, and the full ActionResponse
+    /// persisted on the audit row (backend_action_id = root event
+    /// id; 0010 columns populated including the cascade list).
+    #[tokio::test]
+    async fn dispatch_resolve_report_parses_detail_and_persists_response() {
+        let pool = fresh_pool().await;
+        let detail = r#"{"reportId": 7, "resolution": "resolved"}"#;
+        let action_id = fixture_verb_action(&pool, "resolve_report", None, Some(detail)).await;
+        let backend = RecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(
+                true,
+                verb_map(ActionType::ResolveReport, BackendMethod::ResolveReport),
+            ),
+            backend: backend.clone(),
+        };
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            verb_ctx(action_id, ActionType::ResolveReport, None, Some(detail)),
+        )
+        .await;
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "resolve_report");
+        assert_eq!(calls[0].did, "did:plc:s|report=7|resolved|uri=None");
+        assert_eq!(calls[0].action_id, action_id);
+
+        let audit_rows = crate::pds_admin::audit::list_pds_admin_audit_for_action(&pool, action_id)
+            .await
+            .unwrap();
+        assert_eq!(audit_rows.len(), 1);
+        assert_eq!(
+            audit_rows[0].outcome,
+            crate::pds_admin::AuditOutcome::Success
+        );
+        assert_eq!(
+            audit_rows[0].backend_action_id.as_ref().unwrap().as_str(),
+            "evt-resolve-report"
+        );
+
+        // 0010 columns: upstream audit entry + cascade JSON.
+        let row = sqlx::query!(
+            r#"SELECT upstream_audit_entry_id, cascading_actions_json, snapshots_json
+               FROM pds_admin_audit WHERE id = ?1"#,
+            audit_rows[0].id,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.upstream_audit_entry_id.as_deref(),
+            Some("chain-evt-resolve-report")
+        );
+        assert_eq!(
+            row.cascading_actions_json.as_deref(),
+            Some(r#"["evt-cascade-1"]"#)
+        );
+        assert_eq!(row.snapshots_json.as_deref(), Some("[]"));
+    }
+
+    /// v1.8.5: a verb row without its action_detail payload
+    /// records a validation outcome and never touches the backend.
+    #[tokio::test]
+    async fn dispatch_verb_missing_detail_records_validation() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_verb_action(&pool, "resolve_report", None, None).await;
+        let backend = RecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(
+                true,
+                verb_map(ActionType::ResolveReport, BackendMethod::ResolveReport),
+            ),
+            backend: backend.clone(),
+        };
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            verb_ctx(action_id, ActionType::ResolveReport, None, None),
+        )
+        .await;
+
+        assert!(backend.calls().is_empty());
+        let audit_rows = crate::pds_admin::audit::list_pds_admin_audit_for_action(&pool, action_id)
+            .await
+            .unwrap();
+        assert_eq!(audit_rows.len(), 1);
+        assert_eq!(
+            audit_rows[0].outcome,
+            crate::pds_admin::AuditOutcome::Validation
+        );
+    }
+
+    /// v1.8.5: blob verbs require a CID on the row; a blob-verb
+    /// row without one records validation, no backend call.
+    #[tokio::test]
+    async fn dispatch_blob_without_cid_records_validation() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_verb_action(&pool, "quarantine_blob", None, None).await;
+        let backend = RecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(
+                true,
+                verb_map(ActionType::QuarantineBlob, BackendMethod::QuarantineBlob),
+            ),
+            backend: backend.clone(),
+        };
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            verb_ctx(action_id, ActionType::QuarantineBlob, None, None),
+        )
+        .await;
+
+        assert!(backend.calls().is_empty());
+        let audit_rows = crate::pds_admin::audit::list_pds_admin_audit_for_action(&pool, action_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_rows[0].outcome,
+            crate::pds_admin::AuditOutcome::Validation
+        );
+    }
+
+    /// v1.8.5: quarantine with CID dispatches; restore_blob is
+    /// unit-result — audit row's backend_action_id stays NULL and
+    /// the prior action id from action_detail reaches the trait.
+    #[tokio::test]
+    async fn dispatch_blob_quarantine_and_unit_result_restore() {
+        let pool = fresh_pool().await;
+        let q_id = fixture_verb_action(&pool, "quarantine_blob", Some("bafyblob"), None).await;
+        let backend = RecordingBackend::new();
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(
+                true,
+                verb_map(ActionType::QuarantineBlob, BackendMethod::QuarantineBlob),
+            ),
+            backend: backend.clone(),
+        };
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            verb_ctx(q_id, ActionType::QuarantineBlob, Some("bafyblob"), None),
+        )
+        .await;
+        assert_eq!(backend.calls()[0].method, "quarantine_blob");
+        assert_eq!(backend.calls()[0].did, "did:plc:s#bafyblob");
+
+        let restore_detail = r#"{"priorActionId": "evt-quarantine"}"#;
+        let r_id = fixture_verb_action(
+            &pool,
+            "restore_blob",
+            Some("bafyblob"),
+            Some(restore_detail),
+        )
+        .await;
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(
+                true,
+                verb_map(ActionType::RestoreBlob, BackendMethod::RestoreBlob),
+            ),
+            backend: backend.clone(),
+        };
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            verb_ctx(
+                r_id,
+                ActionType::RestoreBlob,
+                Some("bafyblob"),
+                Some(restore_detail),
+            ),
+        )
+        .await;
+        let calls = backend.calls();
+        assert_eq!(calls[1].method, "restore_blob");
+        assert_eq!(calls[1].did, "did:plc:s#bafyblob<-evt-quarantine");
+
+        let audit_rows = crate::pds_admin::audit::list_pds_admin_audit_for_action(&pool, r_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            audit_rows[0].outcome,
+            crate::pds_admin::AuditOutcome::Success
+        );
+        assert!(audit_rows[0].backend_action_id.is_none());
     }
 
     #[tokio::test]
@@ -1694,7 +1998,8 @@ mod tests {
             Ok(Some(BackendActionId::new("ozone:did:plc:s:42"))),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1753,7 +2058,8 @@ mod tests {
             Err(BackendError::Transient("dns".into())),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1959,7 +2265,8 @@ mod tests {
             _did: &str,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1968,7 +2275,8 @@ mod tests {
             _subject: &crate::pds_admin::rust::action_types::BlobSubject,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1986,7 +2294,8 @@ mod tests {
             _subject: &crate::pds_admin::rust::action_types::BlobSubject,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -1997,7 +2306,8 @@ mod tests {
             _resolution: crate::pds_admin::rust::action_types::ReportResolution,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -2007,7 +2317,8 @@ mod tests {
             _report_id: i64,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -2018,7 +2329,8 @@ mod tests {
             _decision: crate::pds_admin::rust::action_types::AppealDecision,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -2028,7 +2340,8 @@ mod tests {
             _appeal_id: i64,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -2040,7 +2353,8 @@ mod tests {
             _body: &str,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
@@ -2050,7 +2364,8 @@ mod tests {
             _status: crate::pds_admin::rust::action_types::SubjectStatus,
             _rationale: &str,
             _precipitating_action_id: i64,
-        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
             unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 

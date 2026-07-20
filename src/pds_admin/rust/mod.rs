@@ -15,8 +15,8 @@
 //! operator provisions cairn-mod's DID doc and Aurora-side
 //! `admin_roles` grant out-of-band (§5.1 of the v1.8.1 doc).
 
-mod emit_event;
 pub mod action_types;
+mod emit_event;
 pub mod read_types;
 pub mod service_auth;
 

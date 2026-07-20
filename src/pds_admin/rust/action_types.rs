@@ -22,8 +22,8 @@
 //!
 //! [`BlobSubject`] is trait-boundary vocabulary (the blob methods'
 //! subject coordinates); its wire form is
-//! `EmitEventSubject::Blob` in
-//! [`super::emit_event`] (`com.atproto.admin.defs#repoBlobRef`).
+//! the crate-internal `EmitEventSubject::Blob` arm
+//! (`com.atproto.admin.defs#repoBlobRef`).
 
 use serde::{Deserialize, Serialize};
 
@@ -239,8 +239,14 @@ mod tests {
             serde_json::to_value(SubjectStatus::Deactivated).unwrap(),
             json!("deactivated")
         );
-        assert_eq!(SubjectStatus::from_wire_str("active"), Some(SubjectStatus::Active));
+        assert_eq!(
+            SubjectStatus::from_wire_str("active"),
+            Some(SubjectStatus::Active)
+        );
         assert_eq!(ReportResolution::from_wire_str("bogus"), None);
-        assert_eq!(AppealDecision::from_wire_str("deny"), Some(AppealDecision::Deny));
+        assert_eq!(
+            AppealDecision::from_wire_str("deny"),
+            Some(AppealDecision::Deny)
+        );
     }
 }

@@ -2343,7 +2343,7 @@ impl Writer {
         let action_detail_json = req
             .detail
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| Error::Signing(format!("action detail serialize: {e}")))?;
         let inserted_id = sqlx::query_scalar!(

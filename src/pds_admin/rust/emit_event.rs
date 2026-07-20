@@ -413,8 +413,8 @@ mod tests {
                 "record_uri": "at://did:plc:x/app.bsky.feed.post/r"
             })
         );
-        let bare = serde_json::to_value(EmitEventSubject::blob("did:plc:x", "bafyblob", None))
-            .unwrap();
+        let bare =
+            serde_json::to_value(EmitEventSubject::blob("did:plc:x", "bafyblob", None)).unwrap();
         assert!(bare.get("record_uri").is_none());
     }
 }

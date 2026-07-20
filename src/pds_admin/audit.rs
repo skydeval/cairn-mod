@@ -1040,7 +1040,8 @@ mod tests {
             Ok(Some(BackendActionId::new("ozone-evt-1"))),
             None,
             1_000,
-            1_500)
+            1_500,
+        )
         .await
         .unwrap();
 
@@ -1083,7 +1084,8 @@ mod tests {
             Ok(None),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1105,7 +1107,8 @@ mod tests {
             )),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1137,7 +1140,8 @@ mod tests {
             )),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1174,7 +1178,8 @@ mod tests {
             )),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1194,7 +1199,8 @@ mod tests {
             Err(BackendError::Transient("dns timeout".into())),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
 
@@ -1236,7 +1242,8 @@ mod tests {
             Ok(Some(BackendActionId::new("ozone-1"))),
             None,
             1_500,
-            2_000)
+            2_000,
+        )
         .await
         .unwrap();
 
@@ -1292,7 +1299,8 @@ mod tests {
             Ok(Some(BackendActionId::new("evt"))),
             None,
             1,
-            2)
+            2,
+        )
         .await
         .unwrap();
 
@@ -1313,7 +1321,8 @@ mod tests {
             Ok(Some(BackendActionId::new("x"))),
             None,
             10,
-            20)
+            20,
+        )
         .await;
         assert!(res.is_err(), "FK violation must propagate");
     }
@@ -1332,7 +1341,8 @@ mod tests {
             Err(BackendError::Transient("first".into())),
             None,
             10,
-            20)
+            20,
+        )
         .await
         .unwrap();
         record_pds_admin_call(
@@ -1342,7 +1352,8 @@ mod tests {
             Err(BackendError::Transient("second".into())),
             None,
             30,
-            40)
+            40,
+        )
         .await
         .unwrap();
         record_pds_admin_call(
@@ -1352,7 +1363,8 @@ mod tests {
             Ok(Some(BackendActionId::new("third"))),
             None,
             50,
-            60)
+            60,
+        )
         .await
         .unwrap();
 
@@ -1396,7 +1408,8 @@ mod tests {
             Ok(Some(BackendActionId::new("evt"))),
             None,
             1,
-            2)
+            2,
+        )
         .await
         .unwrap();
 
@@ -1421,7 +1434,8 @@ mod tests {
             Ok(Some(BackendActionId::new("evt"))),
             None,
             1,
-            2)
+            2,
+        )
         .await
         .unwrap();
 

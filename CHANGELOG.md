@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.5 action surface enrichment
+- RustBackend now dispatches 14 of Aurora's 16 `emitEvent` action
+  variants: added delete-account, quarantine/restore/delete-blob,
+  resolve/dismiss-report, resolve/escalate-appeal, send-email, and
+  update-subject-status handlers on top of v1.8.2's four. Label
+  operations remain architecturally forbidden (cairn-mod's
+  `subscribeLabels` is the canonical label surface), which caps the
+  dispatched set at 14 by design.
+- New response type `ActionResponse` surfaces Aurora's `eventId`,
+  `auditEntryId`, `snapshots`, and `cascadingActions` (bare event
+  ids — resolve details via `events query`/`events get`). Appeal
+  approvals surface the cascaded reversal's event id. The v1.8.2
+  emit dispatch helper now parses the full response; the v1.8.2
+  methods are unchanged on the surface.
+- Per-action role handling: delete-account and send-email surface
+  Admin-role-insufficient failures as auth errors (exit 5) — those
+  two are Admin-gated upstream; the blob verbs are Moderator-tier.
+- Migration `0010` extends `subject_actions.action_type` and
+  `pds_admin_audit.backend_method` with the ten new values, adds
+  `subject_actions.action_detail` (variant data: report/appeal ids,
+  decisions, email fields, status values), and adds upstream
+  response persistence to `pds_admin_audit`
+  (`upstream_audit_entry_id`, `cascading_actions_json`,
+  `snapshots_json` — the existing `backend_action_id` column keeps
+  the root event id). Both tables are rebuilt with their append-only
+  triggers preserved; the two other tables referencing
+  `subject_actions` are re-created unchanged as part of the rebuild.
+- Ten new `cairn pds-admin` subcommands, all routing through the
+  recordAction writer (writer-owned dispatch + audit): `accounts
+  delete`, `blobs quarantine|restore|delete`, `reports
+  resolve|dismiss`, `appeals resolve|escalate`, `emails send`,
+  `subjects update-status`. Report and appeal subcommands take the
+  target's full subject coordinates (`--uri`/`--cid`) because the
+  upstream validates the embedded id against the subject by variant
+  and identifier. Default output is the full JSON outcome including
+  cascading actions; `--summary` prints a one-liner.
+- **Config note:** `[pds_admin.action_map]` must now cover the ten
+  new action types (map each to its same-named method, or `"skip"`).
+  The coverage rule is unchanged in spirit — every action type is
+  mapped explicitly — the set just grew.
+- Appeals surface is now complete end-to-end: list and inspect
+  appeals (v1.8.4), then resolve or escalate them (v1.8.5).
+- OzoneBackend returns `Unsupported` (exit 17) for all ten new
+  methods; per-method real bsky-PDS-admin mappings were considered
+  and deferred past v1.8.
+- Policy automation cannot propose the new verbs — they are
+  operator commands; `pending_policy_actions` keeps its
+  five-value vocabulary. The new verbs never emit labels and never
+  carry strikes.
+
+
 ### Added — v1.8.4 moderator read surface completion
 - RustBackend now covers every read endpoint under
   `tools.aurora.moderator.*`. New methods: `get_event`,

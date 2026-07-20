@@ -1289,7 +1289,10 @@ fn validated_action_map(
         // label methods. Emit at most once per (action_type,
         // method) combination.
         if let ActionMapEntry::Method(method) = entry
-            && matches!(method, BackendMethod::ApplyLabel | BackendMethod::NegateLabel)
+            && matches!(
+                method,
+                BackendMethod::ApplyLabel | BackendMethod::NegateLabel
+            )
             && warned_methods.insert((action_type, method))
         {
             tracing::warn!(
@@ -1493,8 +1496,9 @@ mod tests {
         assert_eq!(ozone.pds_url.host_str(), Some("bsky.example.test"));
         assert_eq!(ozone.admin_password.as_str(), "secret-value");
         assert_eq!(ozone.request_timeout, Duration::from_secs(10));
-        // All five action types present, all mapped to Skip.
-        assert_eq!(p.action_map.len(), 5);
+        // All fifteen action types present (v1.4's five + v1.8.5's
+        // ten backend verbs), all mapped to Skip.
+        assert_eq!(p.action_map.len(), 15);
         for at in REQUIRED_ACTION_TYPES {
             assert_eq!(p.action_map.get(at), Some(&ActionMapEntry::Skip));
         }

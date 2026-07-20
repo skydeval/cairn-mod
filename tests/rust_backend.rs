@@ -301,6 +301,16 @@ fn rust_backend_config_json(key_env: &str, service_did: &str) -> serde_json::Val
                 "temp_suspension": "suspend_account",
                 "indef_suspension": "suspend_account",
                 "takedown": "takedown_account",
+                            "delete_account": "delete_account",
+                "quarantine_blob": "quarantine_blob",
+                "restore_blob": "restore_blob",
+                "delete_blob": "delete_blob",
+                "resolve_report": "resolve_report",
+                "dismiss_report": "dismiss_report",
+                "resolve_appeal": "resolve_appeal",
+                "escalate_appeal": "escalate_appeal",
+                "send_email": "send_email",
+                "update_subject_status": "update_subject_status",
             },
         },
     })
@@ -1400,6 +1410,374 @@ async fn ozone_backend_v1_8_4_reads_return_unsupported() {
     ));
     assert!(matches!(
         ozone.get_appeal(1).await,
+        Err(BackendError::Unsupported)
+    ));
+}
+
+// =========================================================================
+// v1.8.5 — action-surface enrichment: 10 new emitEvent dispatches (§8)
+// =========================================================================
+
+use cairn_mod::pds_admin::Subject;
+use cairn_mod::pds_admin::rust::action_types::{
+    ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus,
+};
+
+fn emit_success_with_cascade(event_id: &str, cascades: &[&str]) -> String {
+    serde_json::json!({
+        "eventId": event_id,
+        "auditEntryId": "chain-9",
+        "snapshots": [
+            {"subject": {"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:subject"},
+             "snapshotId": "snap-1"}
+        ],
+        "cascadingActions": cascades
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn delete_account_wire_shape_and_full_response() {
+    let (addr, state) = spawn_emit_mock(
+        StatusCode::OK,
+        emit_success_with_cascade("evt-del", &[]),
+        None,
+    )
+    .await;
+    let backend = probed_backend(addr).await;
+
+    let resp: ActionResponse = backend
+        .delete_account("did:plc:subject", "tos-violation", 42)
+        .await
+        .expect("delete_account succeeds");
+    assert_eq!(resp.event_id, "evt-del");
+    assert_eq!(resp.audit_entry_id, "chain-9");
+    assert_eq!(resp.snapshots.len(), 1);
+    assert!(resp.cascading_actions.is_empty());
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    // PascalCase kind discriminator (R3 NEW-R3-1), canonical
+    // subjects array, rationale field, no notes.
+    assert_eq!(body["action"], serde_json::json!({"kind": "DeleteAccount"}));
+    assert_eq!(
+        body["subjects"],
+        serde_json::json!([{"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:subject"}])
+    );
+    assert_eq!(body["rationale"], "tos-violation");
+    assert!(body.get("notes").is_none());
+    assert!(body.get("subject").is_none(), "legacy shape never sent");
+}
+
+#[tokio::test]
+async fn blob_actions_dispatch_repo_blob_ref() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-blob"), None).await;
+    let backend = probed_backend(addr).await;
+
+    let with_uri = BlobSubject {
+        did: "did:plc:subject".to_string(),
+        cid: "bafyblob".to_string(),
+        record_uri: Some("at://did:plc:subject/app.bsky.feed.post/r".to_string()),
+    };
+    backend
+        .quarantine_blob(&with_uri, "malware", 1)
+        .await
+        .expect("quarantine succeeds");
+
+    let bare = BlobSubject {
+        did: "did:plc:subject".to_string(),
+        cid: "bafyblob".to_string(),
+        record_uri: None,
+    };
+    backend
+        .delete_blob(&bare, "csam-hash-match", 2)
+        .await
+        .expect("delete succeeds");
+
+    let bodies = state.emit_requests.lock().unwrap().clone();
+    assert_eq!(
+        bodies[0]["action"],
+        serde_json::json!({"kind": "QuarantineBlob"})
+    );
+    assert_eq!(
+        bodies[0]["subjects"],
+        serde_json::json!([{
+            "$type": "com.atproto.admin.defs#repoBlobRef",
+            "did": "did:plc:subject",
+            "cid": "bafyblob",
+            "record_uri": "at://did:plc:subject/app.bsky.feed.post/r"
+        }])
+    );
+    assert_eq!(
+        bodies[1]["action"],
+        serde_json::json!({"kind": "DeleteBlob"})
+    );
+    assert!(
+        bodies[1]["subjects"][0].get("record_uri").is_none(),
+        "record_uri omitted when absent"
+    );
+}
+
+#[tokio::test]
+async fn restore_blob_returns_unit_and_sends_unit_variant() {
+    let (addr, state) =
+        spawn_emit_mock(StatusCode::OK, emit_success_body("evt-restore"), None).await;
+    let backend = probed_backend(addr).await;
+
+    let blob = BlobSubject {
+        did: "did:plc:subject".to_string(),
+        cid: "bafyblob".to_string(),
+        record_uri: None,
+    };
+    let prior = BackendActionId::PerEvent("evt-quarantine".to_string());
+    backend
+        .restore_blob(&blob, &prior, "appeal upheld")
+        .await
+        .expect("restore succeeds");
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    // Unit variant on the wire; the prior action id never rides it.
+    assert_eq!(body["action"], serde_json::json!({"kind": "RestoreBlob"}));
+    assert!(!body.to_string().contains("evt-quarantine"));
+}
+
+#[tokio::test]
+async fn resolve_report_embedded_id_wire_shape() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-rr"), None).await;
+    let backend = probed_backend(addr).await;
+
+    // Record-targeted report: crate Subject with uri+cid maps to a
+    // strongRef wire subject per Aurora's from_columns precedence.
+    let subject = Subject::record(
+        "did:plc:subject",
+        "at://did:plc:subject/app.bsky.feed.post/r",
+        Some("bafyrec".to_string()),
+    );
+    backend
+        .resolve_report(&subject, 7, ReportResolution::Acknowledged, "reviewed", 3)
+        .await
+        .expect("resolve_report succeeds");
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "ResolveReport", "reportId": 7, "resolution": "acknowledged"})
+    );
+    assert_eq!(body["subjects"][0]["$type"], "com.atproto.repo.strongRef");
+    assert_eq!(body["subjects"][0]["cid"], "bafyrec");
+}
+
+#[tokio::test]
+async fn dismiss_report_blob_subject_via_from_columns_precedence() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-dr"), None).await;
+    let backend = probed_backend(addr).await;
+
+    // cid without uri → Blob wire subject (Aurora's from_columns
+    // precedence, mirrored by wire_subject_from).
+    let subject = Subject {
+        did: "did:plc:subject".to_string(),
+        at_uri: None,
+        cid: Some("bafyblob".to_string()),
+    };
+    backend
+        .dismiss_report(&subject, 8, "duplicate", 4)
+        .await
+        .expect("dismiss_report succeeds");
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "DismissReport", "reportId": 8})
+    );
+    assert_eq!(
+        body["subjects"][0]["$type"],
+        "com.atproto.admin.defs#repoBlobRef"
+    );
+}
+
+#[tokio::test]
+async fn resolve_appeal_approve_surfaces_cascade() {
+    let (addr, state) = spawn_emit_mock(
+        StatusCode::OK,
+        emit_success_with_cascade("evt-appeal", &["evt-reversal"]),
+        None,
+    )
+    .await;
+    let backend = probed_backend(addr).await;
+
+    let subject = Subject::account("did:plc:subject");
+    let resp = backend
+        .resolve_appeal(&subject, 9, AppealDecision::Approve, "appeal upheld", 5)
+        .await
+        .expect("resolve_appeal succeeds");
+    assert_eq!(resp.cascading_actions, vec!["evt-reversal".to_string()]);
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    // Wire field carrying the decision is `resolution`, snake_case
+    // value; kind stays PascalCase.
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "ResolveAppeal", "appealId": 9, "resolution": "approve"})
+    );
+}
+
+#[tokio::test]
+async fn escalate_appeal_and_update_subject_status_wire_shapes() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-x"), None).await;
+    let backend = probed_backend(addr).await;
+
+    backend
+        .escalate_appeal(&Subject::account("did:plc:subject"), 11, "needs senior", 6)
+        .await
+        .expect("escalate succeeds");
+    backend
+        .update_subject_status("did:plc:subject", SubjectStatus::Deactivated, "cooldown", 7)
+        .await
+        .expect("update status succeeds");
+
+    let bodies = state.emit_requests.lock().unwrap().clone();
+    assert_eq!(
+        bodies[0]["action"],
+        serde_json::json!({"kind": "EscalateAppeal", "appealId": 11})
+    );
+    assert_eq!(
+        bodies[1]["action"],
+        serde_json::json!({"kind": "UpdateSubjectStatus", "status": "deactivated"})
+    );
+}
+
+#[tokio::test]
+async fn send_email_wire_shape_omits_absent_template() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-mail"), None).await;
+    let backend = probed_backend(addr).await;
+
+    backend
+        .send_email(
+            "did:plc:subject",
+            None,
+            "Account notice",
+            "Your account was flagged.",
+            "notify-owner",
+            8,
+        )
+        .await
+        .expect("send_email succeeds");
+
+    let body = state.emit_requests.lock().unwrap()[0].clone();
+    // Wire field is `subject` (the email subject line), template
+    // omitted when None; rationale required and separate.
+    assert_eq!(
+        body["action"],
+        serde_json::json!({
+            "kind": "SendEmail",
+            "subject": "Account notice",
+            "body": "Your account was flagged."
+        })
+    );
+    assert_eq!(body["rationale"], "notify-owner");
+}
+
+#[tokio::test]
+async fn admin_gated_methods_map_403_to_auth() {
+    // Aurora's check_role gates DeleteAccount | SendEmail at Admin+
+    // (R1 LB-B); an under-privileged service DID sees 403 → Auth.
+    let forbidden_body = serde_json::json!({
+        "error": "PermissionDenied",
+        "message": "action requires Admin+ role; caller has Moderator"
+    })
+    .to_string();
+    let (addr, _state) = spawn_emit_mock(StatusCode::FORBIDDEN, forbidden_body, None).await;
+    let backend = probed_backend(addr).await;
+
+    let del = backend
+        .delete_account("did:plc:subject", "tos", 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(del, BackendError::Auth(_)), "{del:?}");
+    let mail = backend
+        .send_email("did:plc:subject", None, "s", "b", "r", 2)
+        .await
+        .unwrap_err();
+    assert!(matches!(mail, BackendError::Auth(_)), "{mail:?}");
+}
+
+#[tokio::test]
+async fn record_shaped_subject_without_cid_rejects_before_dispatch() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-nope"), None).await;
+    let backend = probed_backend(addr).await;
+
+    let partial = Subject {
+        did: "did:plc:subject".to_string(),
+        at_uri: Some("at://did:plc:subject/app.bsky.feed.post/r".to_string()),
+        cid: None,
+    };
+    let err = backend
+        .resolve_report(&partial, 7, ReportResolution::Resolved, "r", 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Validation(_)), "{err:?}");
+    assert!(state.emit_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ozone_backend_v1_8_5_actions_return_unsupported() {
+    let cfg = cairn_mod::pds_admin::OzoneBackendConfig {
+        pds_url: url::Url::parse("https://bsky.example.test").unwrap(),
+        admin_password: cairn_mod::pds_admin::AdminPassword::new("pw".into()),
+        request_timeout: Duration::from_secs(5),
+    };
+    let ozone = cairn_mod::pds_admin::OzoneBackend::new(&cfg).unwrap();
+    let blob = BlobSubject {
+        did: "did:plc:x".to_string(),
+        cid: "bafyblob".to_string(),
+        record_uri: None,
+    };
+    let subject = Subject::account("did:plc:x");
+    let prior = BackendActionId::PerEvent("evt-1".to_string());
+
+    assert!(matches!(
+        ozone.delete_account("did:plc:x", "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.quarantine_blob(&blob, "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.restore_blob(&blob, &prior, "r").await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.delete_blob(&blob, "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone
+            .resolve_report(&subject, 1, ReportResolution::Resolved, "r", 1)
+            .await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.dismiss_report(&subject, 1, "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone
+            .resolve_appeal(&subject, 1, AppealDecision::Deny, "r", 1)
+            .await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.escalate_appeal(&subject, 1, "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone.send_email("did:plc:x", None, "s", "b", "r", 1).await,
+        Err(BackendError::Unsupported)
+    ));
+    assert!(matches!(
+        ozone
+            .update_subject_status("did:plc:x", SubjectStatus::Active, "r", 1)
+            .await,
         Err(BackendError::Unsupported)
     ));
 }
