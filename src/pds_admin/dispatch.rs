@@ -871,6 +871,106 @@ mod tests {
             unimplemented!("test backend does not stub get_appeal")
         }
 
+        async fn delete_account(
+            &self,
+            _did: &str,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn quarantine_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn restore_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _prior_action_id: &BackendActionId,
+            _rationale: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn delete_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn resolve_report(
+            &self,
+            _subject: &Subject,
+            _report_id: i64,
+            _resolution: crate::pds_admin::rust::action_types::ReportResolution,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn dismiss_report(
+            &self,
+            _subject: &Subject,
+            _report_id: i64,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn resolve_appeal(
+            &self,
+            _subject: &Subject,
+            _appeal_id: i64,
+            _decision: crate::pds_admin::rust::action_types::AppealDecision,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn escalate_appeal(
+            &self,
+            _subject: &Subject,
+            _appeal_id: i64,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn send_email(
+            &self,
+            _did: &str,
+            _template: Option<&str>,
+            _subject: &str,
+            _body: &str,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn update_subject_status(
+            &self,
+            _did: &str,
+            _status: crate::pds_admin::rust::action_types::SubjectStatus,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
         async fn takedown_record(
             &self,
             subject: &Subject,
@@ -1589,6 +1689,106 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::rust::read_types::AppealDetail, BackendError>
         {
             unimplemented!("test backend does not stub get_appeal")
+        }
+
+        async fn delete_account(
+            &self,
+            _did: &str,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn quarantine_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn restore_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _prior_action_id: &BackendActionId,
+            _rationale: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn delete_blob(
+            &self,
+            _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn resolve_report(
+            &self,
+            _subject: &Subject,
+            _report_id: i64,
+            _resolution: crate::pds_admin::rust::action_types::ReportResolution,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn dismiss_report(
+            &self,
+            _subject: &Subject,
+            _report_id: i64,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn resolve_appeal(
+            &self,
+            _subject: &Subject,
+            _appeal_id: i64,
+            _decision: crate::pds_admin::rust::action_types::AppealDecision,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn escalate_appeal(
+            &self,
+            _subject: &Subject,
+            _appeal_id: i64,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn send_email(
+            &self,
+            _did: &str,
+            _template: Option<&str>,
+            _subject: &str,
+            _body: &str,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
+        }
+
+        async fn update_subject_status(
+            &self,
+            _did: &str,
+            _status: crate::pds_admin::rust::action_types::SubjectStatus,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+            unimplemented!("test backend does not stub v1.8.5 action methods")
         }
 
         async fn takedown_record(

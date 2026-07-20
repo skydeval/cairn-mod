@@ -768,6 +768,110 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.5 action surface: `Unsupported` on Ozone (matches the
+    /// v1.8.3/v1.8.4 read-stub posture, exit 17). Per-method real
+    /// bsky-PDS-admin implementations were considered and deferred
+    /// post-v1.8 (v4 §2.1 item 15).
+    async fn delete_account(
+        &self,
+        _did: &str,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn quarantine_blob(
+        &self,
+        _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn restore_blob(
+        &self,
+        _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+        _prior_action_id: &BackendActionId,
+        _rationale: &str,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn delete_blob(
+        &self,
+        _subject: &crate::pds_admin::rust::action_types::BlobSubject,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn resolve_report(
+        &self,
+        _subject: &Subject,
+        _report_id: i64,
+        _resolution: crate::pds_admin::rust::action_types::ReportResolution,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn dismiss_report(
+        &self,
+        _subject: &Subject,
+        _report_id: i64,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn resolve_appeal(
+        &self,
+        _subject: &Subject,
+        _appeal_id: i64,
+        _decision: crate::pds_admin::rust::action_types::AppealDecision,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn escalate_appeal(
+        &self,
+        _subject: &Subject,
+        _appeal_id: i64,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn send_email(
+        &self,
+        _did: &str,
+        _template: Option<&str>,
+        _subject: &str,
+        _body: &str,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn update_subject_status(
+        &self,
+        _did: &str,
+        _status: crate::pds_admin::rust::action_types::SubjectStatus,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.4 moderator reads: same `Unsupported` posture as the
     /// v1.8.3 reads (no Ozone-service URL in config; honest
     /// "switch backends" refusal).

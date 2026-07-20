@@ -16,10 +16,12 @@
 //! `admin_roles` grant out-of-band (§5.1 of the v1.8.1 doc).
 
 mod emit_event;
+pub mod action_types;
 pub mod read_types;
 pub mod service_auth;
 
-use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventResponse, EmitEventSubject};
+use action_types::{ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus};
+use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventSubject};
 use read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -276,7 +278,7 @@ impl RustBackend {
     async fn dispatch_emit_event(
         &self,
         dispatch: &EmitEventDispatch<'_>,
-    ) -> Result<String, BackendError> {
+    ) -> Result<ActionResponse, BackendError> {
         // Blocking read — guards never cross an await point.
         {
             let caps = self
@@ -334,9 +336,9 @@ impl RustBackend {
             .bytes()
             .await
             .map_err(OzoneBackend::map_reqwest_error)?;
-        let parsed: EmitEventResponse = serde_json::from_slice(&body_bytes)
+        let parsed: ActionResponse = serde_json::from_slice(&body_bytes)
             .map_err(|e| BackendError::Transient(format!("emitEvent response parse: {e}")))?;
-        Ok(parsed.event_id)
+        Ok(parsed)
     }
 
     /// Shared moderator-read dispatch (v1.8.3, §4.4): capability
@@ -536,6 +538,26 @@ impl fmt::Debug for RustBackend {
     }
 }
 
+/// Convert cairn-mod's flat subject coordinates into the wire
+/// subject union (v1.8.5). Mirrors Aurora's `Subject::from_columns`
+/// precedence exactly: a URI means Record (CID mandatory on the
+/// strongRef wire), a CID without URI means Blob, bare DID means
+/// account-level repoRef. Used by the report/appeal methods whose
+/// `subjects[0]` must match the target row's stored subject by
+/// variant AND identifier.
+fn wire_subject_from(subject: &Subject) -> Result<EmitEventSubject<'_>, BackendError> {
+    match (subject.at_uri.as_deref(), subject.cid.as_deref()) {
+        (Some(uri), Some(cid)) => Ok(EmitEventSubject::record(uri, cid)),
+        (Some(uri), None) => Err(BackendError::Validation(format!(
+            "record-shaped subject requires a CID (Aurora's strongRef wire \
+             shape has no optional CID); got at_uri={uri:?} with no cid for did {}",
+            subject.did
+        ))),
+        (None, Some(cid)) => Ok(EmitEventSubject::blob(&subject.did, cid, None)),
+        (None, None) => Ok(EmitEventSubject::account(&subject.did)),
+    }
+}
+
 #[async_trait]
 impl PdsAdminBackend for RustBackend {
     /// Real dispatch (v1.8.2): `{"kind": "TakedownAccount"}` via
@@ -556,8 +578,8 @@ impl PdsAdminBackend for RustBackend {
             rationale: reason,
             metadata: None,
         };
-        let event_id = self.dispatch_emit_event(&dispatch).await?;
-        Ok(BackendActionId::PerEvent(event_id))
+        let response = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(response.event_id))
     }
 
     /// Real dispatch (v1.8.2): `{"kind": "SuspendAccount"}` with
@@ -578,8 +600,8 @@ impl PdsAdminBackend for RustBackend {
             rationale: reason,
             metadata: duration_days.map(|days| serde_json::json!({ "durationDays": days })),
         };
-        let event_id = self.dispatch_emit_event(&dispatch).await?;
-        Ok(BackendActionId::PerEvent(event_id))
+        let response = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(response.event_id))
     }
 
     /// Real dispatch (v1.8.2): `{"kind": "RestoreAccount"}`.
@@ -635,8 +657,8 @@ impl PdsAdminBackend for RustBackend {
             rationale: reason,
             metadata: None,
         };
-        let event_id = self.dispatch_emit_event(&dispatch).await?;
-        Ok(BackendActionId::PerEvent(event_id))
+        let response = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(response.event_id))
     }
 
     async fn apply_label(
@@ -657,6 +679,222 @@ impl PdsAdminBackend for RustBackend {
         Err(BackendError::ArchitecturallyForbidden(
             LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "DeleteAccount"}` —
+    /// Admin+ role floor upstream; a Moderator-role service DID
+    /// gets 403 → `Auth`.
+    async fn delete_account(
+        &self,
+        did: &str,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::DeleteAccount,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "QuarantineBlob"}` with
+    /// a `repoBlobRef` subject.
+    async fn quarantine_blob(
+        &self,
+        subject: &BlobSubject,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::blob(
+                &subject.did,
+                &subject.cid,
+                subject.record_uri.as_deref(),
+            )],
+            action: EmitEventAction::QuarantineBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "RestoreBlob"}`.
+    /// `prior_action_id` is not transmitted (unit variant on
+    /// Aurora's wire); the returned event id is deliberately
+    /// discarded per the v1.8.2 `restore_account` symmetry.
+    async fn restore_blob(
+        &self,
+        subject: &BlobSubject,
+        _prior_action_id: &BackendActionId,
+        rationale: &str,
+    ) -> Result<(), BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::blob(
+                &subject.did,
+                &subject.cid,
+                subject.record_uri.as_deref(),
+            )],
+            action: EmitEventAction::RestoreBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await?;
+        Ok(())
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "DeleteBlob"}` —
+    /// Moderator+ upstream (the Admin gate covers only
+    /// DeleteAccount and SendEmail).
+    async fn delete_blob(
+        &self,
+        subject: &BlobSubject,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::blob(
+                &subject.did,
+                &subject.cid,
+                subject.record_uri.as_deref(),
+            )],
+            action: EmitEventAction::DeleteBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "ResolveReport"}` with
+    /// the report's exact subject in `subjects[0]` — Aurora
+    /// validates variant AND identifier against the report row.
+    async fn resolve_report(
+        &self,
+        subject: &Subject,
+        report_id: i64,
+        resolution: ReportResolution,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let wire_subject = wire_subject_from(subject)?;
+        let dispatch = EmitEventDispatch {
+            subjects: vec![wire_subject],
+            action: EmitEventAction::ResolveReport {
+                report_id,
+                resolution,
+            },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "DismissReport"}` —
+    /// same subject contract as `resolve_report`.
+    async fn dismiss_report(
+        &self,
+        subject: &Subject,
+        report_id: i64,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let wire_subject = wire_subject_from(subject)?;
+        let dispatch = EmitEventDispatch {
+            subjects: vec![wire_subject],
+            action: EmitEventAction::DismissReport { report_id },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "ResolveAppeal"}`.
+    /// `Approve` produces a cascading reversal event id in the
+    /// response. The wire field carrying the decision is named
+    /// `resolution` (Aurora's `AppealResolutionDecision`).
+    async fn resolve_appeal(
+        &self,
+        subject: &Subject,
+        appeal_id: i64,
+        decision: AppealDecision,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let wire_subject = wire_subject_from(subject)?;
+        let dispatch = EmitEventDispatch {
+            subjects: vec![wire_subject],
+            action: EmitEventAction::ResolveAppeal {
+                appeal_id,
+                resolution: decision,
+            },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "EscalateAppeal"}`.
+    async fn escalate_appeal(
+        &self,
+        subject: &Subject,
+        appeal_id: i64,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let wire_subject = wire_subject_from(subject)?;
+        let dispatch = EmitEventDispatch {
+            subjects: vec![wire_subject],
+            action: EmitEventAction::EscalateAppeal { appeal_id },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "SendEmail"}` — Admin+
+    /// role floor upstream. The recipient rides `subjects[0]`
+    /// (repoRef); `subject` is the email subject line on the
+    /// wire.
+    async fn send_email(
+        &self,
+        did: &str,
+        template: Option<&str>,
+        subject: &str,
+        body: &str,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::SendEmail {
+                template: template.map(str::to_string),
+                subject: subject.to_string(),
+                body: body.to_string(),
+            },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
+    }
+
+    /// Real dispatch (v1.8.5): `{"kind": "UpdateSubjectStatus"}`
+    /// — account-only tri-state; Aurora rejects non-repo
+    /// subjects, so the trait takes a bare DID.
+    async fn update_subject_status(
+        &self,
+        did: &str,
+        status: SubjectStatus,
+        rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::UpdateSubjectStatus { status },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
     /// Moderator event-stream read via

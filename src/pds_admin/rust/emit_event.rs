@@ -28,7 +28,7 @@
 //! - Record subjects require a CID (`com.atproto.repo.strongRef`
 //!   with `uri` + `cid`, both mandatory on Aurora's side).
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// One `emitEvent` request body. Borrowed fields — the dispatch
 /// path builds this per call from trait-method arguments and
@@ -68,12 +68,27 @@ pub(crate) enum EmitEventSubject<'a> {
         uri: &'a str,
         cid: &'a str,
     },
+    /// `com.atproto.admin.defs#repoBlobRef` — blob-level
+    /// (v1.8.5). Field order mirrors Aurora's `Subject::Blob`
+    /// (`did`, `cid`, optional `record_uri`); `record_uri` is
+    /// omitted from the wire when absent, matching Aurora's
+    /// `skip_serializing_if` on the same field.
+    Blob {
+        #[serde(rename = "$type")]
+        type_field: &'static str,
+        did: &'a str,
+        cid: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        record_uri: Option<&'a str>,
+    },
 }
 
 /// `$type` string for account subjects.
 pub(crate) const SUBJECT_TYPE_REPO_REF: &str = "com.atproto.admin.defs#repoRef";
 /// `$type` string for record subjects.
 pub(crate) const SUBJECT_TYPE_STRONG_REF: &str = "com.atproto.repo.strongRef";
+/// `$type` string for blob subjects (v1.8.5).
+pub(crate) const SUBJECT_TYPE_REPO_BLOB_REF: &str = "com.atproto.admin.defs#repoBlobRef";
 
 impl<'a> EmitEventSubject<'a> {
     /// Account-level subject.
@@ -94,13 +109,28 @@ impl<'a> EmitEventSubject<'a> {
             cid,
         }
     }
+
+    /// Blob-level subject (v1.8.5).
+    pub fn blob(did: &'a str, cid: &'a str, record_uri: Option<&'a str>) -> Self {
+        Self::Blob {
+            type_field: SUBJECT_TYPE_REPO_BLOB_REF,
+            did,
+            cid,
+            record_uri,
+        }
+    }
 }
 
-/// Action discriminator — mirrors Aurora's `ModEventAction` for
-/// the four v1.8.2 variants. Internally-tagged with `kind`;
-/// unit variants serialize as `{"kind": "<VariantName>"}`,
-/// byte-matching Aurora's deserializer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Action discriminator — mirrors Aurora's `ModEventAction`
+/// (v1.8.2 shipped 4 variants; v1.8.5 adds the 10 remaining
+/// dispatchable ones). Internally-tagged with `kind`; unit
+/// variants serialize as `{"kind": "<VariantName>"}`,
+/// byte-matching Aurora's deserializer. **No `rename_all`** —
+/// the discriminator is the PascalCase variant name (R3
+/// NEW-R3-1; `{"kind": "DeleteAccount"}`, never
+/// `"delete_account"`). Inner-field names carry explicit
+/// camelCase renames mirroring Aurora's per-field attributes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub(crate) enum EmitEventAction {
     TakedownAccount,
@@ -110,24 +140,57 @@ pub(crate) enum EmitEventAction {
     /// Distinct kind; Aurora's dispatch arm validates that the
     /// subject is record-shaped for this action.
     TakedownRecord,
+    // ---- v1.8.5 additions (Aurora `ModEventAction`,
+    // aurora_admin.rs:238-282 at 2ffeb1a) ----
+    /// Admin+ role floor upstream (`check_role`).
+    DeleteAccount,
+    QuarantineBlob,
+    /// Unit variant — the prior action id is trait-boundary
+    /// vocabulary only; nothing rides the wire (same
+    /// non-transmission as `RestoreAccount`).
+    RestoreBlob,
+    DeleteBlob,
+    ResolveReport {
+        #[serde(rename = "reportId")]
+        report_id: i64,
+        resolution: super::action_types::ReportResolution,
+    },
+    DismissReport {
+        #[serde(rename = "reportId")]
+        report_id: i64,
+    },
+    /// Aurora's inner field is named `resolution` (its
+    /// `AppealResolutionDecision`); cairn-mod's trait-side name
+    /// for the value is `decision`, mapped here.
+    ResolveAppeal {
+        #[serde(rename = "appealId")]
+        appeal_id: i64,
+        resolution: super::action_types::AppealDecision,
+    },
+    EscalateAppeal {
+        #[serde(rename = "appealId")]
+        appeal_id: i64,
+    },
+    /// Admin+ role floor upstream. `subject` here is the email
+    /// subject line (Aurora's field name — not `subject_line`,
+    /// R3 NEW-R3-1/NEW-7); the recipient rides `subjects[0]`.
+    SendEmail {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        template: Option<String>,
+        subject: String,
+        body: String,
+    },
+    UpdateSubjectStatus {
+        status: super::action_types::SubjectStatus,
+    },
 }
 
-/// `emitEvent` response — cairn-mod consumes `eventId` (the
-/// [`BackendActionId`](crate::pds_admin::BackendActionId) source)
-/// and deserializes `auditEntryId` for forward-compat with
-/// v1.8.6's cross-chain verify. `snapshots` / `cascadingActions`
-/// are ignored (serde skips unknown fields by default; Aurora
-/// adding response fields later cannot break this parse).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct EmitEventResponse {
-    pub event_id: String,
-    /// Aurora's audit-chain entry id. Unused at v1.8.2; becomes
-    /// cross-chain-verify-relevant at v1.8.6. Deserialized now so
-    /// the field's presence is contract-tested.
-    #[allow(dead_code)]
-    pub audit_entry_id: String,
-}
+// The v1.8.2-era 2-field `EmitEventResponse` mirror is retired in
+// v1.8.5: `dispatch_emit_event` now parses the full 4-field
+// [`crate::pds_admin::rust::action_types::ActionResponse`]
+// (String ids + snapshots + cascadingActions) so the v1.8.5
+// action methods can surface cascades. v1.8.2 call sites extract
+// `.event_id` from the widened response (R3 NEW-R3-3, option a).
 
 #[cfg(test)]
 mod tests {
@@ -235,7 +298,7 @@ mod tests {
             (EmitEventAction::RestoreAccount, "RestoreAccount"),
             (EmitEventAction::TakedownRecord, "TakedownRecord"),
         ] {
-            let v = serde_json::to_value(action).unwrap();
+            let v = serde_json::to_value(&action).unwrap();
             assert_eq!(v, json!({"kind": kind}), "{action:?}");
         }
     }
@@ -256,15 +319,102 @@ mod tests {
 
     #[test]
     fn response_parses_aurora_output_and_tolerates_extra_fields() {
+        // v1.8.5: the dispatch path parses the full ActionResponse
+        // (the 2-field EmitEventResponse mirror is retired).
         let wire = json!({
             "eventId": "evt-42",
             "auditEntryId": "chain-99",
-            "snapshots": [{"snapshotId": 1}],
+            "snapshots": [],
             "cascadingActions": ["evt-43"],
             "someFutureField": true
         });
-        let parsed: EmitEventResponse = serde_json::from_value(wire).unwrap();
+        let parsed: crate::pds_admin::rust::action_types::ActionResponse =
+            serde_json::from_value(wire).unwrap();
         assert_eq!(parsed.event_id, "evt-42");
         assert_eq!(parsed.audit_entry_id, "chain-99");
+        assert_eq!(parsed.cascading_actions, vec!["evt-43".to_string()]);
+    }
+
+    #[test]
+    fn v1_8_5_action_variants_use_pascal_case_kind_and_camel_case_fields() {
+        use crate::pds_admin::rust::action_types::{
+            AppealDecision, ReportResolution, SubjectStatus,
+        };
+        // Unit variants: bare PascalCase kind (R3 NEW-R3-1).
+        for (action, kind) in [
+            (EmitEventAction::DeleteAccount, "DeleteAccount"),
+            (EmitEventAction::QuarantineBlob, "QuarantineBlob"),
+            (EmitEventAction::RestoreBlob, "RestoreBlob"),
+            (EmitEventAction::DeleteBlob, "DeleteBlob"),
+        ] {
+            let v = serde_json::to_value(&action).unwrap();
+            assert_eq!(v, json!({"kind": kind}), "{action:?}");
+        }
+        // Data variants: camelCase inner fields, snake_case enum
+        // VALUES, PascalCase kind.
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::ResolveReport {
+                report_id: 5,
+                resolution: ReportResolution::Resolved,
+            })
+            .unwrap(),
+            json!({"kind": "ResolveReport", "reportId": 5, "resolution": "resolved"})
+        );
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::DismissReport { report_id: 6 }).unwrap(),
+            json!({"kind": "DismissReport", "reportId": 6})
+        );
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::ResolveAppeal {
+                appeal_id: 9,
+                resolution: AppealDecision::Approve,
+            })
+            .unwrap(),
+            json!({"kind": "ResolveAppeal", "appealId": 9, "resolution": "approve"})
+        );
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::EscalateAppeal { appeal_id: 9 }).unwrap(),
+            json!({"kind": "EscalateAppeal", "appealId": 9})
+        );
+        // SendEmail: wire field is `subject` (the email subject
+        // line), template omitted when None.
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::SendEmail {
+                template: None,
+                subject: "Notice".to_string(),
+                body: "Body text".to_string(),
+            })
+            .unwrap(),
+            json!({"kind": "SendEmail", "subject": "Notice", "body": "Body text"})
+        );
+        assert_eq!(
+            serde_json::to_value(EmitEventAction::UpdateSubjectStatus {
+                status: SubjectStatus::Active,
+            })
+            .unwrap(),
+            json!({"kind": "UpdateSubjectStatus", "status": "active"})
+        );
+    }
+
+    #[test]
+    fn blob_subject_serializes_repo_blob_ref() {
+        let full = serde_json::to_value(EmitEventSubject::blob(
+            "did:plc:x",
+            "bafyblob",
+            Some("at://did:plc:x/app.bsky.feed.post/r"),
+        ))
+        .unwrap();
+        assert_eq!(
+            full,
+            json!({
+                "$type": "com.atproto.admin.defs#repoBlobRef",
+                "did": "did:plc:x",
+                "cid": "bafyblob",
+                "record_uri": "at://did:plc:x/app.bsky.feed.post/r"
+            })
+        );
+        let bare = serde_json::to_value(EmitEventSubject::blob("did:plc:x", "bafyblob", None))
+            .unwrap();
+        assert!(bare.get("record_uri").is_none());
     }
 }

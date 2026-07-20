@@ -18,6 +18,9 @@ use std::fmt;
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::rust::action_types::{
+    ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus,
+};
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -724,6 +727,139 @@ pub trait PdsAdminBackend: Send + Sync {
     /// [`apply_label`](Self::apply_label) — cairn-mod's
     /// `subscribeLabels` is the canonical surface.
     async fn negate_label(&self, subject: &Subject, val: &str) -> Result<(), BackendError>;
+
+    /// Permanently delete an account at the PDS side (v1.8.5) —
+    /// `emitEvent{DeleteAccount}`. **Admin+ role floor upstream**
+    /// (Aurora `check_role`: `DeleteAccount | SendEmail`);
+    /// an under-privileged service DID surfaces
+    /// [`BackendError::Auth`] from the upstream 403.
+    /// `precipitating_action_id` is the local `subject_actions`
+    /// row id (same convention as [`Self::takedown_account`]).
+    async fn delete_account(
+        &self,
+        did: &str,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Quarantine a blob (v1.8.5) — `emitEvent{QuarantineBlob}`
+    /// with a `com.atproto.admin.defs#repoBlobRef` subject.
+    /// Moderator+ upstream.
+    async fn quarantine_blob(
+        &self,
+        subject: &BlobSubject,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Restore a quarantined blob (v1.8.5) —
+    /// `emitEvent{RestoreBlob}`. Returns `()` as a deliberate
+    /// v1.8.2-symmetry choice matching [`Self::restore_account`]:
+    /// Aurora does return an event id, and it is deliberately
+    /// discarded at this boundary (correlate restores via the
+    /// audit-chain query paths). `prior_action_id` is
+    /// trait-boundary vocabulary only — nothing rides the wire
+    /// (Aurora's `RestoreBlob` is a unit variant).
+    async fn restore_blob(
+        &self,
+        subject: &BlobSubject,
+        prior_action_id: &BackendActionId,
+        rationale: &str,
+    ) -> Result<(), BackendError>;
+
+    /// Permanently delete a blob (v1.8.5) —
+    /// `emitEvent{DeleteBlob}`. **Moderator+** upstream (R1 LB-B:
+    /// Aurora's Admin gate covers `DeleteAccount | SendEmail`,
+    /// not `DeleteBlob`).
+    async fn delete_blob(
+        &self,
+        subject: &BlobSubject,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Resolve a report (v1.8.5) — `emitEvent{ResolveReport}`.
+    /// `subject` must be the **exact subject of the report**
+    /// (full union — reports can target accounts, records, or
+    /// blobs); Aurora validates `report_id` against `subjects[0]`
+    /// by variant AND identifier and 400s on mismatch.
+    async fn resolve_report(
+        &self,
+        subject: &Subject,
+        report_id: i64,
+        resolution: ReportResolution,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Dismiss a report without action (v1.8.5) —
+    /// `emitEvent{DismissReport}`. Same subject-validation
+    /// contract as [`Self::resolve_report`].
+    async fn dismiss_report(
+        &self,
+        subject: &Subject,
+        report_id: i64,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Resolve an appeal (v1.8.5) — `emitEvent{ResolveAppeal}`.
+    /// `subject` must match the appeal's target, which Aurora
+    /// resolves through three FK paths (moderation → account,
+    /// report → any variant, quarantine → blob) — appeals are
+    /// NOT account-only, hence the full union here.
+    /// `AppealDecision::Approve` triggers Aurora's cascade: the
+    /// original action reverses and its event id arrives in
+    /// [`ActionResponse::cascading_actions`].
+    async fn resolve_appeal(
+        &self,
+        subject: &Subject,
+        appeal_id: i64,
+        decision: AppealDecision,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Escalate an appeal (v1.8.5) — `emitEvent{EscalateAppeal}`.
+    /// Same subject contract as [`Self::resolve_appeal`].
+    async fn escalate_appeal(
+        &self,
+        subject: &Subject,
+        appeal_id: i64,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Send a moderation email to an account (v1.8.5) —
+    /// `emitEvent{SendEmail}`. **Admin+ role floor upstream**
+    /// (email access is Admin-tier per Aurora's role model).
+    /// `subject` is the email subject line (Aurora's wire field
+    /// name); the recipient rides the subjects array. Upstream
+    /// failure modes: recipient with no email on file → 400 →
+    /// [`BackendError::Validation`]; mailer failure rolls the
+    /// upstream transaction back (no event recorded).
+    async fn send_email(
+        &self,
+        did: &str,
+        template: Option<&str>,
+        subject: &str,
+        body: &str,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Set an account's moderation status (v1.8.5) —
+    /// `emitEvent{UpdateSubjectStatus}`. Account-dimension
+    /// tri-state only (Aurora rejects non-repo subjects):
+    /// [`SubjectStatus::Takedown`] / [`SubjectStatus::Deactivated`]
+    /// / [`SubjectStatus::Active`].
+    async fn update_subject_status(
+        &self,
+        did: &str,
+        status: SubjectStatus,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
 
     /// Read the upstream PDS's moderation event stream (v1.8.3,
     /// §4.1) — `tools.aurora.moderator.queryEvents` on the Rust
