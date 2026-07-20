@@ -734,9 +734,9 @@ mod tests {
             precipitating_action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new(synthetic_id))),
+            None,
             started_at,
-            completed_at,
-        )
+            completed_at)
         .await
         .unwrap()
         .id

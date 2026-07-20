@@ -501,6 +501,7 @@ pub async fn record_pds_admin_call(
     precipitating_action_id: i64,
     backend_method: BackendMethod,
     result: std::result::Result<Option<BackendActionId>, BackendError>,
+    response_details: Option<&crate::pds_admin::rust::action_types::ActionResponse>,
     call_started_at: i64,
     call_completed_at: i64,
 ) -> Result<PdsAdminAuditRecord> {
@@ -537,6 +538,7 @@ pub async fn record_pds_admin_call(
         error_code.as_deref(),
         error_message.as_deref(),
         retry_after_seconds,
+        response_details,
         call_started_at,
         call_completed_at,
     )
@@ -577,6 +579,14 @@ async fn perform_insert(
     error_code: Option<&str>,
     error_message: Option<&str>,
     retry_after_seconds: Option<u32>,
+    // v1.8.5: Aurora's full EmitEventOutput for successful
+    // dispatches of the new action methods. Persisted on the
+    // migration-0010 columns (upstream_audit_entry_id,
+    // cascading_actions_json, snapshots_json). Deliberately NOT
+    // part of the row-hash preimage — the v1.7 hash contract
+    // covers the original column set; folding these in is a
+    // v1.8.6 cross-chain-verify decision.
+    response_details: Option<&crate::pds_admin::rust::action_types::ActionResponse>,
     call_started_at: i64,
     call_completed_at: i64,
 ) -> Result<PdsAdminAuditRecord> {
@@ -603,13 +613,23 @@ async fn perform_insert(
 
     let prev_hash_slice: &[u8] = &prev_hash;
     let row_hash_slice: &[u8] = &row_hash;
+    let upstream_audit_entry_id = response_details.map(|r| r.audit_entry_id.as_str());
+    let cascading_actions_json = response_details
+        .map(|r| serde_json::to_string(&r.cascading_actions))
+        .transpose()
+        .map_err(|e| Error::Signing(format!("cascading_actions serialize: {e}")))?;
+    let snapshots_json = response_details
+        .map(|r| serde_json::to_string(&r.snapshots))
+        .transpose()
+        .map_err(|e| Error::Signing(format!("snapshots serialize: {e}")))?;
 
     let id = sqlx::query_scalar!(
         r#"INSERT INTO pds_admin_audit
              (precipitating_action_id, backend_method, backend_action_id,
               outcome, error_code, error_message, retry_after_seconds,
-              prev_hash, row_hash, call_started_at, call_completed_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+              prev_hash, row_hash, call_started_at, call_completed_at,
+              upstream_audit_entry_id, cascading_actions_json, snapshots_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
            RETURNING id AS "id!""#,
         precipitating_action_id,
         backend_method_str,
@@ -622,6 +642,9 @@ async fn perform_insert(
         row_hash_slice,
         call_started_at,
         call_completed_at,
+        upstream_audit_entry_id,
+        cascading_actions_json,
+        snapshots_json,
     )
     .fetch_one(&mut *conn)
     .await
@@ -1015,9 +1038,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("ozone-evt-1"))),
+            None,
             1_000,
-            1_500,
-        )
+            1_500)
         .await
         .unwrap();
 
@@ -1058,9 +1081,9 @@ mod tests {
             action_id,
             BackendMethod::RestoreAccount,
             Ok(None),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1080,9 +1103,9 @@ mod tests {
             Err(BackendError::Transient(
                 "[sub_classification=RateLimited retry_after_seconds=120] slow down".into(),
             )),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1112,9 +1135,9 @@ mod tests {
             Err(BackendError::Validation(
                 "[sub_classification=RemoteError code=InvalidRequest] bad shape".into(),
             )),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1149,9 +1172,9 @@ mod tests {
             Err(BackendError::Terminal(
                 "[sub_classification=RemoteError code=NotFound] subject not found".into(),
             )),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1169,9 +1192,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Err(BackendError::Transient("dns timeout".into())),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1211,9 +1234,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("ozone-1"))),
+            None,
             1_500,
-            2_000,
-        )
+            2_000)
         .await
         .unwrap();
 
@@ -1267,9 +1290,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("evt"))),
+            None,
             1,
-            2,
-        )
+            2)
         .await
         .unwrap();
 
@@ -1288,9 +1311,9 @@ mod tests {
             999,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("x"))),
+            None,
             10,
-            20,
-        )
+            20)
         .await;
         assert!(res.is_err(), "FK violation must propagate");
     }
@@ -1307,9 +1330,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Err(BackendError::Transient("first".into())),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
         record_pds_admin_call(
@@ -1317,9 +1340,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Err(BackendError::Transient("second".into())),
+            None,
             30,
-            40,
-        )
+            40)
         .await
         .unwrap();
         record_pds_admin_call(
@@ -1327,9 +1350,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("third"))),
+            None,
             50,
-            60,
-        )
+            60)
         .await
         .unwrap();
 
@@ -1371,9 +1394,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("evt"))),
+            None,
             1,
-            2,
-        )
+            2)
         .await
         .unwrap();
 
@@ -1396,9 +1419,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("evt"))),
+            None,
             1,
-            2,
-        )
+            2)
         .await
         .unwrap();
 

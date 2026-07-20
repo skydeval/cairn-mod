@@ -60,6 +60,21 @@ const REQUIRED_ACTION_TYPES: &[ActionType] = &[
     ActionType::TempSuspension,
     ActionType::Warning,
     ActionType::Note,
+    // v1.8.5: the ten backend-dispatched verbs. Same coverage rule
+    // as v1.7 — every action type must be mapped explicitly (map
+    // to the same-named method, or "skip" to keep the verb
+    // CLI-recordable without PDS dispatch). Operators upgrading to
+    // v1.8 extend [pds_admin.action_map] with these ten entries.
+    ActionType::DeleteAccount,
+    ActionType::QuarantineBlob,
+    ActionType::RestoreBlob,
+    ActionType::DeleteBlob,
+    ActionType::ResolveReport,
+    ActionType::DismissReport,
+    ActionType::ResolveAppeal,
+    ActionType::EscalateAppeal,
+    ActionType::SendEmail,
+    ActionType::UpdateSubjectStatus,
 ];
 
 /// Resolved PDS-admin policy. Built once at startup via
@@ -423,6 +438,34 @@ pub enum BackendMethod {
     /// `subject_actions` row targets a record with full
     /// coordinates (see `crate::pds_admin::dispatch`).
     TakedownRecord,
+    // ---- v1.8.5 action-surface methods (migration 0010 extends
+    // the pds_admin_audit.backend_method CHECK to match). All
+    // dispatch through emitEvent on the Rust backend; OzoneBackend
+    // returns Unsupported for all ten. ----
+    /// Permanently delete the account (Admin+ upstream).
+    DeleteAccount,
+    /// Quarantine a blob.
+    QuarantineBlob,
+    /// Restore a quarantined blob (unit-result trait method — the
+    /// upstream event id is deliberately discarded, matching
+    /// [`Self::RestoreAccount`]).
+    RestoreBlob,
+    /// Permanently delete a blob (Moderator+ upstream — the Admin
+    /// gate covers only DeleteAccount and SendEmail).
+    DeleteBlob,
+    /// Resolve an upstream report (row detail carries report id +
+    /// resolution).
+    ResolveReport,
+    /// Dismiss an upstream report.
+    DismissReport,
+    /// Resolve an upstream appeal; approve cascades a reversal.
+    ResolveAppeal,
+    /// Escalate an upstream appeal.
+    EscalateAppeal,
+    /// Send a moderation email (Admin+ upstream).
+    SendEmail,
+    /// Set the account's upstream moderation status (tri-state).
+    UpdateSubjectStatus,
 }
 
 impl BackendMethod {
@@ -443,6 +486,16 @@ impl BackendMethod {
             "apply_label" => Some(Self::ApplyLabel),
             "negate_label" => Some(Self::NegateLabel),
             "takedown_record" => Some(Self::TakedownRecord),
+            "delete_account" => Some(Self::DeleteAccount),
+            "quarantine_blob" => Some(Self::QuarantineBlob),
+            "restore_blob" => Some(Self::RestoreBlob),
+            "delete_blob" => Some(Self::DeleteBlob),
+            "resolve_report" => Some(Self::ResolveReport),
+            "dismiss_report" => Some(Self::DismissReport),
+            "resolve_appeal" => Some(Self::ResolveAppeal),
+            "escalate_appeal" => Some(Self::EscalateAppeal),
+            "send_email" => Some(Self::SendEmail),
+            "update_subject_status" => Some(Self::UpdateSubjectStatus),
             _ => None,
         }
     }
@@ -458,6 +511,16 @@ impl BackendMethod {
             Self::ApplyLabel => "apply_label",
             Self::NegateLabel => "negate_label",
             Self::TakedownRecord => "takedown_record",
+            Self::DeleteAccount => "delete_account",
+            Self::QuarantineBlob => "quarantine_blob",
+            Self::RestoreBlob => "restore_blob",
+            Self::DeleteBlob => "delete_blob",
+            Self::ResolveReport => "resolve_report",
+            Self::DismissReport => "dismiss_report",
+            Self::ResolveAppeal => "resolve_appeal",
+            Self::EscalateAppeal => "escalate_appeal",
+            Self::SendEmail => "send_email",
+            Self::UpdateSubjectStatus => "update_subject_status",
         }
     }
 
@@ -473,6 +536,19 @@ impl BackendMethod {
             | Self::RestoreAccount
             | Self::TakedownRecord => true,
             Self::ApplyLabel | Self::NegateLabel => false,
+            // v1.8.5 methods: OzoneBackend returns Unsupported
+            // (real bsky-PDS-admin mappings considered and
+            // deferred post-v1.8).
+            Self::DeleteAccount
+            | Self::QuarantineBlob
+            | Self::RestoreBlob
+            | Self::DeleteBlob
+            | Self::ResolveReport
+            | Self::DismissReport
+            | Self::ResolveAppeal
+            | Self::EscalateAppeal
+            | Self::SendEmail
+            | Self::UpdateSubjectStatus => false,
         }
     }
 
@@ -496,6 +572,20 @@ impl BackendMethod {
         match self {
             Self::TakedownAccount | Self::SuspendAccount | Self::TakedownRecord => true,
             Self::RestoreAccount | Self::ApplyLabel | Self::NegateLabel => false,
+            // v1.8.5: every new method returns ActionResponse
+            // (whose event_id becomes the audit row's
+            // backend_action_id) except RestoreBlob, whose trait
+            // method is unit-result per restore_account symmetry.
+            Self::DeleteAccount
+            | Self::QuarantineBlob
+            | Self::DeleteBlob
+            | Self::ResolveReport
+            | Self::DismissReport
+            | Self::ResolveAppeal
+            | Self::EscalateAppeal
+            | Self::SendEmail
+            | Self::UpdateSubjectStatus => true,
+            Self::RestoreBlob => false,
         }
     }
 }
@@ -1199,7 +1289,7 @@ fn validated_action_map(
         // label methods. Emit at most once per (action_type,
         // method) combination.
         if let ActionMapEntry::Method(method) = entry
-            && !method.is_implemented_by_ozone_v1_7()
+            && matches!(method, BackendMethod::ApplyLabel | BackendMethod::NegateLabel)
             && warned_methods.insert((action_type, method))
         {
             tracing::warn!(

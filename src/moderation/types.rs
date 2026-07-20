@@ -22,10 +22,11 @@
 
 use std::time::SystemTime;
 
-/// Operator-facing graduated-action enum (§F20). Variants match the
-/// `subject_actions.action_type` SQL CHECK values exactly. New
-/// variants here would require a coordinated migration + admin/CLI
-/// surface change, so the set is closed for v1.4.
+/// Operator-facing action enum (§F20 + v1.8.5). Variants match the
+/// `subject_actions.action_type` SQL CHECK values exactly (v1.4's
+/// five graduated actions + v1.8.5's ten backend-dispatched verbs,
+/// migration 0010). Extending this enum requires a coordinated
+/// migration + admin/CLI surface change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ActionType {
     /// Operator-issued warning. Does not carry strikes; surfaced to
@@ -46,6 +47,38 @@ pub enum ActionType {
     /// Account takedown. Carries strikes; not a suspension (does not
     /// trigger the decay-freeze branch in the decay calculator).
     Takedown,
+
+    // ---- v1.8.5 backend-dispatched verbs (migration 0010). None
+    // of these participate in the graduated-strike model: they are
+    // operator commands mirrored to the upstream PDS via the
+    // pds_admin bridge, recorded here so the writer owns dispatch +
+    // audit. `contributes_strikes()` and `is_suspension()` are
+    // false for all ten; the strike columns on their rows are
+    // recorder-zeroed. ----
+    /// Permanent account deletion at the PDS (Admin+ upstream).
+    DeleteAccount,
+    /// Blob quarantine at the PDS.
+    QuarantineBlob,
+    /// Blob restore at the PDS (inverse of quarantine).
+    RestoreBlob,
+    /// Permanent blob deletion at the PDS.
+    DeleteBlob,
+    /// Resolve an upstream report (detail carries report id +
+    /// resolution).
+    ResolveReport,
+    /// Dismiss an upstream report.
+    DismissReport,
+    /// Resolve an upstream appeal (detail carries appeal id +
+    /// decision; approve cascades a reversal upstream).
+    ResolveAppeal,
+    /// Escalate an upstream appeal.
+    EscalateAppeal,
+    /// Send a moderation email to the subject account (Admin+
+    /// upstream).
+    SendEmail,
+    /// Set the account's upstream moderation status
+    /// (takedown / deactivated / active tri-state).
+    UpdateSubjectStatus,
 }
 
 impl ActionType {
@@ -62,7 +95,38 @@ impl ActionType {
         match self {
             ActionType::Note | ActionType::Warning => false,
             ActionType::TempSuspension | ActionType::IndefSuspension | ActionType::Takedown => true,
+            // v1.8.5 backend-dispatched verbs are outside the
+            // graduated-strike model entirely.
+            ActionType::DeleteAccount
+            | ActionType::QuarantineBlob
+            | ActionType::RestoreBlob
+            | ActionType::DeleteBlob
+            | ActionType::ResolveReport
+            | ActionType::DismissReport
+            | ActionType::ResolveAppeal
+            | ActionType::EscalateAppeal
+            | ActionType::SendEmail
+            | ActionType::UpdateSubjectStatus => false,
         }
+    }
+
+    /// Whether this is one of the v1.8.5 backend-dispatched verbs
+    /// (recorded for writer-owned dispatch + audit; outside the
+    /// graduated-strike model; variant data rides `action_detail`).
+    pub fn is_backend_verb(self) -> bool {
+        matches!(
+            self,
+            ActionType::DeleteAccount
+                | ActionType::QuarantineBlob
+                | ActionType::RestoreBlob
+                | ActionType::DeleteBlob
+                | ActionType::ResolveReport
+                | ActionType::DismissReport
+                | ActionType::ResolveAppeal
+                | ActionType::EscalateAppeal
+                | ActionType::SendEmail
+                | ActionType::UpdateSubjectStatus
+        )
     }
 
     /// Whether this action is a suspension (temp or indef). Used by
@@ -87,6 +151,16 @@ impl ActionType {
             ActionType::TempSuspension => "temp_suspension",
             ActionType::IndefSuspension => "indef_suspension",
             ActionType::Takedown => "takedown",
+            ActionType::DeleteAccount => "delete_account",
+            ActionType::QuarantineBlob => "quarantine_blob",
+            ActionType::RestoreBlob => "restore_blob",
+            ActionType::DeleteBlob => "delete_blob",
+            ActionType::ResolveReport => "resolve_report",
+            ActionType::DismissReport => "dismiss_report",
+            ActionType::ResolveAppeal => "resolve_appeal",
+            ActionType::EscalateAppeal => "escalate_appeal",
+            ActionType::SendEmail => "send_email",
+            ActionType::UpdateSubjectStatus => "update_subject_status",
         }
     }
 
@@ -100,6 +174,16 @@ impl ActionType {
             "temp_suspension" => Some(ActionType::TempSuspension),
             "indef_suspension" => Some(ActionType::IndefSuspension),
             "takedown" => Some(ActionType::Takedown),
+            "delete_account" => Some(ActionType::DeleteAccount),
+            "quarantine_blob" => Some(ActionType::QuarantineBlob),
+            "restore_blob" => Some(ActionType::RestoreBlob),
+            "delete_blob" => Some(ActionType::DeleteBlob),
+            "resolve_report" => Some(ActionType::ResolveReport),
+            "dismiss_report" => Some(ActionType::DismissReport),
+            "resolve_appeal" => Some(ActionType::ResolveAppeal),
+            "escalate_appeal" => Some(ActionType::EscalateAppeal),
+            "send_email" => Some(ActionType::SendEmail),
+            "update_subject_status" => Some(ActionType::UpdateSubjectStatus),
             _ => None,
         }
     }

@@ -122,6 +122,14 @@ pub struct DispatchContext<'a> {
     /// `suspend_account`'s wire encoding (#89). `None` for
     /// non-temp_suspension actions.
     pub duration_iso: Option<&'a str>,
+    /// v1.8.5 variant-specific intent payload (`action_detail`
+    /// column, migration 0010): JSON object carrying report id +
+    /// resolution, appeal id + decision, email fields, status
+    /// value, or a prior backend action id for blob restores.
+    /// `None` for the classic five action types. The dispatch
+    /// arms parse the keys they need and reject missing/invalid
+    /// payloads with `Validation` (never silently dropped).
+    pub action_detail: Option<&'a str>,
 }
 
 /// Dispatch the post-recordAction PDS-admin call (if any).
@@ -178,7 +186,20 @@ pub async fn dispatch_after_record_action(
         }
         BackendMethod::TakedownAccount
         | BackendMethod::SuspendAccount
-        | BackendMethod::TakedownRecord => {}
+        | BackendMethod::TakedownRecord
+        // v1.8.5: every new verb is a first-class recordAction
+        // route — the CLI subcommands exist precisely to record
+        // these rows.
+        | BackendMethod::DeleteAccount
+        | BackendMethod::QuarantineBlob
+        | BackendMethod::RestoreBlob
+        | BackendMethod::DeleteBlob
+        | BackendMethod::ResolveReport
+        | BackendMethod::DismissReport
+        | BackendMethod::ResolveAppeal
+        | BackendMethod::EscalateAppeal
+        | BackendMethod::SendEmail
+        | BackendMethod::UpdateSubjectStatus => {}
     }
 
     let reason = ctx.reason_codes.first().map(String::as_str).unwrap_or("");
@@ -239,6 +260,7 @@ pub async fn dispatch_after_record_action(
         reason,
         ctx.notes,
         duration_days,
+        ctx.action_detail,
         ctx.action_id,
     )
     .await;
@@ -254,22 +276,42 @@ pub async fn dispatch_after_record_action(
 
     // Project the per-method success into the unified
     // `Option<BackendActionId>` shape that
-    // `record_pds_admin_call` accepts. Per #87:
-    // `BackendMethod::returns_action_id()` single-sources the
-    // convention. Keyed on `effective_method` so an auto-elevated
-    // record takedown records its returned action id.
-    let unified: std::result::Result<Option<BackendActionId>, BackendError> =
-        match (effective_method.returns_action_id(), call_result) {
-            (true, Ok(id)) => Ok(Some(id)),
-            (false, Ok(_)) => Ok(None),
-            (_, Err(e)) => Err(e),
-        };
+    // `record_pds_admin_call` accepts, plus (v1.8.5) the full
+    // upstream ActionResponse for outcome-ledger persistence.
+    // Per #87: `BackendMethod::returns_action_id()`
+    // single-sources the id convention. Keyed on
+    // `effective_method` so an auto-elevated record takedown
+    // records its returned action id.
+    let (unified, response_details): (
+        std::result::Result<Option<BackendActionId>, BackendError>,
+        Option<crate::pds_admin::rust::action_types::ActionResponse>,
+    ) = match call_result {
+        Ok(CallOutcome::Id(id)) => (
+            if effective_method.returns_action_id() {
+                Ok(Some(id))
+            } else {
+                Ok(None)
+            },
+            None,
+        ),
+        Ok(CallOutcome::Response(resp)) => (
+            if effective_method.returns_action_id() {
+                Ok(Some(BackendActionId::PerEvent(resp.event_id.clone())))
+            } else {
+                Ok(None)
+            },
+            Some(resp),
+        ),
+        Ok(CallOutcome::Unit) => (Ok(None), None),
+        Err(e) => (Err(e), None),
+    };
 
     if let Err(e) = record_pds_admin_call(
         pool,
         ctx.action_id,
         effective_method,
         unified,
+        response_details.as_ref(),
         started_at,
         completed_at,
     )
@@ -311,6 +353,83 @@ pub async fn dispatch_after_record_action(
 /// methods ignore it. Suspend keeps v1.7's account-level
 /// semantics regardless of row shape (record-level suspension is
 /// not a thing on either backend's wire).
+/// Reconstruct the crate-level `Subject` from the row's flat
+/// coordinates (v1.8.5): the report/appeal methods forward it and
+/// the RustBackend's `wire_subject_from` converts to the wire
+/// union with Aurora's own from_columns precedence (uri → Record,
+/// cid-only → Blob, bare → Account).
+fn row_subject(did: &str, subject_uri: Option<&str>, subject_cid: Option<&str>) -> Subject {
+    Subject {
+        did: did.to_string(),
+        at_uri: subject_uri.map(str::to_string),
+        cid: subject_cid.map(str::to_string),
+    }
+}
+
+/// Per-method call outcome, unifying the trait's three return
+/// shapes (v1.7/v1.8.2 `BackendActionId`, v1.8.5 `ActionResponse`,
+/// unit) so the caller can derive both the audit row's
+/// `backend_action_id` and the v1.8.5 response-persistence columns
+/// from one value.
+enum CallOutcome {
+    /// v1.7/v1.8.2 methods — id only.
+    Id(BackendActionId),
+    /// v1.8.5 methods — full upstream response.
+    Response(crate::pds_admin::rust::action_types::ActionResponse),
+    /// Unit-result methods (`restore_blob`).
+    Unit,
+}
+
+/// Parse the row's `action_detail` JSON, rejecting absent or
+/// malformed payloads with `Validation` (per §4.5.1's
+/// no-silent-drop posture).
+fn parse_action_detail(
+    method: BackendMethod,
+    action_detail: Option<&str>,
+) -> std::result::Result<serde_json::Value, BackendError> {
+    let raw = action_detail.ok_or_else(|| {
+        BackendError::Validation(format!(
+            "{} dispatch requires an action_detail payload on the subject_actions \
+             row (missing); the recordAction caller must supply `detail`",
+            method.as_wire_str()
+        ))
+    })?;
+    serde_json::from_str(raw).map_err(|e| {
+        BackendError::Validation(format!(
+            "{} dispatch: action_detail is not valid JSON: {e}",
+            method.as_wire_str()
+        ))
+    })
+}
+
+/// Extract a required i64 field from an action_detail object.
+fn detail_i64(
+    detail: &serde_json::Value,
+    key: &str,
+    method: BackendMethod,
+) -> std::result::Result<i64, BackendError> {
+    detail.get(key).and_then(serde_json::Value::as_i64).ok_or_else(|| {
+        BackendError::Validation(format!(
+            "{} dispatch: action_detail.{key} missing or not an integer",
+            method.as_wire_str()
+        ))
+    })
+}
+
+/// Extract a required string field from an action_detail object.
+fn detail_str<'v>(
+    detail: &'v serde_json::Value,
+    key: &str,
+    method: BackendMethod,
+) -> std::result::Result<&'v str, BackendError> {
+    detail.get(key).and_then(serde_json::Value::as_str).ok_or_else(|| {
+        BackendError::Validation(format!(
+            "{} dispatch: action_detail.{key} missing or not a string",
+            method.as_wire_str()
+        ))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn invoke_backend_method(
     backend: &dyn PdsAdminBackend,
@@ -321,14 +440,19 @@ async fn invoke_backend_method(
     reason: &str,
     notes: Option<&str>,
     duration_days: Option<u32>,
+    action_detail: Option<&str>,
     action_id: i64,
-) -> std::result::Result<BackendActionId, BackendError> {
+) -> std::result::Result<CallOutcome, BackendError> {
+    use crate::pds_admin::rust::action_types::{
+        AppealDecision, BlobSubject, ReportResolution, SubjectStatus,
+    };
     match (method, subject_uri, subject_cid) {
         // Account-verb, account-shaped row.
         (BackendMethod::TakedownAccount, None, None) => {
             backend
                 .takedown_account(did, reason, notes, action_id)
                 .await
+                .map(CallOutcome::Id)
         }
         // Account-verb, fully record-shaped row: auto-elevate.
         // Explicit record-verb, fully record-shaped row: direct.
@@ -338,6 +462,7 @@ async fn invoke_backend_method(
             backend
                 .takedown_record(&subject, reason, notes, action_id)
                 .await
+                .map(CallOutcome::Id)
         }
         // Partial record coordinates under either takedown verb,
         // or explicit record-verb without full coordinates:
@@ -358,6 +483,141 @@ async fn invoke_backend_method(
             backend
                 .suspend_account(did, reason, duration_days, notes, action_id)
                 .await
+                .map(CallOutcome::Id)
+        }
+        // ---- v1.8.5 dispatched verbs ----
+        // Account-scoped verbs: account-shaped row required (a
+        // record/blob-shaped row under these verbs is operator
+        // error, not coercible).
+        (BackendMethod::DeleteAccount, None, None) => backend
+            .delete_account(did, reason, action_id)
+            .await
+            .map(CallOutcome::Response),
+        (BackendMethod::DeleteAccount, _, _) => Err(BackendError::Validation(
+            "delete_account dispatch requires an account-shaped row (no uri/cid)".to_string(),
+        )),
+        // Blob verbs: cid required; the row's subject_uri (when
+        // present) is the blob's referencing record URI.
+        (
+            BackendMethod::QuarantineBlob | BackendMethod::RestoreBlob | BackendMethod::DeleteBlob,
+            uri,
+            Some(cid),
+        ) => {
+            let blob = BlobSubject {
+                did: did.to_string(),
+                cid: cid.to_string(),
+                record_uri: uri.map(str::to_string),
+            };
+            match method {
+                BackendMethod::QuarantineBlob => backend
+                    .quarantine_blob(&blob, reason, action_id)
+                    .await
+                    .map(CallOutcome::Response),
+                BackendMethod::DeleteBlob => backend
+                    .delete_blob(&blob, reason, action_id)
+                    .await
+                    .map(CallOutcome::Response),
+                BackendMethod::RestoreBlob => {
+                    // priorActionId (the prior backend action id
+                    // string) rides action_detail; required by the
+                    // trait shape even though Aurora's wire is a
+                    // unit variant.
+                    let detail = parse_action_detail(method, action_detail)?;
+                    let prior = detail_str(&detail, "priorActionId", method)?;
+                    let prior_id = BackendActionId::PerEvent(prior.to_string());
+                    backend
+                        .restore_blob(&blob, &prior_id, reason)
+                        .await
+                        .map(|()| CallOutcome::Unit)
+                }
+                _ => unreachable!("outer match narrowed to blob methods"),
+            }
+        }
+        (
+            BackendMethod::QuarantineBlob | BackendMethod::RestoreBlob | BackendMethod::DeleteBlob,
+            _,
+            None,
+        ) => Err(BackendError::Validation(format!(
+            "{} dispatch requires a blob-shaped row (subject_cid present); \
+             record the action with the blob CID",
+            method.as_wire_str()
+        ))),
+        // Report/appeal verbs: the row's subject coordinates ARE
+        // the target's subject (validated upstream by variant and
+        // identifier); ids ride action_detail.
+        (BackendMethod::ResolveReport, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let report_id = detail_i64(&detail, "reportId", method)?;
+            let resolution_str = detail_str(&detail, "resolution", method)?;
+            let resolution = ReportResolution::from_wire_str(resolution_str).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "resolve_report dispatch: action_detail.resolution {resolution_str:?} \
+                     is not one of resolved/acknowledged/escalated"
+                ))
+            })?;
+            let subject = row_subject(did, subject_uri, subject_cid);
+            backend
+                .resolve_report(&subject, report_id, resolution, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
+        }
+        (BackendMethod::DismissReport, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let report_id = detail_i64(&detail, "reportId", method)?;
+            let subject = row_subject(did, subject_uri, subject_cid);
+            backend
+                .dismiss_report(&subject, report_id, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
+        }
+        (BackendMethod::ResolveAppeal, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let appeal_id = detail_i64(&detail, "appealId", method)?;
+            let decision_str = detail_str(&detail, "decision", method)?;
+            let decision = AppealDecision::from_wire_str(decision_str).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "resolve_appeal dispatch: action_detail.decision {decision_str:?} \
+                     is not one of approve/deny"
+                ))
+            })?;
+            let subject = row_subject(did, subject_uri, subject_cid);
+            backend
+                .resolve_appeal(&subject, appeal_id, decision, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
+        }
+        (BackendMethod::EscalateAppeal, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let appeal_id = detail_i64(&detail, "appealId", method)?;
+            let subject = row_subject(did, subject_uri, subject_cid);
+            backend
+                .escalate_appeal(&subject, appeal_id, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
+        }
+        (BackendMethod::SendEmail, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let email_subject = detail_str(&detail, "subject", method)?;
+            let body = detail_str(&detail, "body", method)?;
+            let template = detail.get("template").and_then(serde_json::Value::as_str);
+            backend
+                .send_email(did, template, email_subject, body, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
+        }
+        (BackendMethod::UpdateSubjectStatus, _, _) => {
+            let detail = parse_action_detail(method, action_detail)?;
+            let status_str = detail_str(&detail, "status", method)?;
+            let status = SubjectStatus::from_wire_str(status_str).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "update_subject_status dispatch: action_detail.status {status_str:?} \
+                     is not one of takedown/deactivated/active"
+                ))
+            })?;
+            backend
+                .update_subject_status(did, status, reason, action_id)
+                .await
+                .map(CallOutcome::Response)
         }
         (
             BackendMethod::RestoreAccount | BackendMethod::ApplyLabel | BackendMethod::NegateLabel,
@@ -527,6 +787,7 @@ pub async fn dispatch_after_revoke_action(
         ctx.action_id,
         BackendMethod::RestoreAccount,
         unified,
+        None,
         started_at,
         completed_at,
     )
@@ -1053,6 +1314,7 @@ mod tests {
             reason_codes: reasons,
             notes: None,
             duration_iso: None,
+            action_detail: None,
         }
     }
 
@@ -1271,6 +1533,7 @@ mod tests {
             reason_codes: reasons,
             notes: None,
             duration_iso: iso,
+            action_detail: None,
         }
     }
 
@@ -1429,9 +1692,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Ok(Some(BackendActionId::new("ozone:did:plc:s:42"))),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1488,9 +1751,9 @@ mod tests {
             action_id,
             BackendMethod::TakedownAccount,
             Err(BackendError::Transient("dns".into())),
+            None,
             10,
-            20,
-        )
+            20)
         .await
         .unwrap();
 
@@ -1821,6 +2084,7 @@ mod tests {
             reason_codes: reasons,
             notes: None,
             duration_iso: None,
+            action_detail: None,
         }
     }
 

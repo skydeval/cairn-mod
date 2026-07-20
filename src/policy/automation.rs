@@ -284,6 +284,18 @@ impl PolicyAutomationPolicy {
                     raw_name, rule_toml.action_type
                 ))
             })?;
+            // v1.8.5 backend-dispatched verbs are not policy-proposable:
+            // the pending_policy_actions CHECK (0005) admits only the
+            // five graduated actions, and automation proposing e.g.
+            // delete_account would bypass the operator-command model.
+            if action_type.is_backend_verb() {
+                return Err(Error::Signing(format!(
+                    "config: [policy_automation.rules.{}] action_type '{}' is a v1.8.5 \
+                     backend-dispatched verb; policy automation can propose only the five \
+                     graduated action types",
+                    raw_name, rule_toml.action_type
+                )));
+            }
 
             let mode = PolicyMode::from_str(&rule_toml.mode).ok_or_else(|| {
                 Error::Signing(format!(
@@ -375,6 +387,10 @@ fn severity_rank(t: ActionType) -> u8 {
         ActionType::TempSuspension => 2,
         ActionType::Warning => 1,
         ActionType::Note => 0,
+        // v1.8.5 backend verbs are rejected at rule-parse time
+        // (not policy-proposable); rank is never consulted for
+        // them — 0 keeps the match total without ordering weight.
+        _ => 0,
     }
 }
 

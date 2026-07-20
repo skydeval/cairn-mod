@@ -166,6 +166,13 @@ impl LabelEmissionPolicy {
                      (expected one of warning / note / temp_suspension / indef_suspension / takedown)"
                 ))
             })?;
+            if action_type.is_backend_verb() {
+                return Err(Error::Signing(format!(
+                    "config: [label_emission.action_label_overrides.{key}]: v1.8.5 \
+                     backend-dispatched verbs never emit labels; only the five graduated \
+                     action types accept label overrides"
+                )));
+            }
             validate_label_val(&spec_toml.val).map_err(|e| {
                 Error::Signing(format!(
                     "config: [label_emission.action_label_overrides.{key}].val: {e}"
@@ -199,6 +206,12 @@ impl LabelEmissionPolicy {
                     "config: [label_emission.severity_overrides.{key}] is not a valid action_type"
                 ))
             })?;
+            if action_type.is_backend_verb() {
+                return Err(Error::Signing(format!(
+                    "config: [label_emission.severity_overrides.{key}]: v1.8.5 \
+                     backend-dispatched verbs never emit labels"
+                )));
+            }
             sev_overrides.insert(action_type, *severity);
         }
 
@@ -262,6 +275,20 @@ impl LabelEmissionPolicy {
 fn default_spec_for(action_type: ActionType) -> Option<LabelSpec> {
     match action_type {
         ActionType::Note => None,
+        // v1.8.5 backend-dispatched verbs never emit labels: they
+        // mirror operator commands to the upstream PDS and carry no
+        // local moderation-state semantics (same no-emission
+        // contract as `note`).
+        ActionType::DeleteAccount
+        | ActionType::QuarantineBlob
+        | ActionType::RestoreBlob
+        | ActionType::DeleteBlob
+        | ActionType::ResolveReport
+        | ActionType::DismissReport
+        | ActionType::ResolveAppeal
+        | ActionType::EscalateAppeal
+        | ActionType::SendEmail
+        | ActionType::UpdateSubjectStatus => None,
         ActionType::Takedown => Some(LabelSpec {
             val: "!takedown".to_string(),
             severity: SeverityToml::Alert,

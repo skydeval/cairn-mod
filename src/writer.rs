@@ -458,6 +458,14 @@ pub struct RecordActionRequest {
     /// row that ends up NULL here rejects at dispatch with a
     /// `validation` outcome (v1.8.2's no-fallback routing).
     pub subject_cid: Option<String>,
+    /// v1.8.5 variant-specific intent payload (JSON object) for
+    /// the backend-dispatched verbs: report id + resolution,
+    /// appeal id + decision, email fields, status value, prior
+    /// backend action id for blob restores. Stored verbatim on
+    /// `subject_actions.action_detail` (migration 0010); the
+    /// dispatch arms parse and validate the keys they need.
+    /// `None` for the classic five action types.
+    pub detail: Option<serde_json::Value>,
 }
 
 /// Result of a successful [`WriterHandle::record_action`]. The
@@ -2332,14 +2340,20 @@ impl Writer {
             }
         }
 
+        let action_detail_json = req
+            .detail
+            .as_ref()
+            .map(|v| serde_json::to_string(v))
+            .transpose()
+            .map_err(|e| Error::Signing(format!("action detail serialize: {e}")))?;
         let inserted_id = sqlx::query_scalar!(
             "INSERT INTO subject_actions (
                 subject_did, subject_uri, subject_cid, actor_did, action_type, reason_codes,
                 duration, effective_at, expires_at, notes, report_ids,
                 strike_value_base, strike_value_applied, was_dampened,
                 strikes_at_time_of_action, audit_log_id, created_at,
-                actor_kind, triggered_by_policy_rule
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL)
+                actor_kind, triggered_by_policy_rule, action_detail
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, NULL, ?19)
              RETURNING id",
             subject_did,
             subject_uri,
@@ -2359,6 +2373,7 @@ impl Writer {
             audit_log_id,
             created_at,
             actor_kind_moderator,
+            action_detail_json,
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -2626,6 +2641,7 @@ impl Writer {
                 reason_codes: &req.reason_codes,
                 notes: req.notes.as_deref(),
                 duration_iso: req.duration_iso.as_deref(),
+                action_detail: action_detail_json.as_deref(),
             },
         )
         .await;

@@ -59,6 +59,7 @@ fn record_req(subject: &str) -> cairn_mod::writer::RecordActionRequest {
         notes: None,
         report_ids: Vec::new(),
         subject_cid: None,
+        detail: None,
     }
 }
 

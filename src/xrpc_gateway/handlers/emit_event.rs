@@ -407,6 +407,7 @@ async fn handle_label(
         // Inbound emitEvent is repoRef-only (account subjects; see
         // the subject validation above) — no record CID exists on
         // this path (v1.8.3 §4.5).
+        detail: None,
         subject_cid: None,
     };
 
@@ -450,6 +451,7 @@ async fn handle_takedown(
         // Inbound emitEvent is repoRef-only (account subjects; see
         // the subject validation above) — no record CID exists on
         // this path (v1.8.3 §4.5).
+        detail: None,
         subject_cid: None,
     };
 
@@ -523,6 +525,7 @@ async fn handle_comment(
         // Inbound emitEvent is repoRef-only (account subjects; see
         // the subject validation above) — no record CID exists on
         // this path (v1.8.3 §4.5).
+        detail: None,
         subject_cid: None,
     };
 

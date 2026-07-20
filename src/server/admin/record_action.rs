@@ -47,6 +47,12 @@ struct Input {
     /// when absent the writer attempts the report-join fallback.
     #[serde(default)]
     cid: Option<String>,
+    /// v1.8.5 variant-specific payload for the backend-dispatched
+    /// verbs (JSON object: reportId+resolution, appealId+decision,
+    /// email template/subject/body, status, priorActionId).
+    /// Stored verbatim on the action row's `action_detail`.
+    #[serde(default)]
+    detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,6 +107,7 @@ pub(super) async fn handler(
         notes: input.note,
         report_ids: input.report_ids,
         subject_cid: input.cid,
+        detail: input.detail,
     };
 
     let recorded = match state.writer.record_action(req).await {

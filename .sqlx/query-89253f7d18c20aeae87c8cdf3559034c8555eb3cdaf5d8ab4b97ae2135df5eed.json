@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pds_admin_audit\n             (precipitating_action_id, backend_method, backend_action_id,\n              outcome, error_code, error_message, retry_after_seconds,\n              prev_hash, row_hash, call_started_at, call_completed_at,\n              upstream_audit_entry_id, cascading_actions_json, snapshots_json)\n           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)\n           RETURNING id AS \"id!\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "89253f7d18c20aeae87c8cdf3559034c8555eb3cdaf5d8ab4b97ae2135df5eed"
+}
