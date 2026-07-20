@@ -71,13 +71,35 @@ pub enum OzoneModerationNsid {
     QueryEvents,
 }
 
-/// The `tools.aurora.*` dialect's allowlisted NSIDs.
+/// The `tools.aurora.*` dialect's NSIDs cairn-mod knows about.
 ///
-/// **Uninhabited at v1.8.1** — the dual-dialect foundation is
-/// prepared, not populated (umbrella §5.9; population starts at
-/// v1.8.2). Uninhabited-ness is pinned by a compile-time test.
+/// First populated at v1.8.2 (§4.6). **Outbound reference only at
+/// v1.8.2**: [`Nsid::from_path_segment`] deliberately does NOT
+/// map these — the inbound gateway continues to accept exactly
+/// the v1.7 set. cairn-mod's outbound Rust backend dispatches to
+/// these NSIDs; inbound acceptance of the aurora dialect, if it
+/// ever lands, is its own release decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AuroraNsid {}
+pub enum AuroraNsid {
+    /// `tools.aurora.admin.emitEvent` — the unified
+    /// moderation-action endpoint the v1.8.2 RustBackend
+    /// dispatches takedowns/suspensions/restores/record
+    /// takedowns to.
+    AdminEmitEvent,
+}
+
+impl AuroraNsid {
+    /// The emitEvent NSID string — single-sourced here for the
+    /// outbound dispatch path and log lines.
+    pub const NSID_STR: &'static str = "tools.aurora.admin.emitEvent";
+
+    /// NSID wire string for this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AdminEmitEvent => Self::NSID_STR,
+        }
+    }
+}
 
 impl Nsid {
     /// Map a URL path segment to an [`Nsid`] variant. `None` for
@@ -112,8 +134,7 @@ impl Nsid {
                 "tools.ozone.moderation.queryStatuses"
             }
             Self::Ozone(OzoneModerationNsid::QueryEvents) => "tools.ozone.moderation.queryEvents",
-            // Uninhabited — no Aurora NSIDs exist at v1.8.1.
-            Self::Aurora(a) => match a {},
+            Self::Aurora(a) => a.as_str(),
         }
     }
 
@@ -128,7 +149,9 @@ impl Nsid {
             Self::Ozone(OzoneModerationNsid::QueryStatuses | OzoneModerationNsid::QueryEvents) => {
                 Method::GET
             }
-            Self::Aurora(a) => match a {},
+            // Outbound-referenced only at v1.8.2 (never produced by
+            // from_path_segment); emitEvent is a mutation.
+            Self::Aurora(AuroraNsid::AdminEmitEvent) => Method::POST,
         }
     }
 }
@@ -167,16 +190,36 @@ mod tests {
         ]
     }
 
-    /// Compile-time pin: `AuroraNsid` is uninhabited at v1.8.1
-    /// (§4.6 — the dual-dialect foundation is prepared, not
-    /// populated). An uninhabited enum admits an empty match
-    /// returning `!`-coercible values; adding a variant at
-    /// v1.8.2+ makes this function stop compiling until the
-    /// match is updated, forcing a deliberate review of every
-    /// dialect-dispatch site.
-    #[allow(dead_code)]
-    fn _aurora_nsid_is_uninhabited_at_v1_8_1(a: AuroraNsid) -> core::convert::Infallible {
-        match a {}
+    /// v1.8.2: the aurora dialect gains its first NSID —
+    /// **outbound reference only**. The inbound gateway must NOT
+    /// recognize it: `from_path_segment` returns `None` for the
+    /// emitEvent NSID while the variant's `as_str` /
+    /// `as_path_segment` produce the wire string for outbound
+    /// dispatch and log lines. Inbound acceptance of the aurora
+    /// dialect is a deliberate future release decision, not a
+    /// side effect of populating the enum.
+    #[test]
+    fn aurora_nsid_is_outbound_reference_only_at_v1_8_2() {
+        assert_eq!(
+            AuroraNsid::AdminEmitEvent.as_str(),
+            "tools.aurora.admin.emitEvent"
+        );
+        assert_eq!(AuroraNsid::NSID_STR, "tools.aurora.admin.emitEvent");
+        assert_eq!(
+            Nsid::Aurora(AuroraNsid::AdminEmitEvent).as_path_segment(),
+            "tools.aurora.admin.emitEvent"
+        );
+        assert_eq!(
+            Nsid::Aurora(AuroraNsid::AdminEmitEvent).http_method(),
+            Method::POST
+        );
+        // Inbound recognition deliberately absent.
+        assert_eq!(
+            Nsid::from_path_segment("tools.aurora.admin.emitEvent"),
+            None
+        );
+        let uri: Uri = "/xrpc/tools.aurora.admin.emitEvent".parse().unwrap();
+        assert_eq!(extract_nsid_from_request_uri(&uri), None);
     }
 
     #[test]

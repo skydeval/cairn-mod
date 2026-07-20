@@ -391,3 +391,274 @@ fn boot_fails_clearly_on_removed_oauth_keys() {
         "migration error names the removed key: {msg}"
     );
 }
+
+// =========================================================================
+// v1.8.2 — emitEvent dispatch end-to-end (per-release doc §8)
+// =========================================================================
+
+use cairn_mod::pds_admin::BackendActionId;
+
+struct MockEmitAurora {
+    emit_status: StatusCode,
+    emit_body: String,
+    /// Captured emitEvent request bodies, in arrival order.
+    emit_requests: Mutex<Vec<serde_json::Value>>,
+    /// Captured Retry-After to send on error responses.
+    retry_after: Option<u32>,
+}
+
+async fn emit_event_handler(State(state): State<Arc<MockEmitAurora>>, body: String) -> Response {
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    state.emit_requests.lock().unwrap().push(parsed);
+    let mut resp = (
+        state.emit_status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.emit_body.clone(),
+    )
+        .into_response();
+    if let Some(secs) = state.retry_after {
+        resp.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(&secs.to_string()).unwrap(),
+        );
+    }
+    resp
+}
+
+/// Mock Aurora serving BOTH describeCapabilities (canonical,
+/// advertising `mod-events-emit-v1`) and emitEvent (configurable).
+async fn spawn_emit_mock(
+    emit_status: StatusCode,
+    emit_body: String,
+    retry_after: Option<u32>,
+) -> (SocketAddr, Arc<MockEmitAurora>) {
+    let emit_state = Arc::new(MockEmitAurora {
+        emit_status,
+        emit_body,
+        emit_requests: Mutex::new(Vec::new()),
+        retry_after,
+    });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: canonical_body(),
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(describe_capabilities).with_state(desc_state),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.emitEvent",
+            axum::routing::post(emit_event_handler).with_state(emit_state.clone()),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, emit_state)
+}
+
+fn emit_success_body(event_id: &str) -> String {
+    serde_json::json!({
+        "eventId": event_id,
+        "auditEntryId": "chain-1",
+        "snapshots": [],
+        "cascadingActions": []
+    })
+    .to_string()
+}
+
+/// Probe first (populates the capability set from the mock's
+/// canonical advertisement), then return the backend ready for
+/// emitEvent dispatch.
+async fn probed_backend(addr: SocketAddr) -> RustBackend {
+    let backend = backend_against(addr, Vec::new());
+    backend.probe().await.expect("probe succeeds");
+    backend
+}
+
+#[tokio::test]
+async fn takedown_account_dispatches_kind_tagged_body_and_returns_event_id() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-100"), None).await;
+    let backend = probed_backend(addr).await;
+
+    let id = backend
+        .takedown_account("did:plc:subject", "spam", Some("mod notes"), 42)
+        .await
+        .expect("dispatch succeeds");
+    assert_eq!(id, BackendActionId::PerEvent("evt-100".to_string()));
+
+    let requests = state.emit_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0];
+    // Aurora's actual wire contract: kind discriminator, action
+    // field, canonical subjects array, no notes on the wire.
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "TakedownAccount"})
+    );
+    assert_eq!(
+        body["subjects"],
+        serde_json::json!([{"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:subject"}])
+    );
+    assert_eq!(body["rationale"], "spam");
+    assert!(body.get("notes").is_none(), "notes never transmitted");
+    assert!(
+        body.get("event").is_none(),
+        "field is `action`, not `event`"
+    );
+    assert!(
+        body.get("subject").is_none(),
+        "canonical plural, not legacy"
+    );
+}
+
+#[tokio::test]
+async fn suspend_account_duration_rides_top_level_metadata() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-101"), None).await;
+    let backend = probed_backend(addr).await;
+
+    backend
+        .suspend_account("did:plc:subject", "spam", Some(7), None, 43)
+        .await
+        .expect("dispatch succeeds");
+    // Indefinite suspension second: no metadata at all.
+    backend
+        .suspend_account("did:plc:subject", "spam", None, None, 44)
+        .await
+        .expect("dispatch succeeds");
+
+    let requests = state.emit_requests.lock().unwrap();
+    assert_eq!(
+        requests[0]["action"],
+        serde_json::json!({"kind": "SuspendAccount"})
+    );
+    assert_eq!(
+        requests[0]["metadata"],
+        serde_json::json!({"durationDays": 7})
+    );
+    assert!(requests[1].get("metadata").is_none());
+}
+
+#[tokio::test]
+async fn restore_account_dispatches_and_discards_event_id() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-102"), None).await;
+    let backend = probed_backend(addr).await;
+
+    backend
+        .restore_account(
+            "did:plc:subject",
+            &BackendActionId::new("prior-1"),
+            "resolved",
+        )
+        .await
+        .expect("dispatch succeeds");
+
+    let requests = state.emit_requests.lock().unwrap();
+    let body = &requests[0];
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "RestoreAccount"})
+    );
+    // prior_action_id documented non-transmission (§4.5).
+    assert!(!body.to_string().contains("prior-1"));
+}
+
+#[tokio::test]
+async fn takedown_record_dispatches_strong_ref_subject() {
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-103"), None).await;
+    let backend = probed_backend(addr).await;
+
+    let subject = cairn_mod::pds_admin::Subject::record(
+        "did:plc:subject",
+        "at://did:plc:subject/app.bsky.feed.post/rkey",
+        Some("bafyrecord".to_string()),
+    );
+    let id = backend
+        .takedown_record(&subject, "csam", None, 45)
+        .await
+        .expect("dispatch succeeds");
+    assert_eq!(id, BackendActionId::PerEvent("evt-103".to_string()));
+
+    let requests = state.emit_requests.lock().unwrap();
+    let body = &requests[0];
+    assert_eq!(
+        body["action"],
+        serde_json::json!({"kind": "TakedownRecord"})
+    );
+    assert_eq!(
+        body["subjects"],
+        serde_json::json!([{
+            "$type": "com.atproto.repo.strongRef",
+            "uri": "at://did:plc:subject/app.bsky.feed.post/rkey",
+            "cid": "bafyrecord"
+        }])
+    );
+}
+
+#[tokio::test]
+async fn emit_event_http_errors_map_to_backend_errors() {
+    // 400 → Validation
+    let (addr, _s) = spawn_emit_mock(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({"error": "InvalidEvent", "message": "bad"}).to_string(),
+        None,
+    )
+    .await;
+    let backend = probed_backend(addr).await;
+    let err = backend
+        .takedown_account("did:plc:x", "r", None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Validation(_)), "{err:?}");
+
+    // 401 → Auth
+    let (addr, _s) = spawn_emit_mock(StatusCode::UNAUTHORIZED, String::new(), None).await;
+    let backend = probed_backend(addr).await;
+    let err = backend
+        .takedown_account("did:plc:x", "r", None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Auth(_)), "{err:?}");
+
+    // 429 with Retry-After → Transient carrying the hint
+    let (addr, _s) = spawn_emit_mock(StatusCode::TOO_MANY_REQUESTS, String::new(), Some(45)).await;
+    let backend = probed_backend(addr).await;
+    let err = backend
+        .takedown_account("did:plc:x", "r", None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Transient(_)), "{err:?}");
+    assert_eq!(err.retry_after_seconds(), Some(45));
+
+    // 500 → Transient
+    let (addr, _s) = spawn_emit_mock(StatusCode::INTERNAL_SERVER_ERROR, String::new(), None).await;
+    let backend = probed_backend(addr).await;
+    let err = backend
+        .takedown_account("did:plc:x", "r", None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Transient(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn unprobed_backend_still_gates_on_capability() {
+    // Without a probe, the capability set is empty — every
+    // dispatch returns CapabilityNotAdvertised (and would fire
+    // the should_warn path at the dispatch layer).
+    let (addr, state) = spawn_emit_mock(StatusCode::OK, emit_success_body("evt-x"), None).await;
+    let backend = backend_against(addr, Vec::new());
+    let err = backend
+        .takedown_account("did:plc:x", "r", None, 1)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::CapabilityNotAdvertised(_)));
+    assert!(
+        state.emit_requests.lock().unwrap().is_empty(),
+        "no HTTP call made"
+    );
+}

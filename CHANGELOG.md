@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.2 protocol parity
+- RustBackend can now execute account takedowns, suspensions, restorations,
+  and record takedowns against Rust PDSes (Aurora-Locus and compatible) via
+  `tools.aurora.admin.emitEvent`. Suspension duration is transmitted as
+  `metadata.durationDays`; omitted duration means indefinite. Moderator
+  `notes` are retained in cairn-mod's audit chain but are not transmitted
+  to the PDS (the emitEvent wire has no notes field; `rationale` carries
+  the first `reason_codes` entry).
+- Added `takedown_record` to the `PdsAdminBackend` trait. Ozone implements
+  it via `com.atproto.admin.updateSubjectStatus` with a `strongRef`
+  subject; RustBackend dispatches it via `emitEvent` with a record
+  subject. Both require the record's AT-URI **and** CID; a
+  partially-shaped subject is rejected with a `validation` outcome.
+- Subject-shape-aware dispatch routing: a takedown mapped to
+  `takedown_account` whose underlying action row targets a record (URI +
+  CID both present) auto-elevates to `takedown_record`. `takedown_record`
+  is also directly mappable in `[pds_admin.action_map]`.
+- Extended the audit chain's `backend_method` column to accept
+  `takedown_record` (migration `0008`; automatic, no operator action
+  needed).
+- Dispatching with empty `reason_codes` now logs a WARN naming the
+  misconfigured action row (the upstream moderator view would show no
+  reason); the dispatch still proceeds.
+
+### Changed — v1.8.2
+- **Record-targeted moderation actions no longer escalate to
+  whole-account takedowns at the PDS.** Previously, a takedown recorded
+  against a record subject (AT-URI) dispatched an account-level takedown
+  of the parent DID. Because cairn-mod's action rows do not carry a
+  record CID (which both backends' record-takedown wire shapes require),
+  such dispatches now record a `validation`-outcome audit row and do not
+  reach the PDS, rather than silently widening a record action into an
+  account action. Account-targeted actions are unaffected. A future
+  release adds CID plumbing to make record-targeted rows dispatchable
+  end-to-end.
+- Renamed `F4_INVARIANT_REASON` to `LABEL_BRIDGE_INVARIANT_REASON`. If
+  you were importing the old name from `cairn_mod::pds_admin::backend`,
+  update your import. Value and label-bridge posture unchanged.
+
 ### Added
 - `BackendError` taxonomy split (foundation for v1.8 series). The seven-variant
   shape — `Transient` / `Validation` / `Terminal` / `Auth` /

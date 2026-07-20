@@ -416,6 +416,13 @@ pub enum BackendMethod {
     /// Negate a previously-applied label at the PDS side. Same
     /// `Unsupported` posture as [`Self::ApplyLabel`].
     NegateLabel,
+    /// Take down a single record at the PDS side (v1.8.2).
+    /// Reached via explicit action_map route or by the dispatch
+    /// layer's subject-shape auto-elevation from
+    /// [`Self::TakedownAccount`] when the underlying
+    /// `subject_actions` row targets a record with full
+    /// coordinates (see `crate::pds_admin::dispatch`).
+    TakedownRecord,
 }
 
 impl BackendMethod {
@@ -435,6 +442,7 @@ impl BackendMethod {
             "restore_account" => Some(Self::RestoreAccount),
             "apply_label" => Some(Self::ApplyLabel),
             "negate_label" => Some(Self::NegateLabel),
+            "takedown_record" => Some(Self::TakedownRecord),
             _ => None,
         }
     }
@@ -449,6 +457,7 @@ impl BackendMethod {
             Self::RestoreAccount => "restore_account",
             Self::ApplyLabel => "apply_label",
             Self::NegateLabel => "negate_label",
+            Self::TakedownRecord => "takedown_record",
         }
     }
 
@@ -459,7 +468,10 @@ impl BackendMethod {
     /// action_map entry maps to an unimplemented method.
     pub fn is_implemented_by_ozone_v1_7(self) -> bool {
         match self {
-            Self::TakedownAccount | Self::SuspendAccount | Self::RestoreAccount => true,
+            Self::TakedownAccount
+            | Self::SuspendAccount
+            | Self::RestoreAccount
+            | Self::TakedownRecord => true,
             Self::ApplyLabel | Self::NegateLabel => false,
         }
     }
@@ -482,7 +494,7 @@ impl BackendMethod {
     /// participate in the id surface.
     pub fn returns_action_id(self) -> bool {
         match self {
-            Self::TakedownAccount | Self::SuspendAccount => true,
+            Self::TakedownAccount | Self::SuspendAccount | Self::TakedownRecord => true,
             Self::RestoreAccount | Self::ApplyLabel | Self::NegateLabel => false,
         }
     }

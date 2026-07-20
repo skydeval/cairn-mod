@@ -15,7 +15,10 @@
 //! operator provisions cairn-mod's DID doc and Aurora-side
 //! `admin_roles` grant out-of-band (§5.1 of the v1.8.1 doc).
 
+mod emit_event;
 pub mod service_auth;
+
+use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventResponse, EmitEventSubject};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -27,8 +30,8 @@ use k256::ecdsa::SigningKey;
 use url::Url;
 
 use super::backend::{
-    BackendActionId, BackendError, BackendInitError, F4_INVARIANT_REASON, PdsAdminBackend,
-    ProbeReport,
+    BackendActionId, BackendError, BackendInitError, LABEL_BRIDGE_INVARIANT_REASON,
+    PdsAdminBackend, ProbeReport,
 };
 use super::config::RustBackendConfig;
 use super::ozone::{OzoneBackend, decode_xrpc_error_envelope, parse_retry_after_seconds};
@@ -44,11 +47,15 @@ use service_auth::{mint_service_auth_jwt, validate_did_syntax};
 /// capability negotiation.
 const DESCRIBE_CAPABILITIES_NSID: &str = "tools.aurora.describeCapabilities";
 
-/// Anticipated capability family binding for the account-action
-/// methods (§4.9). v1.8.2's per-release doc locks the final
-/// binding; until then this is the string embedded in
-/// `CapabilityNotAdvertised` returns (never functionally consumed
-/// at v1.8.1).
+/// NSID of the unified moderation-action endpoint (v1.8.2, §4.3).
+const EMIT_EVENT_NSID: &str = "tools.aurora.admin.emitEvent";
+
+/// Capability family gating the emitEvent-mapped action verbs
+/// (suffix-less; registered in `CAPABILITY_CLASSIFICATIONS`).
+const EMIT_EVENT_FAMILY: &str = "mod-events-emit";
+
+/// Wire string embedded in `CapabilityNotAdvertised` returns when
+/// the target PDS doesn't advertise the emitEvent family.
 const ACCOUNT_ACTION_CAPABILITY: &str = "mod-events-emit-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
@@ -223,6 +230,81 @@ impl RustBackend {
         }))
     }
 
+    /// Shared `emitEvent` dispatch (v1.8.2, §4.4): capability
+    /// check → per-call JWT → POST → HTTP error mapping →
+    /// response parse. Returns Aurora's `eventId`.
+    ///
+    /// The capability check runs per-dispatch, not at
+    /// construction (§5.1) — the background refresh can change
+    /// the advertised set, and "your PDS stopped advertising a
+    /// capability we need" is a deployment health signal the
+    /// operator should see at the moment it bites.
+    async fn dispatch_emit_event(
+        &self,
+        dispatch: &EmitEventDispatch<'_>,
+    ) -> Result<String, BackendError> {
+        // Blocking read — guards never cross an await point.
+        {
+            let caps = self
+                .capabilities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !caps.has(EMIT_EVENT_FAMILY) {
+                return Err(BackendError::CapabilityNotAdvertised(
+                    ACCOUNT_ACTION_CAPABILITY.to_string(),
+                ));
+            }
+            // Version-selection (§5.2): Aurora advertises only v1
+            // and cairn-mod handles only v1, so the selection is
+            // trivial — but the read exercises the machinery that
+            // branches when a v2 ever lands (AutoAdvance family).
+            let _advertised_version = caps
+                .version_of(EMIT_EVENT_FAMILY)
+                .expect("has() returned true for the same family");
+        }
+
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            EMIT_EVENT_NSID,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let url = self.xrpc_url(EMIT_EVENT_NSID)?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&jwt)
+            .json(dispatch)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        let parsed: EmitEventResponse = serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("emitEvent response parse: {e}")))?;
+        Ok(parsed.event_id)
+    }
+
     /// Construct the full URL for an XRPC method. Same shape as
     /// `OzoneBackend::xrpc_url` — ensure trailing slash, then join
     /// `xrpc/<nsid>`.
@@ -329,40 +411,105 @@ impl fmt::Debug for RustBackend {
 
 #[async_trait]
 impl PdsAdminBackend for RustBackend {
+    /// Real dispatch (v1.8.2): `{"kind": "TakedownAccount"}` via
+    /// `emitEvent`. `notes` is accepted per the trait but not
+    /// transmitted (§4.5-notes documented non-transmission —
+    /// Aurora's wire has no notes field; cairn-mod's audit chain
+    /// retains it locally).
     async fn takedown_account(
         &self,
-        _did: &str,
-        _reason: &str,
+        did: &str,
+        reason: &str,
         _notes: Option<&str>,
         _precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError> {
-        Err(BackendError::CapabilityNotAdvertised(
-            ACCOUNT_ACTION_CAPABILITY.to_string(),
-        ))
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::TakedownAccount,
+            rationale: reason,
+            metadata: None,
+        };
+        let event_id = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(event_id))
     }
 
+    /// Real dispatch (v1.8.2): `{"kind": "SuspendAccount"}` with
+    /// the duration riding the top-level `metadata` channel
+    /// (`{"durationDays": n}`) — omitted entirely for
+    /// indefinite suspensions.
     async fn suspend_account(
         &self,
-        _did: &str,
-        _reason: &str,
-        _duration_days: Option<u32>,
+        did: &str,
+        reason: &str,
+        duration_days: Option<u32>,
         _notes: Option<&str>,
         _precipitating_action_id: i64,
     ) -> Result<BackendActionId, BackendError> {
-        Err(BackendError::CapabilityNotAdvertised(
-            ACCOUNT_ACTION_CAPABILITY.to_string(),
-        ))
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::SuspendAccount,
+            rationale: reason,
+            metadata: duration_days.map(|days| serde_json::json!({ "durationDays": days })),
+        };
+        let event_id = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(event_id))
     }
 
+    /// Real dispatch (v1.8.2): `{"kind": "RestoreAccount"}`.
+    /// `prior_action_id` is accepted per the trait but not
+    /// transmitted (§4.5 Option A) — Aurora reverses the
+    /// account's *current* takedown state on its own. Aurora's
+    /// returned `eventId` is discarded here because the trait
+    /// method is unit-result; the audit row's
+    /// `backend_action_id` is NULL by construction
+    /// (`returns_action_id() == false`).
     async fn restore_account(
         &self,
-        _did: &str,
+        did: &str,
         _prior_action_id: &BackendActionId,
-        _reason: &str,
+        reason: &str,
     ) -> Result<(), BackendError> {
-        Err(BackendError::CapabilityNotAdvertised(
-            ACCOUNT_ACTION_CAPABILITY.to_string(),
-        ))
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::account(did)],
+            action: EmitEventAction::RestoreAccount,
+            rationale: reason,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await?;
+        Ok(())
+    }
+
+    /// Real dispatch (v1.8.2, new trait method):
+    /// `{"kind": "TakedownRecord"}` with a
+    /// `com.atproto.repo.strongRef` subject. Aurora's wire
+    /// requires both `uri` and `cid`; a subject missing either
+    /// is rejected here with `Validation` — never coerced into
+    /// an account-level action (§4.5.1's no-fallback rule).
+    async fn takedown_record(
+        &self,
+        subject: &Subject,
+        reason: &str,
+        _notes: Option<&str>,
+        _precipitating_action_id: i64,
+    ) -> Result<BackendActionId, BackendError> {
+        let (Some(uri), Some(cid)) = (subject.at_uri.as_deref(), subject.cid.as_deref()) else {
+            return Err(BackendError::Validation(format!(
+                "takedown_record requires a fully-shaped record subject \
+                 (at_uri and cid both present; Aurora's strongRef wire shape \
+                 has no optional CID); got at_uri={:?} cid={:?} for did {}",
+                subject.at_uri.as_deref(),
+                subject.cid.as_deref(),
+                subject.did
+            )));
+        };
+        let dispatch = EmitEventDispatch {
+            subjects: vec![EmitEventSubject::record(uri, cid)],
+            action: EmitEventAction::TakedownRecord,
+            rationale: reason,
+            metadata: None,
+        };
+        let event_id = self.dispatch_emit_event(&dispatch).await?;
+        Ok(BackendActionId::PerEvent(event_id))
     }
 
     async fn apply_label(
@@ -375,13 +522,13 @@ impl PdsAdminBackend for RustBackend {
         // to LABEL_BRIDGE_INVARIANT_REASON lands at v1.8.2 per
         // umbrella §4.A.2.
         Err(BackendError::ArchitecturallyForbidden(
-            F4_INVARIANT_REASON.to_string(),
+            LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
     }
 
     async fn negate_label(&self, _subject: &Subject, _val: &str) -> Result<(), BackendError> {
         Err(BackendError::ArchitecturallyForbidden(
-            F4_INVARIANT_REASON.to_string(),
+            LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
     }
 
@@ -583,6 +730,53 @@ mod tests {
             restore,
             Err(BackendError::CapabilityNotAdvertised(_))
         ));
+
+        // takedown_record with a fully-shaped subject also gates on
+        // the capability (subject validation passes, capability
+        // check fails against the empty pre-probe set).
+        let record = backend
+            .takedown_record(
+                &Subject::record("did:plc:x", "at://did:plc:x/c/r", Some("bafy1".into())),
+                "spam",
+                None,
+                3,
+            )
+            .await;
+        assert!(matches!(
+            record,
+            Err(BackendError::CapabilityNotAdvertised(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn takedown_record_rejects_cid_less_subject_with_validation() {
+        // §4.5.1 no-fallback rule: partial record coordinates are
+        // Validation at the trait boundary — checked BEFORE the
+        // capability gate, so the operator sees the shape problem
+        // even against an unprobed backend.
+        let backend = backend_with_test_key("https://pds.example.com");
+
+        let no_cid = backend
+            .takedown_record(
+                &Subject::record("did:plc:x", "at://did:plc:x/c/r", None),
+                "spam",
+                None,
+                4,
+            )
+            .await;
+        match no_cid {
+            Err(BackendError::Validation(msg)) => {
+                assert!(msg.contains("cid"), "{msg}");
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+
+        // Account-shaped subject (no at_uri at all) is equally
+        // malformed for a record verb.
+        let no_uri = backend
+            .takedown_record(&Subject::account("did:plc:x"), "spam", None, 5)
+            .await;
+        assert!(matches!(no_uri, Err(BackendError::Validation(_))));
     }
 
     #[tokio::test]
@@ -594,7 +788,7 @@ mod tests {
             .await;
         match apply {
             Err(BackendError::ArchitecturallyForbidden(reason)) => {
-                assert_eq!(reason, F4_INVARIANT_REASON);
+                assert_eq!(reason, LABEL_BRIDGE_INVARIANT_REASON);
             }
             other => panic!("expected ArchitecturallyForbidden, got {other:?}"),
         }

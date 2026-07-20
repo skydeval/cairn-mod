@@ -219,10 +219,12 @@ pub(crate) async fn xrpc_membership_middleware(
         Nsid::CreateReport => membership::is_trusted_pds(&pool, &iss).await,
         // The whole ozone dialect shares the known-caller gate.
         Nsid::Ozone(_) => membership::is_known_caller(&pool, &iss).await,
-        // Uninhabited at v1.8.1 (§4.6 dual-dialect foundation);
-        // v1.8.2+ decides the aurora dialect's membership gate
-        // when its first NSID lands.
-        Nsid::Aurora(a) => match a {},
+        // Unreachable at v1.8.2: from_path_segment never produces
+        // Aurora variants (the dialect is outbound-reference only;
+        // inbound acceptance is a future release decision). Fail
+        // closed if that ever changes without a deliberate
+        // membership-gate decision here.
+        Nsid::Aurora(_) => Ok(false),
     };
 
     match allowed {

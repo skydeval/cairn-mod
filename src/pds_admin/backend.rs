@@ -11,7 +11,7 @@
 //! the trait-shape rationale; A5 for the
 //! `apply_label`/`negate_label` posture (now
 //! [`BackendError::ArchitecturallyForbidden`] per the §F4
-//! invariant — see [`F4_INVARIANT_REASON`]).
+//! invariant — see [`LABEL_BRIDGE_INVARIANT_REASON`]).
 
 use std::fmt;
 
@@ -156,12 +156,12 @@ impl<'de> Deserialize<'de> for BackendActionId {
 /// backend the upstream PDS uses.
 ///
 /// The constant is pinned by content-based assertions (see the
-/// `f4_invariant_tests` module) rather than by byte length: a
+/// `label_bridge_invariant_tests` module) rather than by byte length: a
 /// reviewer changing the *meaning* of the constant — e.g.,
 /// swapping "subscribeLabels" for some other surface — fails CI.
 /// Length pins are reserved for vocabulary constants where length
 /// tracks semantics, which this isn't.
-pub const F4_INVARIANT_REASON: &str = "cairn-mod's subscribeLabels (§F4) is the canonical label-distribution surface to the network; \
+pub const LABEL_BRIDGE_INVARIANT_REASON: &str = "cairn-mod's subscribeLabels (§F4) is the canonical label-distribution surface to the network; \
      emitting labels via the upstream PDS would create a duplicate emission path with audit-trail divergence";
 
 /// Errors that can occur when calling a [`PdsAdminBackend`]
@@ -242,7 +242,7 @@ pub const F4_INVARIANT_REASON: &str = "cairn-mod's subscribeLabels (§F4) is the
 ///   lives in [`BackendFailureLog::method`].
 /// - **A trait method whose call would violate cairn-mod's
 ///   architectural invariants** → [`Self::ArchitecturallyForbidden`].
-///   Both backends on label methods, per [`F4_INVARIANT_REASON`].
+///   Both backends on label methods, per [`LABEL_BRIDGE_INVARIANT_REASON`].
 #[derive(Debug, thiserror::Error)]
 pub enum BackendError {
     /// Network-level or otherwise-transient backend failure.
@@ -298,7 +298,7 @@ pub enum BackendError {
     /// regardless of capability advertisement or dialect. The
     /// §F4 architectural invariant is the canonical example
     /// (label methods on either backend; see
-    /// [`F4_INVARIANT_REASON`]). Operator affordance: "no
+    /// [`LABEL_BRIDGE_INVARIANT_REASON`]). Operator affordance: "no
     /// backend will ever do this; cairn-mod's design forbids
     /// it".
     #[error("method architecturally forbidden: {0}")]
@@ -597,7 +597,7 @@ pub enum BackendInitError {
 ///   is the canonical label-distribution surface; emitting
 ///   labels via the upstream PDS would create a duplicate
 ///   emission path with audit-trail divergence. See
-///   [`F4_INVARIANT_REASON`].
+///   [`LABEL_BRIDGE_INVARIANT_REASON`].
 ///
 /// # Error handling
 ///
@@ -673,6 +673,25 @@ pub trait PdsAdminBackend: Send + Sync {
         reason: &str,
     ) -> Result<(), BackendError>;
 
+    /// Take down a single record at the PDS side (v1.8.2, §4.1).
+    ///
+    /// `subject` must be record-shaped: `at_uri` present and —
+    /// for the Rust backend, whose wire shape
+    /// (`com.atproto.repo.strongRef`) requires a CID — `cid`
+    /// present. Implementations reject a `subject` missing the
+    /// coordinates they need with [`BackendError::Validation`]
+    /// rather than coercing to an account-level action.
+    ///
+    /// `precipitating_action_id` follows the same convention as
+    /// [`Self::takedown_account`].
+    async fn takedown_record(
+        &self,
+        subject: &Subject,
+        reason: &str,
+        notes: Option<&str>,
+        precipitating_action_id: i64,
+    ) -> Result<BackendActionId, BackendError>;
+
     /// Apply a label at the PDS side.
     ///
     /// Returns [`BackendError::ArchitecturallyForbidden`] on
@@ -681,7 +700,7 @@ pub trait PdsAdminBackend: Send + Sync {
     /// label-distribution surface to the network; emitting
     /// labels via the upstream PDS would create a duplicate
     /// emission path with audit-trail divergence. The reason
-    /// string is [`F4_INVARIANT_REASON`].
+    /// string is [`LABEL_BRIDGE_INVARIANT_REASON`].
     ///
     /// `expires_days` is an optional expiry hint mirroring
     /// `subject_actions.expires_at` for `temp_suspension`-
@@ -733,22 +752,22 @@ pub trait PdsAdminBackend: Send + Sync {
 }
 
 #[cfg(test)]
-mod f4_invariant_tests {
-    use super::F4_INVARIANT_REASON;
+mod label_bridge_invariant_tests {
+    use super::LABEL_BRIDGE_INVARIANT_REASON;
 
     #[test]
-    fn f4_invariant_reason_contains_section_anchor() {
+    fn label_bridge_invariant_reason_contains_section_anchor() {
         assert!(
-            F4_INVARIANT_REASON.contains("§F4"),
-            "F4_INVARIANT_REASON must reference the §F4 architectural-section anchor"
+            LABEL_BRIDGE_INVARIANT_REASON.contains("§F4"),
+            "LABEL_BRIDGE_INVARIANT_REASON must reference the §F4 architectural-section anchor"
         );
     }
 
     #[test]
-    fn f4_invariant_reason_contains_canonical_surface_name() {
+    fn label_bridge_invariant_reason_contains_canonical_surface_name() {
         assert!(
-            F4_INVARIANT_REASON.contains("subscribeLabels"),
-            "F4_INVARIANT_REASON must name subscribeLabels as the canonical surface"
+            LABEL_BRIDGE_INVARIANT_REASON.contains("subscribeLabels"),
+            "LABEL_BRIDGE_INVARIANT_REASON must name subscribeLabels as the canonical surface"
         );
     }
 }
@@ -918,7 +937,7 @@ mod tests {
 
     #[test]
     fn backend_error_architecturally_forbidden_renders() {
-        let e = BackendError::ArchitecturallyForbidden(F4_INVARIANT_REASON.to_string());
+        let e = BackendError::ArchitecturallyForbidden(LABEL_BRIDGE_INVARIANT_REASON.to_string());
         let rendered = format!("{e}");
         assert!(rendered.starts_with("method architecturally forbidden:"));
         assert!(rendered.contains("§F4"));

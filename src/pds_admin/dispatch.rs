@@ -55,6 +55,7 @@ use crate::moderation::types::ActionType;
 use crate::pds_admin::audit::record_pds_admin_call;
 use crate::pds_admin::backend::{BackendActionId, BackendError, PdsAdminBackend};
 use crate::pds_admin::config::{ActionMapEntry, BackendMethod, PdsAdminPolicy};
+use crate::pds_admin::types::Subject;
 
 /// Bundled v1.7 PDS-admin runtime: the resolved
 /// [`PdsAdminPolicy`] from #83 + the trait-object backend the
@@ -89,6 +90,21 @@ pub struct DispatchContext<'a> {
     /// Subject DID (extracted from the request via
     /// `route_subject` in writer.rs).
     pub subject_did: &'a str,
+    /// Record AT-URI when the underlying `subject_actions` row
+    /// targets a record (v1.8.2, §4.5.1). `None` for
+    /// account-level actions. Presence participates in the
+    /// subject-shape routing in this module's dispatch helper.
+    pub subject_uri: Option<&'a str>,
+    /// Record CID when known (v1.8.2, §4.5.1). NOTE:
+    /// `subject_actions` has no CID column at v1.8.2, so the
+    /// recordAction pipeline always passes `None` — the
+    /// auto-elevation arm that needs `(uri, cid)` both present
+    /// is exercised only by direct callers/tests until a CID
+    /// source lands. A record-targeting row without a CID
+    /// rejects at dispatch with `Validation` per §4.5.1's
+    /// no-fallback rule (it does NOT fall back to v1.7's
+    /// account-level takedown).
+    pub subject_cid: Option<&'a str>,
     /// Operator-vocabulary reason identifiers. The first entry
     /// is propagated to the backend's `ref` / `reason` field;
     /// remaining entries are recorded in the cairn-mod-side
@@ -160,10 +176,35 @@ pub async fn dispatch_after_record_action(
             );
             return;
         }
-        BackendMethod::TakedownAccount | BackendMethod::SuspendAccount => {}
+        BackendMethod::TakedownAccount
+        | BackendMethod::SuspendAccount
+        | BackendMethod::TakedownRecord => {}
     }
 
     let reason = ctx.reason_codes.first().map(String::as_str).unwrap_or("");
+    // §5.7: an empty reason_codes vec is fixable operator
+    // misconfiguration, not a dispatch-stopper — the action still
+    // reaches the PDS, but the upstream moderator view shows no
+    // reason. WARN so operators can find and fix it.
+    if reason.is_empty() {
+        tracing::warn!(
+            target: "cairn_mod::pds_admin::rust::dispatch",
+            action_id = ctx.action_id,
+            method = method.as_wire_str(),
+            "dispatching backend action with empty rationale (subject_actions row has \
+             empty reason_codes); the upstream moderator view will show no reason"
+        );
+    }
+
+    // v1.8.2 §4.5.1: subject-shape-aware sub-routing. A
+    // record-targeting row (uri + cid both present) under an
+    // account-verb action_map entry auto-elevates to
+    // takedown_record; the audit row and log lines record the
+    // method that was actually dispatched.
+    let effective_method = match (method, ctx.subject_uri, ctx.subject_cid) {
+        (BackendMethod::TakedownAccount, Some(_), Some(_)) => BackendMethod::TakedownRecord,
+        _ => method,
+    };
 
     // Duration plumbing for SuspendAccount (#89). For other
     // methods, duration_days is meaningless and ignored.
@@ -193,6 +234,8 @@ pub async fn dispatch_after_record_action(
         bridge.backend.as_ref(),
         method,
         ctx.subject_did,
+        ctx.subject_uri,
+        ctx.subject_cid,
         reason,
         ctx.notes,
         duration_days,
@@ -201,16 +244,22 @@ pub async fn dispatch_after_record_action(
     .await;
     let completed_at = crate::writer::epoch_ms_now();
 
-    log_call_outcome(method, ctx.action_id, ctx.subject_did, &call_result);
-    warn_rust_backend_capability_gap(bridge, method, ctx.action_id, &call_result);
+    log_call_outcome(
+        effective_method,
+        ctx.action_id,
+        ctx.subject_did,
+        &call_result,
+    );
+    warn_rust_backend_capability_gap(bridge, effective_method, ctx.action_id, &call_result);
 
     // Project the per-method success into the unified
     // `Option<BackendActionId>` shape that
     // `record_pds_admin_call` accepts. Per #87:
     // `BackendMethod::returns_action_id()` single-sources the
-    // convention.
+    // convention. Keyed on `effective_method` so an auto-elevated
+    // record takedown records its returned action id.
     let unified: std::result::Result<Option<BackendActionId>, BackendError> =
-        match (method.returns_action_id(), call_result) {
+        match (effective_method.returns_action_id(), call_result) {
             (true, Ok(id)) => Ok(Some(id)),
             (false, Ok(_)) => Ok(None),
             (_, Err(e)) => Err(e),
@@ -219,7 +268,7 @@ pub async fn dispatch_after_record_action(
     if let Err(e) = record_pds_admin_call(
         pool,
         ctx.action_id,
-        method,
+        effective_method,
         unified,
         started_at,
         completed_at,
@@ -231,42 +280,90 @@ pub async fn dispatch_after_record_action(
         tracing::error!(
             error = %e,
             action_id = ctx.action_id,
-            method = method.as_wire_str(),
+            method = effective_method.as_wire_str(),
             "pds_admin audit insert failed; cairn-mod-side action remains committed"
         );
     }
 }
 
-/// Dispatch the trait method whose shape matches `method`. The
-/// match arms unify on `Result<BackendActionId, BackendError>`
-/// even for unit-result methods — those return a synthesized
-/// "ignored" id that the caller drops via `returns_action_id()`.
+/// Dispatch the trait method whose shape matches `method`, with
+/// subject-shape-aware sub-routing for the takedown verbs
+/// (v1.8.2, §4.5.1). The match arms unify on
+/// `Result<BackendActionId, BackendError>` even for unit-result
+/// methods — those return a synthesized "ignored" id that the
+/// caller drops via `returns_action_id()`.
 ///
-/// `duration_days` is honored only by `SuspendAccount`; the
-/// other methods ignore it (TakedownAccount has no duration
-/// concept; the `RestoreAccount` / label methods are filtered
-/// out by the caller).
+/// **Routing rule (exhaustive over the shape space — no
+/// catch-all, no silent shape coercion):**
+///
+/// - account-verb + account-shaped row → `takedown_account`;
+/// - account-verb + fully record-shaped row (uri AND cid) →
+///   auto-elevates to `takedown_record`;
+/// - explicit record-verb + fully record-shaped row →
+///   `takedown_record`;
+/// - **partial** record coordinates (uri without cid, or cid
+///   without uri) under either takedown verb, or an explicit
+///   record-verb without full coordinates → `Validation`. Never
+///   coerced into a whole-account takedown; never quietly
+///   dropped.
+///
+/// `duration_days` is honored only by `SuspendAccount`; other
+/// methods ignore it. Suspend keeps v1.7's account-level
+/// semantics regardless of row shape (record-level suspension is
+/// not a thing on either backend's wire).
+#[allow(clippy::too_many_arguments)]
 async fn invoke_backend_method(
     backend: &dyn PdsAdminBackend,
     method: BackendMethod,
     did: &str,
+    subject_uri: Option<&str>,
+    subject_cid: Option<&str>,
     reason: &str,
     notes: Option<&str>,
     duration_days: Option<u32>,
     action_id: i64,
 ) -> std::result::Result<BackendActionId, BackendError> {
-    match method {
-        BackendMethod::TakedownAccount => {
+    match (method, subject_uri, subject_cid) {
+        // Account-verb, account-shaped row.
+        (BackendMethod::TakedownAccount, None, None) => {
             backend
                 .takedown_account(did, reason, notes, action_id)
                 .await
         }
-        BackendMethod::SuspendAccount => {
+        // Account-verb, fully record-shaped row: auto-elevate.
+        // Explicit record-verb, fully record-shaped row: direct.
+        (BackendMethod::TakedownAccount, Some(uri), Some(cid))
+        | (BackendMethod::TakedownRecord, Some(uri), Some(cid)) => {
+            let subject = Subject::record(did, uri, Some(cid.to_string()));
+            backend
+                .takedown_record(&subject, reason, notes, action_id)
+                .await
+        }
+        // Partial record coordinates under either takedown verb,
+        // or explicit record-verb without full coordinates:
+        // malformed. Reject; do not elevate, coerce, or fall back
+        // to account-shape dispatch (§4.5.1).
+        (BackendMethod::TakedownAccount, Some(_), None)
+        | (BackendMethod::TakedownAccount, None, Some(_))
+        | (BackendMethod::TakedownRecord, _, _) => Err(BackendError::Validation(format!(
+            "takedown dispatch with partial or missing record coordinates \
+             (uri present: {}, cid present: {}); subject shape must be fully \
+             account (no uri/cid) or fully record (both uri and cid)",
+            subject_uri.is_some(),
+            subject_cid.is_some(),
+        ))),
+        // Suspend: account-level semantics regardless of row shape
+        // (v1.7 behavior unchanged per §4.5.1 "other methods").
+        (BackendMethod::SuspendAccount, _, _) => {
             backend
                 .suspend_account(did, reason, duration_days, notes, action_id)
                 .await
         }
-        BackendMethod::RestoreAccount | BackendMethod::ApplyLabel | BackendMethod::NegateLabel => {
+        (
+            BackendMethod::RestoreAccount | BackendMethod::ApplyLabel | BackendMethod::NegateLabel,
+            _,
+            _,
+        ) => {
             // Filtered out by the dispatch caller; reaching this
             // arm would be a bug in this module.
             unreachable!(
@@ -690,6 +787,30 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
             unimplemented!("RecordingBackend test stub: probe not exercised by dispatch tests")
         }
+
+        async fn takedown_record(
+            &self,
+            subject: &Subject,
+            reason: &str,
+            _notes: Option<&str>,
+            precipitating_action_id: i64,
+        ) -> std::result::Result<BackendActionId, BackendError> {
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "takedown_record",
+                did: subject.did.clone(),
+                reason: reason.to_string(),
+                action_id: precipitating_action_id,
+            });
+            self.takedown_response
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| {
+                    Ok(BackendActionId::new(format!(
+                        "test:record:{precipitating_action_id}"
+                    )))
+                })
+        }
     }
 
     fn policy_with_action_map(
@@ -744,6 +865,8 @@ mod tests {
             action_id,
             action_type: ActionType::Takedown,
             subject_did: did,
+            subject_uri: None,
+            subject_cid: None,
             reason_codes: reasons,
             notes: None,
             duration_iso: None,
@@ -960,6 +1083,8 @@ mod tests {
             action_id,
             action_type: ActionType::TempSuspension,
             subject_did: did,
+            subject_uri: None,
+            subject_cid: None,
             reason_codes: reasons,
             notes: None,
             duration_iso: iso,
@@ -1299,5 +1424,200 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
             unreachable!("SuspensionRecordingBackend test stub: probe not exercised here")
         }
+        async fn takedown_record(
+            &self,
+            _subject: &Subject,
+            _reason: &str,
+            _notes: Option<&str>,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<BackendActionId, BackendError> {
+            unreachable!("test backend does not stub takedown_record")
+        }
+    }
+
+    // ===== v1.8.2 subject-shape routing (§4.5.1) =====
+
+    fn ctx_shaped<'a>(
+        action_id: i64,
+        did: &'a str,
+        uri: Option<&'a str>,
+        cid: Option<&'a str>,
+    ) -> DispatchContext<'a> {
+        static REASONS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let reasons = REASONS.get_or_init(|| vec!["spam".into()]);
+        DispatchContext {
+            action_id,
+            action_type: ActionType::Takedown,
+            subject_did: did,
+            subject_uri: uri,
+            subject_cid: cid,
+            reason_codes: reasons,
+            notes: None,
+            duration_iso: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn record_shaped_row_auto_elevates_to_takedown_record() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        backend.with_takedown_ok("evt-elevated");
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_shaped(
+                action_id,
+                "did:plc:s",
+                Some("at://did:plc:s/app.bsky.feed.post/r1"),
+                Some("bafyr1"),
+            ),
+        )
+        .await;
+
+        // The backend saw takedown_record, not takedown_account.
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "takedown_record");
+
+        // The audit row records the effective method and passes the
+        // 0008-extended CHECK, with the returned action id.
+        let row: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT backend_method, backend_action_id, outcome \
+             FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "takedown_record");
+        assert_eq!(row.1.as_deref(), Some("evt-elevated"));
+        assert_eq!(row.2, "success");
+    }
+
+    #[tokio::test]
+    async fn partial_record_coordinates_reject_with_validation_not_account_takedown() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        // uri present, cid absent — the shape every record-targeted
+        // recordAction row has at v1.8.2 (subject_actions carries no
+        // CID column). §4.5.1's no-fallback rule: Validation, and
+        // crucially NO account-level takedown fires.
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_shaped(
+                action_id,
+                "did:plc:s",
+                Some("at://did:plc:s/app.bsky.feed.post/r1"),
+                None,
+            ),
+        )
+        .await;
+
+        assert!(
+            backend.calls().is_empty(),
+            "no backend method may fire for a partially-shaped subject"
+        );
+        let row: (String, Option<String>, String) = sqlx::query_as(
+            "SELECT backend_method, backend_action_id, outcome \
+             FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.2, "validation");
+        assert_eq!(row.0, "takedown_account");
+        assert!(row.1.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_takedown_record_route_without_coordinates_rejects() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownRecord),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_shaped(action_id, "did:plc:s", None, None),
+        )
+        .await;
+
+        assert!(backend.calls().is_empty());
+        let row: (String, String) = sqlx::query_as(
+            "SELECT backend_method, outcome \
+             FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, "takedown_record");
+        assert_eq!(row.1, "validation");
+    }
+
+    #[tokio::test]
+    async fn explicit_takedown_record_route_with_full_coordinates_dispatches() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        backend.with_takedown_ok("evt-direct");
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownRecord),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_shaped(
+                action_id,
+                "did:plc:s",
+                Some("at://did:plc:s/c/r"),
+                Some("bafyr2"),
+            ),
+        )
+        .await;
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "takedown_record");
     }
 }

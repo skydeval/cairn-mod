@@ -2579,6 +2579,13 @@ impl Writer {
                 action_id: inserted_id,
                 action_type: req.action_type,
                 subject_did: &subject_did,
+                subject_uri: subject_uri.as_deref(),
+                // subject_actions has no CID column (v1.8.2 §4.5.1
+                // note): the pipeline can never supply a record
+                // CID, so record-targeting rows reject at dispatch
+                // with Validation rather than auto-elevating. A
+                // future CID source slots in here.
+                subject_cid: None,
                 reason_codes: &req.reason_codes,
                 notes: req.notes.as_deref(),
                 duration_iso: req.duration_iso.as_deref(),

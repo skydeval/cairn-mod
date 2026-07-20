@@ -49,7 +49,7 @@ use crate::pds_admin::types::Subject;
 /// (`apply_label`, `negate_label`) deliberately return
 /// [`BackendError::ArchitecturallyForbidden`] per the §F4
 /// architectural invariant (see
-/// [`crate::pds_admin::backend::F4_INVARIANT_REASON`]):
+/// [`crate::pds_admin::backend::LABEL_BRIDGE_INVARIANT_REASON`]):
 /// cairn-mod's own `subscribeLabels` (§F4) is the canonical
 /// label-distribution surface to the network, and emitting
 /// labels via the upstream PDS would create a duplicate
@@ -446,6 +446,85 @@ impl PdsAdminBackend for OzoneBackend {
         ))
     }
 
+    /// Record-level takedown via `com.atproto.admin.updateSubjectStatus`
+    /// with a `strongRef` subject (v1.8.2, §4.1) — the same NSID the
+    /// account methods use; only the subject `$type` differs:
+    ///
+    /// ```json
+    /// {
+    ///   "subject": {
+    ///     "$type": "com.atproto.repo.strongRef",
+    ///     "uri": "at://did:.../collection/rkey",
+    ///     "cid": "bafy..."
+    ///   },
+    ///   "takedown": { "applied": true, "ref": "..." }
+    /// }
+    /// ```
+    ///
+    /// `strongRef` requires both `uri` and `cid`; a subject missing
+    /// either is rejected with [`BackendError::Validation`] — never
+    /// coerced to an account-level takedown (§4.5.1's no-fallback
+    /// rule). Like the account methods, no action id comes back from
+    /// bsky-PDS; one is synthesized client-side keyed on the record
+    /// URI (the record-level analog of the DID key).
+    async fn takedown_record(
+        &self,
+        subject: &Subject,
+        reason: &str,
+        notes: Option<&str>,
+        precipitating_action_id: i64,
+    ) -> Result<BackendActionId, BackendError> {
+        let _ = notes;
+        let (Some(uri), Some(cid)) = (subject.at_uri.as_deref(), subject.cid.as_deref()) else {
+            return Err(BackendError::Validation(format!(
+                "takedown_record requires a fully-shaped record subject \
+                 (at_uri and cid both present; strongRef has no optional CID); \
+                 got at_uri={:?} cid={:?} for did {}",
+                subject.at_uri.as_deref(),
+                subject.cid.as_deref(),
+                subject.did
+            )));
+        };
+        let url = self.xrpc_url("com.atproto.admin.updateSubjectStatus")?;
+
+        let body = serde_json::json!({
+            "subject": {
+                "$type": "com.atproto.repo.strongRef",
+                "uri": uri,
+                "cid": cid,
+            },
+            "takedown": {
+                "applied": true,
+                "ref": format!("cairn-mod:action_id={precipitating_action_id}:reason={reason}"),
+            },
+        });
+
+        let response = self
+            .client
+            .post(url)
+            .header(reqwest::header::AUTHORIZATION, self.basic_auth_header())
+            .json(&body)
+            .send()
+            .await
+            .map_err(Self::map_reqwest_error)?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(synthesize_action_id(uri, precipitating_action_id));
+        }
+
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(parse_retry_after_seconds);
+        let body_bytes = response.bytes().await.unwrap_or_default();
+        Err(map_status_to_backend_error(
+            status,
+            &body_bytes,
+            retry_after,
+        ))
+    }
+
     /// Implements `com.atproto.admin.updateSubjectStatus` per
     /// bsky-PDS findings §6.1, structurally identical to
     /// [`Self::takedown_account`].
@@ -595,7 +674,7 @@ impl PdsAdminBackend for OzoneBackend {
     }
 
     /// Returns [`BackendError::ArchitecturallyForbidden`] carrying
-    /// [`crate::pds_admin::backend::F4_INVARIANT_REASON`] — cairn-mod's
+    /// [`crate::pds_admin::backend::LABEL_BRIDGE_INVARIANT_REASON`] — cairn-mod's
     /// `subscribeLabels` (§F4) is the canonical label-distribution
     /// surface to the network, and emitting labels via the upstream
     /// PDS would create a duplicate emission path with audit-trail
@@ -611,7 +690,7 @@ impl PdsAdminBackend for OzoneBackend {
         _expires_days: Option<u32>,
     ) -> Result<(), BackendError> {
         Err(BackendError::ArchitecturallyForbidden(
-            crate::pds_admin::backend::F4_INVARIANT_REASON.to_string(),
+            crate::pds_admin::backend::LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
     }
 
@@ -619,7 +698,7 @@ impl PdsAdminBackend for OzoneBackend {
     /// rationale as [`Self::apply_label`].
     async fn negate_label(&self, _subject: &Subject, _val: &str) -> Result<(), BackendError> {
         Err(BackendError::ArchitecturallyForbidden(
-            crate::pds_admin::backend::F4_INVARIANT_REASON.to_string(),
+            crate::pds_admin::backend::LABEL_BRIDGE_INVARIANT_REASON.to_string(),
         ))
     }
 
