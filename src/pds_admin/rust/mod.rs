@@ -16,11 +16,13 @@
 //! `admin_roles` grant out-of-band (§5.1 of the v1.8.1 doc).
 
 pub mod action_types;
+pub mod audit_types;
 mod emit_event;
 pub mod read_types;
 pub mod service_auth;
 
 use action_types::{ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus};
+use audit_types::{AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry};
 use emit_event::{EmitEventAction, EmitEventDispatch, EmitEventSubject};
 use read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
@@ -93,6 +95,15 @@ const SUBJECT_HISTORY_FAMILY: &str = "subject-history";
 const SUBJECT_HISTORY_CAPABILITY: &str = "subject-history-v1";
 const APPEALS_FAMILY: &str = "appeals";
 const APPEALS_CAPABILITY: &str = "appeals-v1";
+
+/// NSIDs + capability family of the v1.8.6 audit-trail reads
+/// (admin namespace — Aurora attributes `audit-trail-v1` to
+/// getAuditTrail only; cairn-mod gates both reads on the shared
+/// family per v2 LB-1).
+const GET_AUDIT_TRAIL_NSID: &str = "tools.aurora.admin.getAuditTrail";
+const GET_AUDIT_ENTRY_NSID: &str = "tools.aurora.admin.getAuditEntry";
+const AUDIT_TRAIL_FAMILY: &str = "audit-trail";
+const AUDIT_TRAIL_CAPABILITY: &str = "audit-trail-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -1043,6 +1054,63 @@ impl PdsAdminBackend for RustBackend {
             APPEALS_CAPABILITY,
             GET_APPEAL_NSID,
             &Params { id: appeal_id },
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Paged audit-trail fetch via
+    /// `GET tools.aurora.admin.getAuditTrail` (v1.8.6). Returns
+    /// the page plus Aurora's whole-chain verify verdict; Path A
+    /// re-verification happens caller-side (upstream_verify).
+    async fn get_audit_trail(
+        &self,
+        filter: AuditTrailFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<AuditTrailPage, BackendError> {
+        self.dispatch_moderator_read(
+            AUDIT_TRAIL_FAMILY,
+            AUDIT_TRAIL_CAPABILITY,
+            GET_AUDIT_TRAIL_NSID,
+            &filter,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Single audit-entry fetch via
+    /// `GET tools.aurora.admin.getAuditEntry` (v1.8.6). The
+    /// lookup enum makes Aurora's 400-on-both/neither shape
+    /// unrepresentable.
+    async fn get_audit_entry(
+        &self,
+        lookup: &AuditEntryLookup,
+    ) -> Result<AuroraAuditEntry, BackendError> {
+        #[derive(serde::Serialize)]
+        struct Params<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            id: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            hash: Option<&'a str>,
+        }
+        let params = match lookup {
+            AuditEntryLookup::Id(id) => Params {
+                id: Some(*id),
+                hash: None,
+            },
+            AuditEntryLookup::Hash(h) => Params {
+                id: None,
+                hash: Some(h),
+            },
+        };
+        self.dispatch_moderator_read(
+            AUDIT_TRAIL_FAMILY,
+            AUDIT_TRAIL_CAPABILITY,
+            GET_AUDIT_ENTRY_NSID,
+            &params,
             None,
             None,
         )

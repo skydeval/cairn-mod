@@ -1058,6 +1058,24 @@ mod tests {
             unimplemented!()
         }
 
+        async fn get_audit_trail(
+            &self,
+            _filter: crate::pds_admin::rust::audit_types::AuditTrailFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<crate::pds_admin::rust::audit_types::AuditTrailPage, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.6 audit reads")
+        }
+
+        async fn get_audit_entry(
+            &self,
+            _lookup: &crate::pds_admin::rust::audit_types::AuditEntryLookup,
+        ) -> std::result::Result<crate::pds_admin::rust::audit_types::AuroraAuditEntry, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.6 audit reads")
+        }
+
         async fn probe(
             &self,
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
@@ -2169,6 +2187,24 @@ mod tests {
             _val: &str,
         ) -> std::result::Result<(), BackendError> {
             unreachable!()
+        }
+
+        async fn get_audit_trail(
+            &self,
+            _filter: crate::pds_admin::rust::audit_types::AuditTrailFilter,
+            _cursor: Option<&str>,
+            _limit: Option<u32>,
+        ) -> std::result::Result<crate::pds_admin::rust::audit_types::AuditTrailPage, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.6 audit reads")
+        }
+
+        async fn get_audit_entry(
+            &self,
+            _lookup: &crate::pds_admin::rust::audit_types::AuditEntryLookup,
+        ) -> std::result::Result<crate::pds_admin::rust::audit_types::AuroraAuditEntry, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.6 audit reads")
         }
 
         async fn probe(

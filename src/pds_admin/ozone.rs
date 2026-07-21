@@ -872,6 +872,24 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.6 audit-trail reads: `Unsupported` on Ozone (same
+    /// posture as every read stub since v1.8.3).
+    async fn get_audit_trail(
+        &self,
+        _filter: crate::pds_admin::rust::audit_types::AuditTrailFilter,
+        _cursor: Option<&str>,
+        _limit: Option<u32>,
+    ) -> Result<crate::pds_admin::rust::audit_types::AuditTrailPage, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_audit_entry(
+        &self,
+        _lookup: &crate::pds_admin::rust::audit_types::AuditEntryLookup,
+    ) -> Result<crate::pds_admin::rust::audit_types::AuroraAuditEntry, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.4 moderator reads: same `Unsupported` posture as the
     /// v1.8.3 reads (no Ozone-service URL in config; honest
     /// "switch backends" refusal).

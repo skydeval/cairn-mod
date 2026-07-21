@@ -21,6 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::rust::action_types::{
     ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus,
 };
+use super::rust::audit_types::{AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry};
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -933,6 +934,30 @@ pub trait PdsAdminBackend: Send + Sync {
     /// a distinct type from [`AppealView`]. Gates on `appeals`
     /// (shared with [`Self::list_appeals`]).
     async fn get_appeal(&self, appeal_id: i64) -> Result<AppealDetail, BackendError>;
+
+    /// Fetch a page of Aurora's hash-chained audit trail (v1.8.6)
+    /// — `tools.aurora.admin.getAuditTrail`. Gates on the
+    /// `audit-trail` capability family. The response carries
+    /// Aurora's own whole-chain verify verdict; independent Path A
+    /// re-verification is the caller's job (see
+    /// `crate::pds_admin::rust::upstream_verify`).
+    async fn get_audit_trail(
+        &self,
+        filter: AuditTrailFilter,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<AuditTrailPage, BackendError>;
+
+    /// Fetch a single Aurora audit-chain entry by id or by
+    /// `current_hash` (v1.8.6) — `tools.aurora.admin.getAuditEntry`.
+    /// Shares the `audit-trail` gate (Aurora leaves this endpoint
+    /// bare-role-gated; cairn-mod gates both audit reads on one
+    /// family per v2 LB-1). Unknown ids/hashes map to
+    /// [`BackendError::Terminal`] (upstream 404).
+    async fn get_audit_entry(
+        &self,
+        lookup: &AuditEntryLookup,
+    ) -> Result<AuroraAuditEntry, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///

@@ -107,6 +107,12 @@ pub enum AuroraNsid {
     /// `tools.aurora.moderator.getAppeal` — single-appeal fetch
     /// with lifecycle timeline (v1.8.4).
     ModeratorGetAppeal,
+    /// `tools.aurora.admin.getAuditTrail` — hash-chained audit
+    /// trail read (v1.8.6).
+    AdminGetAuditTrail,
+    /// `tools.aurora.admin.getAuditEntry` — single audit-chain
+    /// entry fetch (v1.8.6).
+    AdminGetAuditEntry,
 }
 
 impl AuroraNsid {
@@ -125,6 +131,8 @@ impl AuroraNsid {
             Self::ModeratorGetSubjectHistory => "tools.aurora.moderator.getSubjectHistory",
             Self::ModeratorListAppeals => "tools.aurora.moderator.listAppeals",
             Self::ModeratorGetAppeal => "tools.aurora.moderator.getAppeal",
+            Self::AdminGetAuditTrail => "tools.aurora.admin.getAuditTrail",
+            Self::AdminGetAuditEntry => "tools.aurora.admin.getAuditEntry",
         }
     }
 }
@@ -188,7 +196,9 @@ impl Nsid {
                 | AuroraNsid::ModeratorGetSubjectContext
                 | AuroraNsid::ModeratorGetSubjectHistory
                 | AuroraNsid::ModeratorListAppeals
-                | AuroraNsid::ModeratorGetAppeal,
+                | AuroraNsid::ModeratorGetAppeal
+                | AuroraNsid::AdminGetAuditTrail
+                | AuroraNsid::AdminGetAuditEntry,
             ) => Method::GET,
         }
     }
@@ -293,6 +303,14 @@ mod tests {
             (
                 AuroraNsid::ModeratorGetAppeal,
                 "tools.aurora.moderator.getAppeal",
+            ),
+            (
+                AuroraNsid::AdminGetAuditTrail,
+                "tools.aurora.admin.getAuditTrail",
+            ),
+            (
+                AuroraNsid::AdminGetAuditEntry,
+                "tools.aurora.admin.getAuditEntry",
             ),
         ];
         for (variant, wire) in variants {

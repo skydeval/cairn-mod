@@ -332,6 +332,12 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // v1.8.4's `list_appeals`/`get_appeal` consume it.
     // AutoAdvance: read-only surface.
     ("appeals", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `audit-trail-v1` on
+    // `tools.aurora.admin.getAuditTrail` (attribution per Aurora
+    // `admin.rs:641-649`; getAuditEntry is bare-role-gated and
+    // shares cairn-mod's gate); v1.8.6's audit reads consume it.
+    // AutoAdvance: read-only surface.
+    ("audit-trail", CapabilityClassification::AutoAdvance),
 ];
 
 /// Look up a family's classification in the registry.
@@ -690,7 +696,7 @@ mod cross_release_type_tests {
         // adds the three read families (subject-context,
         // subject-history, appeals). All read
         // methods). Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 5);
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 6);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -710,6 +716,10 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[4],
             ("appeals", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[5],
+            ("audit-trail", CapabilityClassification::AutoAdvance)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that
@@ -742,6 +752,10 @@ mod cross_release_type_tests {
         );
         assert_eq!(
             classification_for("appeals"),
+            Some(CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            classification_for("audit-trail"),
             Some(CapabilityClassification::AutoAdvance)
         );
         // The wire string (with suffix) is NOT a family and must
