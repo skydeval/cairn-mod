@@ -24,6 +24,7 @@ use super::rust::action_types::{
 use super::rust::audit_types::{
     AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry,
 };
+use super::rust::batch_types::BatchOutcome;
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -960,6 +961,145 @@ pub trait PdsAdminBackend: Send + Sync {
         &self,
         lookup: &AuditEntryLookup,
     ) -> Result<AuroraAuditEntry, BackendError>;
+
+    /// Take down up to [`super::rust::batch_types::MAX_BATCH_SIZE`]
+    /// accounts in one atomic upstream transaction (v1.8.7) —
+    /// `tools.aurora.admin.batchTakedownAccounts`. Moderator+
+    /// upstream; gated on the `batch-takedown` capability family
+    /// (**OperatorOptIn** — the Rust backend additionally requires
+    /// an operator `pinned_versions` entry, §8.1).
+    ///
+    /// Whole-batch atomicity per Aurora's contract: partial
+    /// success is unobservable — any per-subject failure aborts
+    /// the entire upstream transaction and surfaces the failing
+    /// index/identifier in the mapped error's message.
+    /// `precipitating_action_id` is the local batch intent row id
+    /// (v1.8.5 convention).
+    async fn batch_takedown_accounts(
+        &self,
+        dids: &[String],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<BatchOutcome, BackendError>;
+
+    /// Suspend up to `MAX_BATCH_SIZE` accounts atomically
+    /// (v1.8.7) — `tools.aurora.admin.batchSuspendAccounts`.
+    /// **Indefinite-only**: Aurora's batch-suspend wire has no
+    /// duration field, so the trait deliberately takes none.
+    /// Same gate/atomicity contract as
+    /// [`Self::batch_takedown_accounts`].
+    async fn batch_suspend_accounts(
+        &self,
+        dids: &[String],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<BatchOutcome, BackendError>;
+
+    /// Restore up to `MAX_BATCH_SIZE` accounts atomically
+    /// (v1.8.7) — `tools.aurora.admin.batchRestoreAccounts`.
+    ///
+    /// **Trait-only in v1.8.7 (LB-A)**: no CLI subcommand, no
+    /// recordAction writer path, no local `subject_actions` /
+    /// `pds_admin_audit` row — the method dispatches directly to
+    /// Aurora for programmatic callers. cairn-mod's shipped
+    /// restore semantics ride the revoke flow (`revoke_action` +
+    /// `dispatch_after_revoke_action`), which is single-target;
+    /// extending it to batch shape is deferred to a future
+    /// batch-revoke design cycle. No prior-action parameter:
+    /// Aurora reverses each DID's *current* state server-side
+    /// (same non-transmission as [`Self::restore_account`]), and
+    /// no `precipitating_action_id` because there is no local
+    /// intent row.
+    async fn batch_restore_accounts(
+        &self,
+        dids: &[String],
+        rationale: &str,
+    ) -> Result<BatchOutcome, BackendError>;
+
+    /// Take down up to `MAX_BATCH_SIZE` records **URI-level** in
+    /// one atomic upstream transaction (v1.8.7) —
+    /// `tools.aurora.admin.batchTakedownRecords`. Takes bare
+    /// AT-URIs (not CID-anchored subjects): Aurora's documented
+    /// empty-CID cascade convention makes each entry a takedown
+    /// of *all versions* at that URI. The convention is scoped to
+    /// this endpoint exclusively — CID-level batch takedowns
+    /// belong on [`Self::takedown_record_many`] (v2 §3.3).
+    async fn batch_takedown_records(
+        &self,
+        uris: &[String],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<BatchOutcome, BackendError>;
+
+    /// Multi-subject [`Self::delete_account`] (v1.8.7) — one
+    /// `emitEvent{DeleteAccount}` with an N-element subjects
+    /// array. Cap
+    /// [`super::rust::batch_types::MAX_SUBJECTS_DELETE_ACCOUNT`]
+    /// (10, the tightest multi-subject cap). Admin+ role floor
+    /// upstream, `mod-events-emit` family — multi-subject is a
+    /// shape modifier on the already-gated verb, not a new
+    /// capability (v2 §8.2).
+    async fn delete_account_many(
+        &self,
+        dids: &[String],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Multi-subject [`Self::quarantine_blob`] (v1.8.7). Cap
+    /// [`super::rust::batch_types::MAX_SUBJECTS_DEFAULT`] (50).
+    async fn quarantine_blob_many(
+        &self,
+        subjects: &[BlobSubject],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Multi-subject [`Self::restore_blob`] (v1.8.7). Cap 50.
+    /// Unit-result per the restore symmetry; `prior_action_id` is
+    /// one shared trait-boundary reference for the batch, ignored
+    /// on the wire like its singular sibling's.
+    async fn restore_blob_many(
+        &self,
+        subjects: &[BlobSubject],
+        prior_action_id: &BackendActionId,
+        rationale: &str,
+    ) -> Result<(), BackendError>;
+
+    /// Multi-subject [`Self::delete_blob`] (v1.8.7). Cap
+    /// [`super::rust::batch_types::MAX_SUBJECTS_DELETE_BLOB`]
+    /// (25).
+    async fn delete_blob_many(
+        &self,
+        subjects: &[BlobSubject],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Multi-subject [`Self::takedown_record`] (v1.8.7). Cap 50.
+    /// **CID-required** on every subject (S-2): Aurora's
+    /// multi-subject `TakedownRecord` arm performs no CID
+    /// validation — an empty CID would flow through with
+    /// undefined downstream semantics — so cairn-mod pre-rejects
+    /// empty/absent CIDs with [`BackendError::Validation`].
+    /// URI-level batch takedowns are exclusively
+    /// [`Self::batch_takedown_records`] territory.
+    async fn takedown_record_many(
+        &self,
+        subjects: &[Subject],
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
+
+    /// Multi-subject [`Self::update_subject_status`] (v1.8.7) —
+    /// one tri-state status applied to N accounts. Cap 50.
+    async fn update_subject_status_many(
+        &self,
+        dids: &[String],
+        status: SubjectStatus,
+        rationale: &str,
+        precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///

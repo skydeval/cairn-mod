@@ -17,6 +17,7 @@
 
 pub mod action_types;
 pub mod audit_types;
+pub mod batch_types;
 mod emit_event;
 pub mod read_types;
 pub mod service_auth;
@@ -1116,6 +1117,100 @@ impl PdsAdminBackend for RustBackend {
             None,
         )
         .await
+    }
+
+    // ---- v1.8.7 batch + multi-subject methods: Phase 1
+    // compile-stubs; real dispatch bodies land in Phase 2
+    // (chainlink #143). ----
+
+    async fn batch_takedown_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_suspend_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_restore_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+    ) -> Result<batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_takedown_records(
+        &self,
+        _uris: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn delete_account_many(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn quarantine_blob_many(
+        &self,
+        _subjects: &[BlobSubject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn restore_blob_many(
+        &self,
+        _subjects: &[BlobSubject],
+        _prior_action_id: &BackendActionId,
+        _rationale: &str,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn delete_blob_many(
+        &self,
+        _subjects: &[BlobSubject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn takedown_record_many(
+        &self,
+        _subjects: &[Subject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn update_subject_status_many(
+        &self,
+        _dids: &[String],
+        _status: SubjectStatus,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

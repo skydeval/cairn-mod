@@ -890,6 +890,101 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.7 batch + multi-subject methods: `Unsupported` on
+    /// Ozone across the board — the batch surface is
+    /// Aurora-specific (`tools.aurora.admin.batch*` + Aurora's
+    /// multi-subject emitEvent); bsky-PDS has no equivalent
+    /// atomic-batch wire.
+    async fn batch_takedown_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_suspend_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_restore_accounts(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+    ) -> Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn batch_takedown_records(
+        &self,
+        _uris: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn delete_account_many(
+        &self,
+        _dids: &[String],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn quarantine_blob_many(
+        &self,
+        _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn restore_blob_many(
+        &self,
+        _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+        _prior_action_id: &BackendActionId,
+        _rationale: &str,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn delete_blob_many(
+        &self,
+        _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn takedown_record_many(
+        &self,
+        _subjects: &[Subject],
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn update_subject_status_many(
+        &self,
+        _dids: &[String],
+        _status: crate::pds_admin::rust::action_types::SubjectStatus,
+        _rationale: &str,
+        _precipitating_action_id: i64,
+    ) -> Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.4 moderator reads: same `Unsupported` posture as the
     /// v1.8.3 reads (no Ozone-service URL in config; honest
     /// "switch backends" refusal).

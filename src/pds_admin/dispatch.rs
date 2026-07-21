@@ -1076,6 +1076,105 @@ mod tests {
             unimplemented!("test backend does not stub v1.8.6 audit reads")
         }
 
+        async fn batch_takedown_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_suspend_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_restore_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_takedown_records(
+            &self,
+            _uris: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn delete_account_many(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn quarantine_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn restore_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _prior_action_id: &BackendActionId,
+            _rationale: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn delete_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn takedown_record_many(
+            &self,
+            _subjects: &[Subject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn update_subject_status_many(
+            &self,
+            _dids: &[String],
+            _status: crate::pds_admin::rust::action_types::SubjectStatus,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
         async fn probe(
             &self,
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
@@ -2205,6 +2304,105 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::rust::audit_types::AuroraAuditEntry, BackendError>
         {
             unimplemented!("test backend does not stub v1.8.6 audit reads")
+        }
+
+        async fn batch_takedown_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_suspend_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_restore_accounts(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn batch_takedown_records(
+            &self,
+            _uris: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn delete_account_many(
+            &self,
+            _dids: &[String],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn quarantine_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn restore_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _prior_action_id: &BackendActionId,
+            _rationale: &str,
+        ) -> std::result::Result<(), BackendError> {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn delete_blob_many(
+            &self,
+            _subjects: &[crate::pds_admin::rust::action_types::BlobSubject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn takedown_record_many(
+            &self,
+            _subjects: &[Subject],
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn update_subject_status_many(
+            &self,
+            _dids: &[String],
+            _status: crate::pds_admin::rust::action_types::SubjectStatus,
+            _rationale: &str,
+            _precipitating_action_id: i64,
+        ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
+        {
+            unimplemented!("test backend does not stub v1.8.7 batch methods")
         }
 
         async fn probe(
