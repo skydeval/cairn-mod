@@ -338,6 +338,19 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // shares cairn-mod's gate); v1.8.6's audit reads consume it.
     // AutoAdvance: read-only surface.
     ("audit-trail", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `batch-takedown-v1` on
+    // `tools.aurora.admin.batchTakedownAccounts` with the other
+    // five batch routes sharing the family (attribution per
+    // Aurora `admin.rs:544-573`); v1.8.7's four dedicated batch
+    // methods consume it. **OperatorOptIn — the registry's first
+    // such entry, and its first runtime consumer**: destructive
+    // batch surfaces don't activate on advertisement alone. The
+    // dispatch gate additionally requires an operator
+    // `[pds_admin.rust.pinned_versions]` entry for the family
+    // (`batch-takedown = "v1"`); unpinned dispatch refuses with
+    // `CapabilityNotAdvertised`. See
+    // `rust::RustBackend::dispatch_batch`.
+    ("batch-takedown", CapabilityClassification::OperatorOptIn),
 ];
 
 /// Look up a family's classification in the registry.
@@ -694,9 +707,11 @@ mod cross_release_type_tests {
         // v1.8.1 populated mod-events-emit (consumed by v1.8.2's
         // action verbs); v1.8.3 adds moderator-activity; v1.8.4
         // adds the three read families (subject-context,
-        // subject-history, appeals). All read
-        // methods). Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 6);
+        // subject-history, appeals); v1.8.6 adds audit-trail;
+        // v1.8.7 adds batch-takedown — the first OperatorOptIn
+        // entry AND the first runtime consumer of the
+        // classification. Entries are suffix-less family names.
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 7);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -720,6 +735,10 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[5],
             ("audit-trail", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[6],
+            ("batch-takedown", CapabilityClassification::OperatorOptIn)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that
