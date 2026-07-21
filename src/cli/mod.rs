@@ -26,6 +26,7 @@ pub mod operator_login;
 pub mod operator_session;
 pub mod output;
 pub mod pds;
+pub mod audit_cross_verify;
 pub mod pds_admin;
 pub mod pds_admin_actions;
 pub mod pds_admin_reads;

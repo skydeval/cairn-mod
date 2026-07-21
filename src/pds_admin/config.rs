@@ -189,11 +189,10 @@ pub struct RustBackendConfig {
     /// accepted now so operators can pre-configure.
     pub verification_persist: bool,
     /// Operator's explicit acknowledgment of the v1.8.1
-    /// inspector-only audit divergence. **Required `true`**
-    /// when the bridge is enabled and this backend is
-    /// selected; otherwise the
-    /// [`validate_audit_divergence_acknowledgment`] gate
-    /// rejects the configuration at startup. Self-removing
+    /// inspector-only audit divergence. **Deprecated as of
+    /// v1.8.6** (advisory WARN when set; no longer required —
+    /// the divergence is closed by `cairn audit cross-verify`).
+    /// Removed at v1.8.11 series-wrap. Historical: self-removing
     /// across the v1.8 series: required v1.8.1, deprecated
     /// v1.8.2, removed v1.8.3.
     pub acknowledge_v1_8_1_audit_divergence: bool,
@@ -1031,6 +1030,17 @@ where
     }
 
     let verification_persist = toml.verification_persist.unwrap_or(true);
+    // v1.8.6 (v2 §8.1): the acknowledgment flag is deprecated —
+    // setting it (either value) draws a WARN pointing at the
+    // v1.8.6 CHANGELOG; it is removed entirely at v1.8.11.
+    if toml.acknowledge_v1_8_1_audit_divergence.is_some() {
+        tracing::warn!(
+            "config: [pds_admin.rust].acknowledge_v1_8_1_audit_divergence is deprecated \
+             as of v1.8.6 (the v1.8.1 audit divergence is closed by `cairn audit \
+             cross-verify`; see the v1.8.6 CHANGELOG). The field is ignored and will be \
+             removed in v1.8.11 — drop it from your config."
+        );
+    }
     let acknowledge_v1_8_1_audit_divergence =
         toml.acknowledge_v1_8_1_audit_divergence.unwrap_or(false);
 
@@ -1114,10 +1124,18 @@ pub fn validate_audit_divergence_acknowledgment(
         _ => return Ok(()),
     };
 
-    // Part 1: acknowledgment flag.
-    if !rust.acknowledge_v1_8_1_audit_divergence {
-        return Err(PdsAdminConfigError::AuditDivergenceAcknowledgmentRequired);
-    }
+    // Part 1 (acknowledgment flag) — retired to an advisory WARN
+    // at v1.8.6 (v2 §8.1): the inspector-era audit divergence the
+    // flag acknowledged is closed by cross-chain verification
+    // (`cairn audit cross-verify`). The WARN fires at parse time
+    // in `validated_rust_from_toml` when the deprecated field is
+    // present; the reject-when-false behavior is gone. Field
+    // removal lands at v1.8.11 series-wrap. Parts 2 and 3 below
+    // are retained as-is — they enforce unrelated coexistence
+    // rules, and relaxing either is a design decision v1.8.6 does
+    // not take up (stale `InspectorRustBackend` naming also queued
+    // for v1.8.11).
+    let _ = &rust.acknowledge_v1_8_1_audit_divergence;
 
     // Part 2: no auto-mode policy-automation rules.
     if let Some(pa) = policy_automation {
@@ -2514,15 +2532,15 @@ mod tests {
         }
     }
 
+    /// v1.8.6 (v2 §8.1): Part 1 retired to an advisory WARN — a
+    /// missing/false acknowledgment no longer rejects (the
+    /// divergence it acknowledged is closed by cross-verify).
+    /// Parts 2 and 3 keep their own coverage below.
     #[test]
-    fn divergence_rust_missing_ack_rejects() {
+    fn divergence_rust_missing_ack_passes_since_v1_8_6() {
         let policy = policy_rust(false);
-        let err = validate_audit_divergence_acknowledgment(&policy, None, None)
-            .expect_err("missing ack rejects");
-        assert_eq!(
-            err,
-            PdsAdminConfigError::AuditDivergenceAcknowledgmentRequired
-        );
+        validate_audit_divergence_acknowledgment(&policy, None, None)
+            .expect("Part 1 is advisory since v1.8.6; unset/false ack no longer rejects");
     }
 
     #[test]

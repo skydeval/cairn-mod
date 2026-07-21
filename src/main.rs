@@ -922,6 +922,13 @@ enum AuditSub {
     /// dedicated exit code (15 `AUDIT_DIVERGENCE`) so monitoring
     /// can branch on chain failure.
     Verify(AuditVerifyArgs),
+    /// Cross-verify cairn-mod's dispatch ledger against the
+    /// upstream PDS's hash-chained audit trail (v1.8.6): local
+    /// 4-table chain verify, independent Path A re-verification
+    /// of the upstream chain, and join-key comparison. Exits 15
+    /// on any divergence; `--json` carries the outcome
+    /// discriminator.
+    CrossVerify(AuditCrossVerifyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -950,6 +957,31 @@ struct AuditVerifyArgs {
     /// `verified` / `divergence`) for downstream tooling.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Args)]
+struct AuditCrossVerifyArgs {
+    /// Restrict the independent upstream walk + join window to
+    /// sequences >= this value.
+    #[arg(long = "start-sequence")]
+    start_sequence: Option<i64>,
+    /// Restrict to sequences <= this value.
+    #[arg(long = "end-sequence")]
+    end_sequence: Option<i64>,
+    /// List past cross-verify outcomes instead of running one.
+    #[arg(long)]
+    history: bool,
+    /// Max history rows to list (with --history).
+    #[arg(long, default_value_t = 20)]
+    limit: i64,
+    /// Emit JSON instead of the human summary.
+    #[arg(long)]
+    json: bool,
+    /// Path to the TOML config file (same semantics as
+    /// `cairn audit verify` — direct-DB plus the outbound
+    /// backend from `[pds_admin]`).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1702,6 +1734,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         Command::Audit {
             sub: AuditSub::Verify(args),
         } => run_audit_verify(args).await,
+        Command::Audit {
+            sub: AuditSub::CrossVerify(args),
+        } => run_audit_cross_verify(args).await,
         Command::Retention {
             sub: RetentionSub::Sweep(args),
         } => run_retention_sweep(args).await,
@@ -2397,6 +2432,59 @@ async fn run_audit_rebuild(args: AuditRebuildArgs) -> Result<(), CliError> {
         println!("{}", audit_rebuild::format_human(&outcome));
     }
     Ok(())
+}
+
+async fn run_audit_cross_verify(args: AuditCrossVerifyArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+
+    if args.history {
+        let rows = cairn_mod::cli::audit_cross_verify::history(&pool, args.limit).await?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        } else {
+            println!("{}", cairn_mod::cli::audit_cross_verify::format_history_human(&rows));
+        }
+        return Ok(());
+    }
+
+    cli_pds_admin::verify_pds_admin_enabled(&config)?;
+    // The verification_persist gate (first consumer of the field
+    // since its v1.8.1 parse+store landing).
+    let policy = cairn_mod::pds_admin::PdsAdminPolicy::from_config(&config)
+        .map_err(|e| CliError::Config(format!("pds_admin policy: {e}")))?;
+    let verification_persist = match &policy.backend {
+        Some(cairn_mod::pds_admin::PdsAdminBackendConfig::Rust(r)) => r.verification_persist,
+        _ => true,
+    };
+    let backend = cli_pds_admin_reads::backend_for_reads(&config).await?;
+
+    let report = cairn_mod::cli::audit_cross_verify::run(
+        &pool,
+        backend.as_ref(),
+        verification_persist,
+        (args.start_sequence, args.end_sequence),
+    )
+    .await?;
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).unwrap_or_default()
+        );
+    } else {
+        println!("{}", cairn_mod::cli::audit_cross_verify::format_report_human(&report));
+    }
+
+    match report.outcome {
+        cairn_mod::cli::audit_cross_verify::CrossVerifyOutcome::Verified
+        | cairn_mod::cli::audit_cross_verify::CrossVerifyOutcome::Empty => Ok(()),
+        divergent => Err(CliError::CrossVerifyDivergence {
+            outcome: divergent.as_str(),
+        }),
+    }
 }
 
 async fn run_audit_verify(args: AuditVerifyArgs) -> Result<(), CliError> {

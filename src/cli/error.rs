@@ -258,6 +258,16 @@ pub enum CliError {
         /// across both tables in the unified chain.
         attested_rows_before_divergence: i64,
     },
+
+    /// v1.8.6 cross-chain divergence (`cairn audit cross-verify`).
+    /// Same exit code as local divergence (15); the JSON `outcome`
+    /// discriminator (`divergence-local` / `divergence-cross` /
+    /// `divergence-join-mismatch`) carries the taxonomy.
+    #[error("cross-chain audit divergence ({outcome}); see the printed report")]
+    CrossVerifyDivergence {
+        /// The kebab-case outcome discriminator.
+        outcome: &'static str,
+    },
 }
 
 impl CliError {
@@ -312,6 +322,7 @@ impl CliError {
             CliError::ServiceRecordAbsent { .. } => code::SERVICE_RECORD_ABSENT,
             CliError::ServiceRecordUnreachable { .. } => code::SERVICE_RECORD_UNREACHABLE,
             CliError::AuditDivergence { .. } => code::AUDIT_DIVERGENCE,
+            CliError::CrossVerifyDivergence { .. } => code::AUDIT_DIVERGENCE,
         }
     }
 }
