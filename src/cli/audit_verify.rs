@@ -312,13 +312,14 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
             // v1.8.6 boundary-aware two-form verify for
             // pds_admin_audit rows (v2 §5.2/§5.3).
             UnifiedEntry::PdsAdmin(r) if r.id > format_boundary => {
-                let v12 = compute_pds_admin_audit_row_hash(&running_prev_hash, &r.hashing_row_v12())
-                    .map_err(|e| {
-                        CliError::Startup(format!(
-                            "audit verify: pds_admin_audit:{} hash compute: {e}",
-                            r.id
-                        ))
-                    })?;
+                let v12 =
+                    compute_pds_admin_audit_row_hash(&running_prev_hash, &r.hashing_row_v12())
+                        .map_err(|e| {
+                            CliError::Startup(format!(
+                                "audit verify: pds_admin_audit:{} hash compute: {e}",
+                                r.id
+                            ))
+                        })?;
                 if v12 == stored_row_hash {
                     v12
                 } else {
@@ -330,11 +331,11 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
                     let v9 =
                         compute_pds_admin_audit_row_hash(&running_prev_hash, &r.hashing_row_v9())
                             .map_err(|e| {
-                                CliError::Startup(format!(
-                                    "audit verify: pds_admin_audit:{} hash compute: {e}",
-                                    r.id
-                                ))
-                            })?;
+                            CliError::Startup(format!(
+                                "audit verify: pds_admin_audit:{} hash compute: {e}",
+                                r.id
+                            ))
+                        })?;
                     if v9 == stored_row_hash {
                         legacy_form_rows += 1;
                         v9
@@ -535,9 +536,7 @@ impl UnifiedEntry {
             ),
             // Pre-boundary form only; the walk loop special-cases
             // post-boundary PdsAdmin rows for the 12-then-9 dance.
-            Self::PdsAdmin(r) => {
-                compute_pds_admin_audit_row_hash(prev_hash, &r.hashing_row_v9())
-            }
+            Self::PdsAdmin(r) => compute_pds_admin_audit_row_hash(prev_hash, &r.hashing_row_v9()),
             Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => recompute_membership_row_hash(
                 prev_hash,
                 &r.did,

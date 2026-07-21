@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", run_started_at, run_completed_at,\n                  local_verified, upstream_verified, cross_verified,\n                  cross_verify_notes\n           FROM cross_verify_outcomes\n           ORDER BY run_started_at DESC, id DESC\n           LIMIT ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "run_started_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "run_completed_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "local_verified",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "upstream_verified",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cross_verified",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "cross_verify_notes",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ab967180290b5488fb65ab04bf3c35b8ab6c1958ff0608700cff85fe59e75919"
+}

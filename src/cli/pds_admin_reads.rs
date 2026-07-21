@@ -34,9 +34,7 @@ use crate::pds_admin::{
 /// reads the signing-key env var). For the Rust backend, runs the
 /// startup probe so the capability set is populated before the
 /// read dispatch's capability gate runs.
-pub async fn backend_for_reads(
-    config: &Config,
-) -> Result<Box<dyn PdsAdminBackend>, CliError> {
+pub async fn backend_for_reads(config: &Config) -> Result<Box<dyn PdsAdminBackend>, CliError> {
     let policy = PdsAdminPolicy::from_config(config)
         .map_err(|e| CliError::Config(format!("pds_admin policy: {e}")))?;
     if !policy.enabled {

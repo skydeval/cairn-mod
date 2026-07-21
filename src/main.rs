@@ -2443,9 +2443,15 @@ async fn run_audit_cross_verify(args: AuditCrossVerifyArgs) -> Result<(), CliErr
     if args.history {
         let rows = cairn_mod::cli::audit_cross_verify::history(&pool, args.limit).await?;
         if args.json {
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
         } else {
-            println!("{}", cairn_mod::cli::audit_cross_verify::format_history_human(&rows));
+            println!(
+                "{}",
+                cairn_mod::cli::audit_cross_verify::format_history_human(&rows)
+            );
         }
         return Ok(());
     }
@@ -2475,7 +2481,10 @@ async fn run_audit_cross_verify(args: AuditCrossVerifyArgs) -> Result<(), CliErr
             serde_json::to_string_pretty(&report).unwrap_or_default()
         );
     } else {
-        println!("{}", cairn_mod::cli::audit_cross_verify::format_report_human(&report));
+        println!(
+            "{}",
+            cairn_mod::cli::audit_cross_verify::format_report_human(&report)
+        );
     }
 
     match report.outcome {

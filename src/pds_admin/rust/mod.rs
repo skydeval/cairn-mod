@@ -19,8 +19,8 @@ pub mod action_types;
 pub mod audit_types;
 mod emit_event;
 pub mod read_types;
-pub mod upstream_verify;
 pub mod service_auth;
+pub mod upstream_verify;
 
 use action_types::{ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus};
 use audit_types::{AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry};

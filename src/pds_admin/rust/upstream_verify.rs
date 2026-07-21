@@ -118,20 +118,37 @@ pub const PRE_CHAIN_SENTINEL: &str = "pre-chain";
 /// strings.
 #[derive(Debug, Clone, Default)]
 pub struct CanonicalFields {
+    /// Chain sequence (numeric in the canonical form).
     pub sequence: i64,
+    /// Stored `created_at` TEXT (`+00:00` form; post-T1).
     pub timestamp: String,
+    /// Deciding actor's DID.
     pub actor_did: String,
+    /// Action verb.
     pub action: String,
+    /// Flat subject triple per the Section C variant table.
     pub subject_did: Option<String>,
+    /// Record URI (or a Blob's originating-record URI).
     pub subject_uri: Option<String>,
+    /// Record/blob CID (empty string preserved verbatim for
+    /// URI-level batch-cascade entries).
     pub subject_cid: Option<String>,
+    /// Operator rationale.
     pub rationale: String,
+    /// Snapshot id (numeric; post-T2 parse).
     pub snapshot_id: Option<i64>,
+    /// Moderation event id (numeric; post-T2 parse).
     pub event_id: Option<i64>,
+    /// Prior row's `current_hash` (inside the canonical object).
     pub previous_hash: Option<String>,
+    /// JSON-encoded cascade array (None when empty; post-T2).
     pub cascade_subjects: Option<String>,
+    /// JSON-encoded numeric-element id array (None when empty).
     pub cascade_snapshot_ids: Option<String>,
+    /// Provenance discriminator (v0.9 canonical field).
     pub source: String,
+    /// Stored payload serialization verbatim (v0.9 canonical
+    /// field; None when the action carries none).
     pub payload: Option<String>,
 }
 
@@ -142,7 +159,12 @@ pub enum TransformError {
     /// Wire timestamp failed RFC3339 parsing.
     Timestamp(String),
     /// A stringified-i64 field failed integer parsing.
-    NumericId { field: &'static str, value: String },
+    NumericId {
+        /// Which wire field failed.
+        field: &'static str,
+        /// The offending wire value.
+        value: String,
+    },
 }
 
 /// JSON string-escape per serde_json's writer (the subset it
@@ -307,10 +329,10 @@ fn reparse_timestamp(wire: &str) -> Result<String, TransformError> {
         if valid_rfc3339_utc_prefix(prefix) {
             return Ok(format!("{prefix}+00:00"));
         }
-    } else if let Some(prefix) = wire.strip_suffix("+00:00") {
-        if valid_rfc3339_utc_prefix(prefix) {
-            return Ok(wire.to_string());
-        }
+    } else if let Some(prefix) = wire.strip_suffix("+00:00")
+        && valid_rfc3339_utc_prefix(prefix)
+    {
+        return Ok(wire.to_string());
     }
     Err(TransformError::Timestamp(wire.to_string()))
 }
@@ -523,13 +545,13 @@ pub fn walk_chain(
         }
 
         // Linkage: only checkable when we know the predecessor.
-        if expected_seq.is_some() || prev_hash_before_window.is_some() {
-            if entry.previous_hash.as_deref() != prev_hash.as_deref() {
-                return ChainWalkVerdict::Failed {
-                    failing_sequence: entry.sequence,
-                    kind: ChainFailureKind::LinkageMismatch,
-                };
-            }
+        if (expected_seq.is_some() || prev_hash_before_window.is_some())
+            && entry.previous_hash.as_deref() != prev_hash.as_deref()
+        {
+            return ChainWalkVerdict::Failed {
+                failing_sequence: entry.sequence,
+                kind: ChainFailureKind::LinkageMismatch,
+            };
         }
 
         prev_hash = Some(entry.current_hash.clone());
@@ -555,6 +577,7 @@ mod tests {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fields(
         sequence: i64,
         actor: &str,
@@ -833,7 +856,10 @@ mod tests {
     fn tampered_row_matches_neither_form() {
         let mut entry = legacy_entry();
         entry.rationale = "rewritten by attacker".to_string();
-        assert_eq!(verify_upstream_entry(&entry), UpstreamEntryVerdict::Tampered);
+        assert_eq!(
+            verify_upstream_entry(&entry),
+            UpstreamEntryVerdict::Tampered
+        );
     }
 
     // ---- Wire round-trip: entry built the way Aurora's serde
@@ -893,11 +919,7 @@ mod tests {
 
     // ---- T3: sentinel + gap + linkage walk. ----
 
-    fn walk_entry(
-        sequence: i64,
-        rationale: &str,
-        prev: Option<&str>,
-    ) -> AuroraAuditEntry {
+    fn walk_entry(sequence: i64, rationale: &str, prev: Option<&str>) -> AuroraAuditEntry {
         let mut f = fields(
             sequence,
             "did:plc:moderator",

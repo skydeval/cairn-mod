@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.6 audit verification
+- New `cairn audit cross-verify` command: verifies cairn-mod's own
+  four-table hash chain, fetches the upstream PDS's hash-chained
+  audit trail, **independently re-verifies every upstream entry
+  byte-for-byte** (both the current 15-field canonical form and the
+  pre-v0.9 legacy form, including the wire-to-canonical timestamp,
+  payload, and subject transforms and the pre-chain sentinel rules),
+  and joins local dispatch rows to their upstream chain entries via
+  the response ids recorded since v1.8.5. Any divergence exits 15
+  with a JSON `outcome` discriminator (`divergence-local` /
+  `divergence-cross` / `divergence-join-mismatch`); pre-v1.8.5 rows
+  without join keys are reported as unjoinable, never as divergent.
+- Two new backend read methods behind the new `audit-trail`
+  capability family: `get_audit_trail` (paged, with the upstream's
+  own whole-chain verdict) and `get_audit_entry` (by id or by
+  hash). Unsupported on Ozone.
+- `verification_persist` (accepted since v1.8.1) gains its
+  consumer: cross-verify outcomes persist to the new
+  `cross_verify_outcomes` table (migration `0011`, additive-only)
+  and are listable via `cairn audit cross-verify --history`.
+  Setting it `false` runs the verification without recording.
+- cairn-mod's own `pds_admin_audit` row hash now covers the v1.8.5
+  response columns (12-field preimage). Migration `0011` captures a
+  per-deployment format boundary; `cairn audit verify` checks
+  pre-boundary rows under the v1.7 form and post-boundary rows
+  under the new form (with a counted, non-failing fallback for
+  mid-upgrade writes, surfaced as `legacy_form_rows`).
+- `acknowledge_v1_8_1_audit_divergence` is deprecated: the
+  divergence it acknowledged is closed by cross-verification. The
+  field now draws a warning and is ignored; it will be removed in
+  the v1.8.11 series wrap. The auto-mode-rules and xrpc-gateway
+  coexistence gates are unchanged.
+- Docs: `cairn audit verify`'s module notes now describe the
+  four-table walk it has actually performed since the xrpc
+  membership tables joined the chain (the stale two-table wording
+  misled this cycle's recon).
+
 ### Added — v1.8.5 action surface enrichment
 - RustBackend now dispatches 14 of Aurora's 16 `emitEvent` action
   variants: added delete-account, quarantine/restore/delete-blob,

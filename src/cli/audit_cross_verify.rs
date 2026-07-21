@@ -77,8 +77,9 @@ impl CrossVerifyOutcome {
 pub struct CrossVerifyReport {
     /// Highest-precedence outcome (local > cross > join).
     pub outcome: CrossVerifyOutcome,
-    /// Epoch-ms run bounds.
+    /// Epoch-ms run start.
     pub run_started_at: i64,
+    /// Epoch-ms run end.
     pub run_completed_at: i64,
     /// Local 4-table chain pass.
     pub local_verified: bool,
@@ -104,12 +105,19 @@ pub struct CrossVerifyReport {
 /// One `--history` row.
 #[derive(Debug, Serialize)]
 pub struct CrossVerifyHistoryRow {
+    /// `cross_verify_outcomes.id`.
     pub id: i64,
+    /// Epoch-ms run start.
     pub run_started_at: i64,
+    /// Epoch-ms run end.
     pub run_completed_at: i64,
+    /// Local 4-table pass verdict.
     pub local_verified: bool,
+    /// Upstream (Aurora + independent walk) verdict.
     pub upstream_verified: bool,
+    /// Join-pass verdict.
     pub cross_verified: bool,
+    /// Structured notes JSON as stored.
     pub notes: Option<String>,
 }
 
@@ -247,10 +255,7 @@ pub async fn run(
             }));
             continue;
         }
-        let upstream_entry = match entries
-            .iter()
-            .find(|e| e.id == row.upstream_audit_entry_id)
-        {
+        let upstream_entry = match entries.iter().find(|e| e.id == row.upstream_audit_entry_id) {
             Some(e) => Some(e.clone()),
             None => match row.upstream_audit_entry_id.parse::<i64>() {
                 Ok(id) => match backend.get_audit_entry(&AuditEntryLookup::Id(id)).await {
@@ -412,16 +417,28 @@ pub fn format_report_human(r: &CrossVerifyReport) -> String {
     let mut s = format!(
         "cross-verify: {}\n  local chain: {}{}\n  upstream chain: {} (Aurora chainVerified={}, independent walk agrees={})\n  join pass: {} ({} joined, {} unjoinable pre-v1.8.5 rows)",
         r.outcome.as_str(),
-        if r.local_verified { "verified" } else { "DIVERGENT" },
+        if r.local_verified {
+            "verified"
+        } else {
+            "DIVERGENT"
+        },
         r.local_verified_through
             .map(|n| format!(" ({n} attested rows)"))
             .unwrap_or_default(),
-        if r.upstream_verified { "verified" } else { "DIVERGENT" },
+        if r.upstream_verified {
+            "verified"
+        } else {
+            "DIVERGENT"
+        },
         r.notes["auroraChainVerified"],
         !r.notes["auroraDisagreesWithIndependentWalk"]
             .as_bool()
             .unwrap_or(false),
-        if r.cross_verified { "clean" } else { "MISMATCHES" },
+        if r.cross_verified {
+            "clean"
+        } else {
+            "MISMATCHES"
+        },
         r.notes["joinedOk"],
         r.notes["unjoinableRows"],
     );

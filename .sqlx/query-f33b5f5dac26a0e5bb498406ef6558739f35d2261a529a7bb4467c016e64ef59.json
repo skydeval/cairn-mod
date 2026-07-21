@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO cross_verify_outcomes\n                 (run_started_at, run_completed_at, local_verified,\n                  local_verified_through, upstream_verified,\n                  upstream_verified_through, upstream_legacy_count,\n                  cross_verified, cross_verify_notes)\n               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "f33b5f5dac26a0e5bb498406ef6558739f35d2261a529a7bb4467c016e64ef59"
+}

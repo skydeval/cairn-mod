@@ -1781,3 +1781,400 @@ async fn ozone_backend_v1_8_5_actions_return_unsupported() {
         Err(BackendError::Unsupported)
     ));
 }
+
+// =========================================================================
+// v1.8.6 — audit-trail reads + cross-verify (§8)
+// =========================================================================
+
+use cairn_mod::cli::audit_cross_verify::{self, CrossVerifyOutcome};
+use cairn_mod::pds_admin::record_pds_admin_call;
+use cairn_mod::pds_admin::rust::action_types::ActionResponse as UpstreamActionResponse;
+use cairn_mod::pds_admin::rust::audit_types::{AuditEntryLookup, AuditTrailFilter};
+use cairn_mod::pds_admin::rust::upstream_verify::{CanonicalFields, build_canonical_v09};
+
+fn sha256_hex_of(s: &str) -> String {
+    hex::encode(proto_blue_crypto_shim(s))
+}
+
+fn proto_blue_crypto_shim(s: &str) -> [u8; 32] {
+    // The test crate doesn't depend on proto-blue directly; SHA-256
+    // via k256's re-exported sha2 keeps the fixture self-contained.
+    use k256::sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    h.finalize().into()
+}
+
+/// A hash-valid upstream entry (genesis, repoRef subject) as the
+/// wire JSON Aurora's serde would emit, plus its stored-form hash.
+fn upstream_entry_json(
+    sequence: i64,
+    event_id: Option<i64>,
+    prev_hash: Option<&str>,
+    rationale: &str,
+) -> (serde_json::Value, String) {
+    let cascade =
+        r#"[{"$type":"com.atproto.admin.defs#repoRef","did":"did:plc:subject"}]"#.to_string();
+    let fields = CanonicalFields {
+        sequence,
+        timestamp: "2026-05-09T00:00:00+00:00".to_string(),
+        actor_did: "did:web:cairn-mod.example.test".to_string(),
+        action: "TakedownAccount".to_string(),
+        subject_did: Some("did:plc:subject".to_string()),
+        subject_uri: None,
+        subject_cid: None,
+        rationale: rationale.to_string(),
+        snapshot_id: None,
+        event_id,
+        previous_hash: prev_hash.map(String::from),
+        cascade_subjects: Some(cascade),
+        cascade_snapshot_ids: None,
+        source: "manual".to_string(),
+        payload: None,
+    };
+    let hash = sha256_hex_of(&build_canonical_v09(&fields));
+    let wire = serde_json::json!({
+        "id": sequence.to_string(),
+        "sequence": sequence,
+        "timestamp": "2026-05-09T00:00:00Z",
+        "actorDid": "did:web:cairn-mod.example.test",
+        "action": "TakedownAccount",
+        "subjectRef": {"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:subject"},
+        "rationale": rationale,
+        "snapshotId": null,
+        "eventId": event_id.map(|e| e.to_string()),
+        "currentHash": hash.clone(),
+        "previousHash": prev_hash,
+        "verified": true,
+        "cascadeSubjects": [{"$type": "com.atproto.admin.defs#repoRef", "did": "did:plc:subject"}],
+        "cascadeSnapshotIds": [],
+        "source": "manual"
+    });
+    (wire, hash)
+}
+
+struct MockAuditAurora {
+    trail_body: String,
+    entry_bodies: Mutex<std::collections::HashMap<String, String>>,
+    seen: Mutex<Vec<(String, String)>>,
+}
+
+async fn audit_trail_handler(
+    State(state): State<Arc<MockAuditAurora>>,
+    uri: axum::http::Uri,
+) -> Response {
+    state
+        .seen
+        .lock()
+        .unwrap()
+        .push(("trail".to_string(), uri.query().unwrap_or("").to_string()));
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.trail_body.clone(),
+    )
+        .into_response()
+}
+
+async fn audit_entry_handler(
+    State(state): State<Arc<MockAuditAurora>>,
+    uri: axum::http::Uri,
+) -> Response {
+    let q = uri.query().unwrap_or("").to_string();
+    state
+        .seen
+        .lock()
+        .unwrap()
+        .push(("entry".to_string(), q.clone()));
+    let id = q
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("id="))
+        .unwrap_or("")
+        .to_string();
+    match state.entry_bodies.lock().unwrap().get(&id) {
+        Some(body) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            body.clone(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            serde_json::json!({"error": "AuditEntryNotFound",
+                "message": "no audit entry matches the given id or hash"})
+            .to_string(),
+        )
+            .into_response(),
+    }
+}
+
+async fn spawn_audit_mock(
+    trail_body: String,
+    entries: Vec<(String, String)>,
+) -> (SocketAddr, Arc<MockAuditAurora>) {
+    let state = Arc::new(MockAuditAurora {
+        trail_body,
+        entry_bodies: Mutex::new(entries.into_iter().collect()),
+        seen: Mutex::new(Vec::new()),
+    });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: canonical_body(),
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(describe_capabilities).with_state(desc_state),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.getAuditTrail",
+            get(audit_trail_handler).with_state(state.clone()),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.getAuditEntry",
+            get(audit_entry_handler).with_state(state.clone()),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, state)
+}
+
+#[tokio::test]
+async fn get_audit_trail_end_to_end_and_gate() {
+    let (e1, _h1) = upstream_entry_json(1, Some(42), None, "genesis row");
+    let trail = serde_json::json!({
+        "items": [e1],
+        "chainVerified": true,
+        "chainVerifiedThrough": 1,
+        "chainLegacyCount": 0
+    })
+    .to_string();
+    let (addr, state) = spawn_audit_mock(trail, Vec::new()).await;
+    let backend = probed_backend(addr).await;
+
+    let page = backend
+        .get_audit_trail(
+            AuditTrailFilter {
+                source: Some("manual".to_string()),
+                ..Default::default()
+            },
+            None,
+            Some(50),
+        )
+        .await
+        .expect("trail fetch succeeds");
+    assert!(page.chain_verified);
+    assert_eq!(page.chain_verified_through, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].event_id.as_deref(), Some("42"));
+
+    let seen = state.seen.lock().unwrap().clone();
+    assert!(seen[0].1.contains("source=manual"), "{seen:?}");
+    assert!(seen[0].1.contains("limit=50"), "{seen:?}");
+
+    // Capability gate: unprobed backend → no advertisement → gate
+    // fires with the family wire string, zero HTTP calls.
+    let ungated = backend_against(addr, Vec::new());
+    let err = ungated
+        .get_audit_trail(AuditTrailFilter::default(), None, None)
+        .await
+        .unwrap_err();
+    match &err {
+        BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "audit-trail-v1"),
+        other => panic!("expected CapabilityNotAdvertised, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn get_audit_entry_by_id_hash_and_404() {
+    let (e1, h1) = upstream_entry_json(1, None, None, "solo");
+    let (addr, state) =
+        spawn_audit_mock("{}".to_string(), vec![("1".to_string(), e1.to_string())]).await;
+    let backend = probed_backend(addr).await;
+
+    let entry = backend
+        .get_audit_entry(&AuditEntryLookup::Id(1))
+        .await
+        .expect("entry by id");
+    assert_eq!(entry.current_hash, h1);
+
+    let missing = backend
+        .get_audit_entry(&AuditEntryLookup::Id(999))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, BackendError::Terminal(_)), "{missing:?}");
+
+    // Hash lookups serialize the hash param (mock only resolves by
+    // id; the wire shape is what we pin here).
+    let _ = backend
+        .get_audit_entry(&AuditEntryLookup::Hash("cafe".to_string()))
+        .await
+        .unwrap_err();
+    let seen = state.seen.lock().unwrap().clone();
+    assert_eq!(seen[0].1, "id=1");
+    assert_eq!(seen[1].1, "id=999");
+    assert_eq!(seen[2].1, "hash=cafe");
+}
+
+async fn cross_verify_pool() -> sqlx::Pool<sqlx::Sqlite> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cross-verify.db");
+    let pool = cairn_mod::storage::open(&path).await.unwrap();
+    Box::leak(Box::new(dir));
+    pool
+}
+
+async fn fixture_action_row(pool: &sqlx::Pool<sqlx::Sqlite>) -> i64 {
+    sqlx::query_scalar(
+        "INSERT INTO subject_actions (
+            subject_did, actor_did, action_type, reason_codes,
+            effective_at, strike_value_base, strike_value_applied,
+            strikes_at_time_of_action, created_at
+         ) VALUES ('did:plc:subject', 'did:plc:mod', 'takedown', '[\"spam\"]',
+                   1000, 0, 0, 0, 1000)
+         RETURNING id",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn cross_verify_end_to_end_verified_and_persisted() {
+    let pool = cross_verify_pool().await;
+    let action_id = fixture_action_row(&pool).await;
+
+    // Local dispatch row with join keys, hash-stamped through the
+    // production audit-append path (12-field preimage).
+    record_pds_admin_call(
+        &pool,
+        action_id,
+        cairn_mod::pds_admin::BackendMethod::DeleteAccount,
+        Ok(Some(BackendActionId::PerEvent("42".to_string()))),
+        Some(&UpstreamActionResponse {
+            event_id: "42".to_string(),
+            audit_entry_id: "1".to_string(),
+            snapshots: Vec::new(),
+            cascading_actions: Vec::new(),
+        }),
+        1_000,
+        1_500,
+    )
+    .await
+    .expect("audit row lands");
+
+    // Upstream chain: one genesis entry whose event_id matches the
+    // local backend_action_id and whose chain-entry id matches the
+    // stored upstream_audit_entry_id.
+    let (e1, _h1) = upstream_entry_json(1, Some(42), None, "genesis row");
+    let trail = serde_json::json!({
+        "items": [e1],
+        "chainVerified": true,
+        "chainVerifiedThrough": 1,
+        "chainLegacyCount": 0
+    })
+    .to_string();
+    let (addr, _state) = spawn_audit_mock(trail, Vec::new()).await;
+    let backend = probed_backend(addr).await;
+
+    let report = audit_cross_verify::run(&pool, &backend, true, (None, None))
+        .await
+        .expect("cross-verify runs");
+    assert_eq!(report.outcome, CrossVerifyOutcome::Verified, "{report:?}");
+    assert!(report.local_verified && report.upstream_verified && report.cross_verified);
+    assert!(report.persisted);
+
+    let history = audit_cross_verify::history(&pool, 10).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].cross_verified);
+}
+
+#[tokio::test]
+async fn cross_verify_join_mismatch_and_persist_gate() {
+    let pool = cross_verify_pool().await;
+    let action_id = fixture_action_row(&pool).await;
+    record_pds_admin_call(
+        &pool,
+        action_id,
+        cairn_mod::pds_admin::BackendMethod::DeleteAccount,
+        Ok(Some(BackendActionId::PerEvent("42".to_string()))),
+        Some(&UpstreamActionResponse {
+            event_id: "42".to_string(),
+            audit_entry_id: "1".to_string(),
+            snapshots: Vec::new(),
+            cascading_actions: Vec::new(),
+        }),
+        1_000,
+        1_500,
+    )
+    .await
+    .unwrap();
+
+    // Upstream entry exists but carries a DIFFERENT event id →
+    // divergence-join-mismatch; verification_persist=false writes
+    // no outcome row.
+    let (e1, _h1) = upstream_entry_json(1, Some(777), None, "genesis row");
+    let trail = serde_json::json!({
+        "items": [e1],
+        "chainVerified": true,
+        "chainVerifiedThrough": 1,
+        "chainLegacyCount": 0
+    })
+    .to_string();
+    let (addr, _state) = spawn_audit_mock(trail, Vec::new()).await;
+    let backend = probed_backend(addr).await;
+
+    let report = audit_cross_verify::run(&pool, &backend, false, (None, None))
+        .await
+        .expect("cross-verify runs");
+    assert_eq!(report.outcome, CrossVerifyOutcome::DivergenceJoinMismatch);
+    assert!(!report.persisted);
+    assert!(
+        audit_cross_verify::history(&pool, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "verification_persist=false must not write an outcome row"
+    );
+}
+
+#[tokio::test]
+async fn cross_verify_detects_upstream_tamper() {
+    let pool = cross_verify_pool().await;
+
+    // Tampered upstream row: rationale rewritten after sealing.
+    let (mut e1, _h1) = upstream_entry_json(1, None, None, "original rationale");
+    e1["rationale"] = serde_json::json!("rewritten by attacker");
+    let trail = serde_json::json!({
+        "items": [e1],
+        "chainVerified": true,   // Aurora (mock) claims clean...
+        "chainVerifiedThrough": 1,
+        "chainLegacyCount": 0
+    })
+    .to_string();
+    let (addr, _state) = spawn_audit_mock(trail, Vec::new()).await;
+    let backend = probed_backend(addr).await;
+
+    // ...but cairn-mod's independent Path A walk catches the
+    // per-row mismatch → divergence-cross.
+    let report = audit_cross_verify::run(&pool, &backend, true, (None, None))
+        .await
+        .expect("cross-verify runs");
+    assert_eq!(
+        report.outcome,
+        CrossVerifyOutcome::DivergenceCross,
+        "{report:?}"
+    );
+    assert!(
+        report.notes["auroraDisagreesWithIndependentWalk"]
+            .as_bool()
+            .unwrap()
+    );
+}

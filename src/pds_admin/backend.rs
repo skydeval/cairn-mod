@@ -21,7 +21,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::rust::action_types::{
     ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus,
 };
-use super::rust::audit_types::{AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry};
+use super::rust::audit_types::{
+    AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry,
+};
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
