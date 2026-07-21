@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.7 batch endpoints + multi-subject dispatch
+- Ten new backend methods (trait 26 → 36). Four dedicated batch
+  methods consume the upstream PDS's atomic batch endpoints —
+  `batch_takedown_accounts`, `batch_suspend_accounts`
+  (indefinite-only by wire contract), `batch_restore_accounts`,
+  and `batch_takedown_records` (**URI-level**: bare AT-URIs, all
+  versions at each URI). Six `..._many` methods extend the v1.8.5
+  verbs to multi-subject dispatch in one `emitEvent`:
+  `delete_account_many`, `quarantine_blob_many`,
+  `restore_blob_many`, `delete_blob_many`, `takedown_record_many`
+  (**CID-level**: every subject requires a non-empty CID;
+  URI-level batches belong to `batch_takedown_records`), and
+  `update_subject_status_many`. All are Unsupported on Ozone.
+- Batch dispatch is **whole-batch atomic** upstream: partial
+  success is not an observable state. A per-subject failure aborts
+  the entire batch and surfaces the failing index and subject id
+  in the error message.
+- **Operator opt-in required** for the four dedicated batch
+  methods — the new `batch-takedown` capability family is the
+  registry's first `OperatorOptIn` entry, and advertisement alone
+  does not activate it. With an empty `required_capabilities`
+  (permissive baseline), opting in is one line:
+
+  ```toml
+  [pds_admin.rust.pinned_versions]
+  batch-takedown = "v1"
+  ```
+
+  With a non-empty `required_capabilities` (strict baseline), the
+  existing pin cross-check applies — add `batch-takedown-v1` to
+  `required_capabilities` as well, which also makes the capability
+  probe-required at startup. Unpinned (or unadvertised) dispatch
+  refuses with `CapabilityNotAdvertised("batch-takedown-v1")`.
+  The six `..._many` methods ride their verbs' existing
+  capability gates unchanged.
+- Nine new CLI subcommands, all through the recordAction writer:
+  `accounts batch-takedown|batch-suspend|delete-many`,
+  `blobs quarantine-many|restore-many|delete-many` (blob refs as
+  `<did>@<cid>`), the new `records` group with `batch-takedown`
+  (bare AT-URIs) and `takedown-many` (`<at-uri>#<cid>`, CID
+  fragment required), and `subjects update-status-many`.
+  `accounts batch-restore` is intentionally NOT shipped:
+  `batch_restore_accounts` is trait-only this release — cairn-mod's
+  restore semantics ride the single-target revoke flow, and a
+  batch-revoke writer design is deferred.
+- One `subject_actions` intent row per batch: `action_type` reuses
+  the singular verb's value, the first subject's DID occupies the
+  flat `subject_did` column, and the authoritative subjects list
+  rides `action_detail` with a `batch: true` marker. **Batch rows
+  are strike-exempt** (`strike_value_base/applied = 0`) — the
+  one-subject-one-strike semantic doesn't compose with N-subject
+  aggregation; per-subject singular rows remain the strike surface.
+- One `pds_admin_audit` row per batch, stamped with the new
+  `PerBatch` action-id variant (first production construction; the
+  stored TEXT payload is unchanged in shape, so
+  `cairn audit cross-verify` joins batch rows to their upstream
+  chain entries with zero changes). Dedicated-batch outputs store
+  `cascading_actions_json` as NULL (no cascade channel), distinct
+  from the emitEvent responses' `"[]"`.
+- Batch size caps mirror the upstream constants and are validated
+  client-side before any wire call (at-cap passes): 50 for the
+  dedicated batch endpoints and multi-subject default, 10 for
+  `delete_account_many`, 25 for `delete_blob_many`. Upstream
+  re-validates; the upstream values remain authoritative.
+- No migration: v1.8.7 rides the v1.8.5/v1.8.6 schema unchanged.
+
 ### Added — v1.8.6 audit verification
 - New `cairn audit cross-verify` command: verifies cairn-mod's own
   four-table hash chain, fetches the upstream PDS's hash-chained

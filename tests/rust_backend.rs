@@ -2497,11 +2497,12 @@ async fn delete_account_many_dispatches_n_subjects_and_caps_at_10() {
         .delete_account_many(&dids2(), "purge", 13)
         .await
         .expect("2-subject dispatch succeeds");
-    let requests = emit.emit_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["action"], json!({"kind": "DeleteAccount"}));
-    assert_eq!(requests[0]["subjects"].as_array().unwrap().len(), 2);
-    drop(requests);
+    {
+        let requests = emit.emit_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["action"], json!({"kind": "DeleteAccount"}));
+        assert_eq!(requests[0]["subjects"].as_array().unwrap().len(), 2);
+    }
 
     // Cap 10: eleven subjects rejected client-side, no wire call.
     let eleven: Vec<String> = (0..11).map(|i| format!("did:plc:n{i}")).collect();
