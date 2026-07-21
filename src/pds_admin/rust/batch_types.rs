@@ -63,9 +63,6 @@ pub struct BatchOutcome {
 /// (`batchTakedownAccounts` / `batchSuspendAccounts` /
 /// `batchRestoreAccounts`) — mirror of Aurora's
 /// `BatchAccountsInput`.
-// Transient Phase-1 allow: consumed by the Phase-2 dispatch
-// bodies (chainlink #143).
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BatchDidsBody<'a> {
@@ -78,9 +75,6 @@ pub(crate) struct BatchDidsBody<'a> {
 /// URI into an empty-CID cascade row ("URI-level takedown, no CID
 /// anchor"); the empty-CID convention is scoped to this endpoint
 /// only (v2 §3.3).
-// Transient Phase-1 allow: consumed by the Phase-2 dispatch
-// bodies (chainlink #143).
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BatchUrisBody<'a> {
@@ -93,9 +87,6 @@ pub(crate) struct BatchUrisBody<'a> {
 /// rejected (at-cap passes). Error messages match Aurora's shapes
 /// so operators see the same text regardless of which side
 /// rejects.
-// Transient Phase-1 allow: consumed by the Phase-2 dispatch
-// bodies (chainlink #143).
-#[allow(dead_code)]
 pub(crate) fn validate_batch_len<T>(
     items: &[T],
     limit: usize,

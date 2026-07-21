@@ -56,9 +56,13 @@ use super::types::Subject;
 ///   call, one `updateSubjectStatus`). v1.7's
 ///   `OzoneBackend::synthesize_action_id` returns this.
 /// - [`Self::PerBatch`] — batch action covering multiple
-///   subjects (Aurora-Locus's `emitEvent` is polymorphic over
-///   a `subjects` array; v1.8.5 introduces the first
-///   consumers).
+///   subjects. First constructed in v1.8.7: the dispatch
+///   layer stamps batch-shaped audit rows (dedicated
+///   `tools.aurora.admin.batch*` dispatches and multi-subject
+///   `emitEvent` dispatches) with `PerBatch(event_id)`. The
+///   payload is Aurora's batch event id — the same join key
+///   cross-verify uses, stored bare via the variant-agnostic
+///   [`Self::as_str`].
 ///
 /// v1.7-stored values are all per-event by construction
 /// (v1.7 has no batch concept). The future schema migration
@@ -103,10 +107,13 @@ pub enum BackendActionId {
     /// Single-event action — one upstream call, one identifier.
     /// v1.7's `OzoneBackend` produces this exclusively.
     PerEvent(String),
-    /// Batch action covering multiple subjects. v1.8.5+
-    /// consumers (Aurora-Locus's polymorphic `emitEvent`)
-    /// produce this. Reserved in v1.8.1; not constructed by
-    /// any v1.8.1 code path.
+    /// Batch action covering multiple subjects. Reserved in
+    /// v1.8.1; first constructed in v1.8.7 by the dispatch
+    /// layer's batch arms (one audit row per batch, payload =
+    /// Aurora's batch event id). Deserialization from the audit
+    /// column still rehydrates as [`Self::PerEvent`] — the
+    /// column carries no variant discriminator (see the
+    /// wire-serialization section above).
     PerBatch(String),
 }
 
@@ -118,7 +125,7 @@ impl BackendActionId {
     /// whitespace, lowercasing hex) before construction.
     ///
     /// Use this at v1.7-shaped call sites (every current
-    /// caller); use the explicit variant constructor at v1.8.5+
+    /// caller); use the explicit variant constructor at v1.8.7+
     /// call sites that introduce batch identifiers.
     pub fn new(id: impl Into<String>) -> Self {
         Self::PerEvent(id.into())

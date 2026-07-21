@@ -48,8 +48,8 @@ use super::backend::{
 use super::config::RustBackendConfig;
 use super::ozone::{OzoneBackend, decode_xrpc_error_envelope, parse_retry_after_seconds};
 use super::types::{
-    CapabilitySet, CapabilityVersion, DescribeCapabilitiesResponse, Subject, classification_for,
-    parse_capability_string,
+    CapabilityClassification, CapabilitySet, CapabilityVersion, DescribeCapabilitiesResponse,
+    Subject, classification_for, parse_capability_string,
 };
 use service_auth::{mint_service_auth_jwt, validate_did_syntax};
 
@@ -106,6 +106,28 @@ const GET_AUDIT_TRAIL_NSID: &str = "tools.aurora.admin.getAuditTrail";
 const GET_AUDIT_ENTRY_NSID: &str = "tools.aurora.admin.getAuditEntry";
 const AUDIT_TRAIL_FAMILY: &str = "audit-trail";
 const AUDIT_TRAIL_CAPABILITY: &str = "audit-trail-v1";
+
+/// NSIDs of the v1.8.7 dedicated batch endpoints (all POST;
+/// routes at Aurora `admin.rs:544-573`). Aurora attributes
+/// `batch-takedown-v1` to `batchTakedownAccounts` with the other
+/// batch routes sharing the family — the shipped
+/// shared-attribution pattern.
+const BATCH_TAKEDOWN_ACCOUNTS_NSID: &str = "tools.aurora.admin.batchTakedownAccounts";
+const BATCH_SUSPEND_ACCOUNTS_NSID: &str = "tools.aurora.admin.batchSuspendAccounts";
+const BATCH_RESTORE_ACCOUNTS_NSID: &str = "tools.aurora.admin.batchRestoreAccounts";
+const BATCH_TAKEDOWN_RECORDS_NSID: &str = "tools.aurora.admin.batchTakedownRecords";
+
+/// Capability family gating all four dedicated batch methods
+/// (v1.8.7 §8.1). First **OperatorOptIn** registry consumer: the
+/// dispatch gate requires advertisement AND an operator
+/// `pinned_versions` entry for the family — advertisement alone
+/// is not consent for destructive batch surfaces.
+const BATCH_TAKEDOWN_FAMILY: &str = "batch-takedown";
+
+/// Wire string embedded in `CapabilityNotAdvertised` returns for
+/// the dedicated batch methods (both the not-advertised and the
+/// advertised-but-unpinned refusals).
+const BATCH_TAKEDOWN_CAPABILITY: &str = "batch-takedown-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -421,6 +443,110 @@ impl RustBackend {
             .query(filter)
             .query(&pagination)
             .bearer_auth(&jwt)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("{nsid} response parse: {e}")))
+    }
+
+    /// Shared dedicated-batch dispatch (v1.8.7, §4.1): capability
+    /// gate (including the OperatorOptIn pin requirement, §8.1) →
+    /// per-call JWT → POST JSON → HTTP error mapping → parse
+    /// [`batch_types::BatchOutcome`]. Mirrors
+    /// [`Self::dispatch_emit_event`]'s shape, parameterized on
+    /// NSID + body because the four batch endpoints are distinct
+    /// routes rather than one polymorphic endpoint.
+    ///
+    /// Per-subject upstream failures abort the whole batch
+    /// transaction (Aurora's whole-tx atomicity contract) and
+    /// arrive as a structured error body whose message carries
+    /// `failingSubject` (index) and `failingSubjectId`; the
+    /// standard XRPC-envelope mapping preserves both in the
+    /// captured message — no new error variant.
+    async fn dispatch_batch<B>(
+        &self,
+        nsid: &'static str,
+        body: &B,
+    ) -> Result<batch_types::BatchOutcome, BackendError>
+    where
+        B: serde::Serialize + Sync,
+    {
+        // Blocking read — guards never cross an await point.
+        {
+            let caps = self
+                .capabilities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !caps.has(BATCH_TAKEDOWN_FAMILY) {
+                return Err(BackendError::CapabilityNotAdvertised(
+                    BATCH_TAKEDOWN_CAPABILITY.to_string(),
+                ));
+            }
+            let _advertised_version = caps
+                .version_of(BATCH_TAKEDOWN_FAMILY)
+                .expect("has() returned true for the same family");
+        }
+
+        // OperatorOptIn gate (v1.8.7 §8.1 — first runtime consumer
+        // of the classification registry): for an OperatorOptIn
+        // family, advertisement alone is not consent. The operator
+        // opts in with a `[pds_admin.rust.pinned_versions]` entry
+        // for the family; an unpinned family refuses dispatch with
+        // the same `CapabilityNotAdvertised` shape ("operator
+        // didn't opt in" and "upstream doesn't offer it" are both
+        // capability-unavailable to the caller).
+        if classification_for(BATCH_TAKEDOWN_FAMILY)
+            == Some(CapabilityClassification::OperatorOptIn)
+            && !self.pinned_versions.contains_key(BATCH_TAKEDOWN_FAMILY)
+        {
+            tracing::warn!(
+                target: "cairn_mod::pds_admin::rust::capability",
+                nsid,
+                "batch dispatch refused: {BATCH_TAKEDOWN_FAMILY:?} is an operator-opt-in \
+                 capability family and no pinned_versions entry exists; add \
+                 `{BATCH_TAKEDOWN_FAMILY} = \"v1\"` under [pds_admin.rust.pinned_versions] \
+                 to enable batch dispatch"
+            );
+            return Err(BackendError::CapabilityNotAdvertised(
+                BATCH_TAKEDOWN_CAPABILITY.to_string(),
+            ));
+        }
+
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            nsid,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let url = self.xrpc_url(nsid)?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(&jwt)
+            .json(body)
             .send()
             .await
             .map_err(OzoneBackend::map_reqwest_error)?;
@@ -1119,98 +1245,233 @@ impl PdsAdminBackend for RustBackend {
         .await
     }
 
-    // ---- v1.8.7 batch + multi-subject methods: Phase 1
-    // compile-stubs; real dispatch bodies land in Phase 2
-    // (chainlink #143). ----
-
+    /// Real dispatch (v1.8.7): POST `batchTakedownAccounts` with
+    /// `{"dids": [...], "rationale": ...}`. Client-side cap check
+    /// mirrors Aurora's `validate_batch_size` (at-cap passes);
+    /// the capability + opt-in gate lives in `dispatch_batch`.
     async fn batch_takedown_accounts(
         &self,
-        _dids: &[String],
-        _rationale: &str,
+        dids: &[String],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
+        self.dispatch_batch(
+            BATCH_TAKEDOWN_ACCOUNTS_NSID,
+            &batch_types::BatchDidsBody { dids, rationale },
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.7): POST `batchSuspendAccounts`.
+    /// Indefinite-only by wire contract — no duration parameter
+    /// exists to transmit.
     async fn batch_suspend_accounts(
         &self,
-        _dids: &[String],
-        _rationale: &str,
+        dids: &[String],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
+        self.dispatch_batch(
+            BATCH_SUSPEND_ACCOUNTS_NSID,
+            &batch_types::BatchDidsBody { dids, rationale },
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.7): POST `batchRestoreAccounts`.
+    /// Trait-only (LB-A): dispatches directly to Aurora with no
+    /// recordAction row, no writer path, no CLI — Aurora reverses
+    /// each DID's current state server-side.
     async fn batch_restore_accounts(
         &self,
-        _dids: &[String],
-        _rationale: &str,
+        dids: &[String],
+        rationale: &str,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
+        self.dispatch_batch(
+            BATCH_RESTORE_ACCOUNTS_NSID,
+            &batch_types::BatchDidsBody { dids, rationale },
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.7): POST `batchTakedownRecords` with
+    /// bare AT-URIs — **URI-level** semantics via Aurora's
+    /// empty-CID cascade convention (scoped to this endpoint
+    /// exclusively, §3.3).
     async fn batch_takedown_records(
         &self,
-        _uris: &[String],
-        _rationale: &str,
+        uris: &[String],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(uris, batch_types::MAX_BATCH_SIZE, "batch")?;
+        self.dispatch_batch(
+            BATCH_TAKEDOWN_RECORDS_NSID,
+            &batch_types::BatchUrisBody { uris, rationale },
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "DeleteAccount"}` with an
+    /// N-element subjects array — cap 10
+    /// (`MAX_SUBJECTS_DELETE_ACCOUNT`, the tightest multi-subject
+    /// cap). Rides the shipped `mod-events-emit` gate unchanged
+    /// (§8.2: multi-subject is a shape modifier, not a new
+    /// capability).
     async fn delete_account_many(
         &self,
-        _dids: &[String],
-        _rationale: &str,
+        dids: &[String],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(
+            dids,
+            batch_types::MAX_SUBJECTS_DELETE_ACCOUNT,
+            "subjects",
+        )?;
+        let dispatch = EmitEventDispatch {
+            subjects: dids.iter().map(|d| EmitEventSubject::account(d)).collect(),
+            action: EmitEventAction::DeleteAccount,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "QuarantineBlob"}`,
+    /// N-element `repoBlobRef` subjects, cap 50.
     async fn quarantine_blob_many(
         &self,
-        _subjects: &[BlobSubject],
-        _rationale: &str,
+        subjects: &[BlobSubject],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(subjects, batch_types::MAX_SUBJECTS_DEFAULT, "subjects")?;
+        let dispatch = EmitEventDispatch {
+            subjects: subjects
+                .iter()
+                .map(|s| EmitEventSubject::blob(&s.did, &s.cid, s.record_uri.as_deref()))
+                .collect(),
+            action: EmitEventAction::QuarantineBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "RestoreBlob"}`,
+    /// N-element subjects, cap 50. Unit-result per the restore
+    /// symmetry; `prior_action_id` is trait-boundary vocabulary
+    /// only (nothing rides the wire).
     async fn restore_blob_many(
         &self,
-        _subjects: &[BlobSubject],
+        subjects: &[BlobSubject],
         _prior_action_id: &BackendActionId,
-        _rationale: &str,
+        rationale: &str,
     ) -> Result<(), BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(subjects, batch_types::MAX_SUBJECTS_DEFAULT, "subjects")?;
+        let dispatch = EmitEventDispatch {
+            subjects: subjects
+                .iter()
+                .map(|s| EmitEventSubject::blob(&s.did, &s.cid, s.record_uri.as_deref()))
+                .collect(),
+            action: EmitEventAction::RestoreBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await?;
+        Ok(())
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "DeleteBlob"}`,
+    /// N-element subjects, cap 25 (`MAX_SUBJECTS_DELETE_BLOB`).
     async fn delete_blob_many(
         &self,
-        _subjects: &[BlobSubject],
-        _rationale: &str,
+        subjects: &[BlobSubject],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(
+            subjects,
+            batch_types::MAX_SUBJECTS_DELETE_BLOB,
+            "subjects",
+        )?;
+        let dispatch = EmitEventDispatch {
+            subjects: subjects
+                .iter()
+                .map(|s| EmitEventSubject::blob(&s.did, &s.cid, s.record_uri.as_deref()))
+                .collect(),
+            action: EmitEventAction::DeleteBlob,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "TakedownRecord"}`,
+    /// N-element strongRef subjects, cap 50. **CID-required** on
+    /// every subject (S-2): Aurora's multi-subject arm performs
+    /// no CID validation, so an empty CID would flow through with
+    /// undefined downstream semantics — pre-reject and point
+    /// URI-level callers at `batch_takedown_records`.
     async fn takedown_record_many(
         &self,
-        _subjects: &[Subject],
-        _rationale: &str,
+        subjects: &[Subject],
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(subjects, batch_types::MAX_SUBJECTS_DEFAULT, "subjects")?;
+        let mut wire_subjects = Vec::with_capacity(subjects.len());
+        for subject in subjects {
+            let Some(uri) = subject.at_uri.as_deref() else {
+                return Err(BackendError::Validation(format!(
+                    "takedown_record_many requires record-shaped subjects \
+                     (at_uri present); got an account-shaped subject for did {}",
+                    subject.did
+                )));
+            };
+            match subject.cid.as_deref() {
+                Some(cid) if !cid.is_empty() => {
+                    wire_subjects.push(EmitEventSubject::record(uri, cid))
+                }
+                _ => {
+                    return Err(BackendError::Validation(
+                        "takedown_record_many requires non-empty CID; \
+                         use batch_takedown_records for URI-level takedowns"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        let dispatch = EmitEventDispatch {
+            subjects: wire_subjects,
+            action: EmitEventAction::TakedownRecord,
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
+    /// Real dispatch (v1.8.7): `{"kind": "UpdateSubjectStatus"}`
+    /// — one tri-state status applied to N accounts, cap 50.
     async fn update_subject_status_many(
         &self,
-        _dids: &[String],
-        _status: SubjectStatus,
-        _rationale: &str,
+        dids: &[String],
+        status: SubjectStatus,
+        rationale: &str,
         _precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError> {
-        Err(BackendError::Unsupported)
+        batch_types::validate_batch_len(dids, batch_types::MAX_SUBJECTS_DEFAULT, "subjects")?;
+        let dispatch = EmitEventDispatch {
+            subjects: dids.iter().map(|d| EmitEventSubject::account(d)).collect(),
+            action: EmitEventAction::UpdateSubjectStatus { status },
+            rationale,
+            metadata: None,
+        };
+        self.dispatch_emit_event(&dispatch).await
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful
