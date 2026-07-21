@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT outcome, error_message FROM pds_admin_audit\n             WHERE precipitating_action_id = ?1",
+  "describe": {
+    "columns": [
+      {
+        "name": "outcome",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "45d6c3caaee89434b6448bbd7a0692fa3e776600a84a4e6bc1e99a7f2b311f09"
+}

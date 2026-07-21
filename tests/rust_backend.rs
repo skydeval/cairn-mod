@@ -2054,12 +2054,15 @@ async fn cross_verify_end_to_end_verified_and_persisted() {
     let action_id = fixture_action_row(&pool).await;
 
     // Local dispatch row with join keys, hash-stamped through the
-    // production audit-append path (12-field preimage).
+    // production audit-append path (12-field preimage). The id is
+    // PerBatch (v1.8.7 LB-5 pin): the join column stores the bare
+    // payload via the variant-agnostic as_str, so batch rows join
+    // upstream chain entries with zero cross-verify changes.
     record_pds_admin_call(
         &pool,
         action_id,
         cairn_mod::pds_admin::BackendMethod::DeleteAccount,
-        Ok(Some(BackendActionId::PerEvent("42".to_string()))),
+        Ok(Some(BackendActionId::PerBatch("42".to_string()))),
         Some(cairn_mod::pds_admin::UpstreamResponse::Action(
             &UpstreamActionResponse {
                 event_id: "42".to_string(),
@@ -2182,5 +2185,460 @@ async fn cross_verify_detects_upstream_tamper() {
         report.notes["auroraDisagreesWithIndependentWalk"]
             .as_bool()
             .unwrap()
+    );
+}
+
+// =========================================================================
+// v1.8.7 — dedicated batch endpoints + multi-subject dispatch (v2 §10)
+// =========================================================================
+
+use cairn_mod::pds_admin::rust::batch_types::BatchOutcome;
+
+struct MockBatchAurora {
+    status: StatusCode,
+    body: String,
+    /// (nsid, parsed body) in arrival order.
+    requests: Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+async fn batch_handler(
+    State(state): State<Arc<MockBatchAurora>>,
+    uri: axum::http::Uri,
+    body: String,
+) -> Response {
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+    let nsid = uri
+        .path()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    state.requests.lock().unwrap().push((nsid, parsed));
+    (
+        state.status,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        state.body.clone(),
+    )
+        .into_response()
+}
+
+fn batch_success_body(event_id: &str, affected: u32) -> String {
+    json!({
+        "eventId": event_id,
+        "auditEntryId": "batch-chain-1",
+        "affectedCount": affected,
+        "snapshots": []
+    })
+    .to_string()
+}
+
+/// Mock Aurora serving describeCapabilities (parameterized body)
+/// plus all four dedicated batch routes and emitEvent.
+async fn spawn_batch_mock(
+    describe_body: String,
+    status: StatusCode,
+    body: String,
+) -> (SocketAddr, Arc<MockBatchAurora>, Arc<MockEmitAurora>) {
+    let batch_state = Arc::new(MockBatchAurora {
+        status,
+        body,
+        requests: Mutex::new(Vec::new()),
+    });
+    let emit_state = Arc::new(MockEmitAurora {
+        emit_status: StatusCode::OK,
+        emit_body: emit_success_body("many-evt-1"),
+        emit_requests: Mutex::new(Vec::new()),
+        retry_after: None,
+    });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: describe_body,
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let mut router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(describe_capabilities).with_state(desc_state),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.emitEvent",
+            axum::routing::post(emit_event_handler).with_state(emit_state.clone()),
+        );
+    for nsid in [
+        "batchTakedownAccounts",
+        "batchSuspendAccounts",
+        "batchRestoreAccounts",
+        "batchTakedownRecords",
+    ] {
+        router = router.route(
+            &format!("/xrpc/tools.aurora.admin.{nsid}"),
+            axum::routing::post(batch_handler).with_state(batch_state.clone()),
+        );
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, batch_state, emit_state)
+}
+
+/// Backend with the operator opt-in pin for `batch-takedown`
+/// (Posture A: empty required_capabilities + one pin line),
+/// probed against the mock's advertisement.
+async fn pinned_probed_backend(addr: SocketAddr) -> RustBackend {
+    let mut cfg = backend_config(addr, Vec::new());
+    cfg.pinned_versions = BTreeMap::from([("batch-takedown".to_string(), "v1".to_string())]);
+    let backend =
+        RustBackend::new_with_key_source(&cfg, &|_| Ok(TEST_KEY_HEX.to_string())).unwrap();
+    backend.probe().await.expect("probe succeeds");
+    backend
+}
+
+fn dids2() -> Vec<String> {
+    vec!["did:plc:alpha".to_string(), "did:plc:beta".to_string()]
+}
+
+#[tokio::test]
+async fn batch_takedown_accounts_posts_exact_body_and_parses_outcome() {
+    let (addr, state, _) = spawn_batch_mock(
+        canonical_body(),
+        StatusCode::OK,
+        batch_success_body("batch-evt-9", 2),
+    )
+    .await;
+    let backend = pinned_probed_backend(addr).await;
+
+    let outcome = backend
+        .batch_takedown_accounts(&dids2(), "spam ring", 7)
+        .await
+        .expect("dispatch succeeds");
+    assert_eq!(outcome.event_id, "batch-evt-9");
+    assert_eq!(outcome.audit_entry_id, "batch-chain-1");
+    assert_eq!(outcome.affected_count, 2);
+    assert!(outcome.snapshots.is_empty());
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, "tools.aurora.admin.batchTakedownAccounts");
+    assert_eq!(
+        requests[0].1,
+        json!({"dids": ["did:plc:alpha", "did:plc:beta"], "rationale": "spam ring"})
+    );
+}
+
+#[tokio::test]
+async fn batch_endpoints_route_by_nsid_with_matching_bodies() {
+    let (addr, state, _) = spawn_batch_mock(
+        canonical_body(),
+        StatusCode::OK,
+        batch_success_body("batch-evt-10", 1),
+    )
+    .await;
+    let backend = pinned_probed_backend(addr).await;
+
+    backend
+        .batch_suspend_accounts(&dids2(), "raid", 8)
+        .await
+        .expect("suspend dispatches");
+    backend
+        .batch_restore_accounts(&dids2(), "resolved")
+        .await
+        .expect("restore dispatches (trait-only: no pool, no writer, no CLI involved)");
+    let uris = vec!["at://did:plc:alpha/app.bsky.feed.post/r1".to_string()];
+    backend
+        .batch_takedown_records(&uris, "policy", 9)
+        .await
+        .expect("records dispatches");
+
+    let requests = state.requests.lock().unwrap();
+    let nsids: Vec<&str> = requests.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        nsids,
+        vec![
+            "tools.aurora.admin.batchSuspendAccounts",
+            "tools.aurora.admin.batchRestoreAccounts",
+            "tools.aurora.admin.batchTakedownRecords",
+        ]
+    );
+    // Suspend body has NO duration channel (indefinite-only wire).
+    assert_eq!(
+        requests[0].1,
+        json!({"dids": ["did:plc:alpha", "did:plc:beta"], "rationale": "raid"})
+    );
+    // Records body is bare URIs (URI-level; empty-CID convention
+    // lives upstream, scoped to this endpoint).
+    assert_eq!(
+        requests[2].1,
+        json!({"uris": ["at://did:plc:alpha/app.bsky.feed.post/r1"], "rationale": "policy"})
+    );
+}
+
+#[tokio::test]
+async fn batch_dispatch_refused_when_advertised_but_unpinned() {
+    // OperatorOptIn consumer: advertisement alone is not consent.
+    let (addr, state, _) = spawn_batch_mock(
+        canonical_body(),
+        StatusCode::OK,
+        batch_success_body("batch-evt-11", 2),
+    )
+    .await;
+    let backend = probed_backend(addr).await; // no pin
+
+    let err = backend
+        .batch_takedown_accounts(&dids2(), "spam", 10)
+        .await
+        .unwrap_err();
+    match err {
+        BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "batch-takedown-v1"),
+        other => panic!("expected CapabilityNotAdvertised, got {other:?}"),
+    }
+    assert!(
+        state.requests.lock().unwrap().is_empty(),
+        "refusal happens before any wire call"
+    );
+}
+
+#[tokio::test]
+async fn batch_dispatch_refused_when_pinned_but_unadvertised() {
+    // Posture A + no upstream advertisement: boots (empty
+    // required_capabilities), first dispatch refuses.
+    let no_batch_body = json!({
+        "families": {"tools.aurora.admin": ["emitEvent"]},
+        "extensions": [{"name": "mod-events-emit-v1"}],
+        "implementation": "aurora-locus",
+        "version": "0.10.0"
+    })
+    .to_string();
+    let (addr, state, _) = spawn_batch_mock(
+        no_batch_body,
+        StatusCode::OK,
+        batch_success_body("batch-evt-12", 2),
+    )
+    .await;
+    let backend = pinned_probed_backend(addr).await;
+
+    let err = backend
+        .batch_takedown_accounts(&dids2(), "spam", 11)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::CapabilityNotAdvertised(_)));
+    assert!(state.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn batch_posture_b_pin_requires_required_capabilities_entry() {
+    // Shipped validated_rust_from_toml cross-check (S-1): with a
+    // non-empty required_capabilities list, every pinned family
+    // must appear in it.
+    unsafe {
+        std::env::set_var("CAIRN_TEST_RUST_BATCH_POSTURE_KEY", TEST_KEY_HEX);
+    }
+    let mut v = rust_backend_config_json(
+        "CAIRN_TEST_RUST_BATCH_POSTURE_KEY",
+        "did:web:cairn.example.com",
+    );
+    v["pds_admin"]["rust"]["required_capabilities"] = json!(["mod-events-emit-v1"]);
+    v["pds_admin"]["rust"]["pinned_versions"] = json!({"batch-takedown": "v1"});
+    let err = PdsAdminPolicy::from_config(&config_from_json(v.clone()))
+        .expect_err("pin without required listing fails Posture B validation");
+    assert!(
+        err.to_string()
+            .contains("does not appear in required_capabilities"),
+        "{err}"
+    );
+
+    // Two-line Posture B passes validation.
+    v["pds_admin"]["rust"]["required_capabilities"] =
+        json!(["mod-events-emit-v1", "batch-takedown-v1"]);
+    PdsAdminPolicy::from_config(&config_from_json(v)).expect("Posture B two-line config resolves");
+}
+
+#[tokio::test]
+async fn batch_subject_failure_body_maps_with_failing_subject_context() {
+    // Aurora's batch_subject_err_response: per-subject failure
+    // aborts the whole tx; the body's message carries the failing
+    // index + identifier, preserved through the standard mapping.
+    let error_body = json!({
+        "error": "NotFound",
+        "message": "batchTakedownAccounts: subject[1] = did:plc:beta failed: account not found",
+        "failingSubject": 1,
+        "failingSubjectId": "did:plc:beta"
+    })
+    .to_string();
+    let (addr, _state, _) =
+        spawn_batch_mock(canonical_body(), StatusCode::NOT_FOUND, error_body).await;
+    let backend = pinned_probed_backend(addr).await;
+
+    let err = backend
+        .batch_takedown_accounts(&dids2(), "spam", 12)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, BackendError::Terminal(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("subject[1]"), "{msg}");
+    assert!(msg.contains("did:plc:beta"), "{msg}");
+    assert_eq!(err.error_code(), Some("NotFound"));
+}
+
+#[tokio::test]
+async fn delete_account_many_dispatches_n_subjects_and_caps_at_10() {
+    let (addr, _batch, emit) = spawn_batch_mock(
+        canonical_body(),
+        StatusCode::OK,
+        batch_success_body("unused", 0),
+    )
+    .await;
+    let backend = pinned_probed_backend(addr).await;
+
+    backend
+        .delete_account_many(&dids2(), "purge", 13)
+        .await
+        .expect("2-subject dispatch succeeds");
+    let requests = emit.emit_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["action"], json!({"kind": "DeleteAccount"}));
+    assert_eq!(requests[0]["subjects"].as_array().unwrap().len(), 2);
+    drop(requests);
+
+    // Cap 10: eleven subjects rejected client-side, no wire call.
+    let eleven: Vec<String> = (0..11).map(|i| format!("did:plc:n{i}")).collect();
+    let err = backend
+        .delete_account_many(&eleven, "purge", 14)
+        .await
+        .unwrap_err();
+    match err {
+        BackendError::Validation(msg) => {
+            assert_eq!(msg, "subjects length 11 exceeds limit of 10");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert_eq!(emit.emit_requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn takedown_record_many_requires_nonempty_cid_per_subject() {
+    let (addr, _batch, emit) = spawn_batch_mock(
+        canonical_body(),
+        StatusCode::OK,
+        batch_success_body("unused", 0),
+    )
+    .await;
+    let backend = pinned_probed_backend(addr).await;
+
+    // Empty CID pre-rejected (S-2) with the pointer message.
+    let subjects = vec![
+        cairn_mod::pds_admin::Subject::record(
+            "did:plc:alpha",
+            "at://did:plc:alpha/app.bsky.feed.post/r1",
+            Some("bafy1".to_string()),
+        ),
+        cairn_mod::pds_admin::Subject::record(
+            "did:plc:beta",
+            "at://did:plc:beta/app.bsky.feed.post/r2",
+            Some(String::new()),
+        ),
+    ];
+    let err = backend
+        .takedown_record_many(&subjects, "policy", 15)
+        .await
+        .unwrap_err();
+    match err {
+        BackendError::Validation(msg) => assert_eq!(
+            msg,
+            "takedown_record_many requires non-empty CID; use batch_takedown_records \
+             for URI-level takedowns"
+        ),
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(emit.emit_requests.lock().unwrap().is_empty());
+
+    // Fully-CID'd subjects dispatch as strongRefs.
+    let good = vec![
+        cairn_mod::pds_admin::Subject::record(
+            "did:plc:alpha",
+            "at://did:plc:alpha/app.bsky.feed.post/r1",
+            Some("bafy1".to_string()),
+        ),
+        cairn_mod::pds_admin::Subject::record(
+            "did:plc:beta",
+            "at://did:plc:beta/app.bsky.feed.post/r2",
+            Some("bafy2".to_string()),
+        ),
+    ];
+    backend
+        .takedown_record_many(&good, "policy", 16)
+        .await
+        .expect("CID-level dispatch succeeds");
+    let requests = emit.emit_requests.lock().unwrap();
+    assert_eq!(requests[0]["action"], json!({"kind": "TakedownRecord"}));
+    assert_eq!(
+        requests[0]["subjects"][1],
+        json!({
+            "$type": "com.atproto.repo.strongRef",
+            "uri": "at://did:plc:beta/app.bsky.feed.post/r2",
+            "cid": "bafy2"
+        })
+    );
+}
+
+#[tokio::test]
+async fn batch_audit_row_persists_per_batch_id_with_null_cascades() {
+    // Persistence pin (v2 §10.3): PerBatch stored bare on the
+    // TEXT column; Batch response details project
+    // upstream_audit_entry_id + snapshots but leave
+    // cascading_actions_json NULL (no cascade channel on the
+    // dedicated-batch output).
+    let pool = cross_verify_pool().await;
+    let action_id = fixture_action_row(&pool).await;
+
+    let outcome = BatchOutcome {
+        event_id: "batch-evt-77".to_string(),
+        audit_entry_id: "batch-chain-77".to_string(),
+        affected_count: 3,
+        snapshots: Vec::new(),
+    };
+    record_pds_admin_call(
+        &pool,
+        action_id,
+        cairn_mod::pds_admin::BackendMethod::TakedownAccount,
+        Ok(Some(BackendActionId::PerBatch("batch-evt-77".to_string()))),
+        Some(cairn_mod::pds_admin::UpstreamResponse::Batch(&outcome)),
+        2_000,
+        2_500,
+    )
+    .await
+    .expect("audit row lands");
+
+    let row = sqlx::query(
+        "SELECT backend_action_id, upstream_audit_entry_id,
+                cascading_actions_json, snapshots_json
+         FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+    )
+    .bind(action_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    use sqlx::Row;
+    assert_eq!(
+        row.get::<Option<String>, _>("backend_action_id").as_deref(),
+        Some("batch-evt-77"),
+        "PerBatch payload stored bare (no variant discriminator)"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("upstream_audit_entry_id")
+            .as_deref(),
+        Some("batch-chain-77")
+    );
+    assert!(
+        row.get::<Option<String>, _>("cascading_actions_json")
+            .is_none(),
+        "dedicated-batch output has no cascade channel: NULL, not []"
+    );
+    assert_eq!(
+        row.get::<Option<String>, _>("snapshots_json").as_deref(),
+        Some("[]")
     );
 }

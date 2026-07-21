@@ -1458,12 +1458,23 @@ mod tests {
 
         async fn batch_takedown_accounts(
             &self,
-            _dids: &[String],
-            _rationale: &str,
-            _precipitating_action_id: i64,
+            dids: &[String],
+            rationale: &str,
+            precipitating_action_id: i64,
         ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
         {
-            unimplemented!("test backend does not stub v1.8.7 batch methods")
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "batch_takedown_accounts",
+                did: dids.join(","),
+                reason: rationale.to_string(),
+                action_id: precipitating_action_id,
+            });
+            Ok(crate::pds_admin::rust::batch_types::BatchOutcome {
+                event_id: "batch-evt-1".to_string(),
+                audit_entry_id: "batch-chain-1".to_string(),
+                affected_count: dids.len() as u32,
+                snapshots: Vec::new(),
+            })
         }
 
         async fn batch_suspend_accounts(
@@ -1487,12 +1498,23 @@ mod tests {
 
         async fn batch_takedown_records(
             &self,
-            _uris: &[String],
-            _rationale: &str,
-            _precipitating_action_id: i64,
+            uris: &[String],
+            rationale: &str,
+            precipitating_action_id: i64,
         ) -> std::result::Result<crate::pds_admin::rust::batch_types::BatchOutcome, BackendError>
         {
-            unimplemented!("test backend does not stub v1.8.7 batch methods")
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "batch_takedown_records",
+                did: uris.join(","),
+                reason: rationale.to_string(),
+                action_id: precipitating_action_id,
+            });
+            Ok(crate::pds_admin::rust::batch_types::BatchOutcome {
+                event_id: "batch-evt-2".to_string(),
+                audit_entry_id: "batch-chain-2".to_string(),
+                affected_count: uris.len() as u32,
+                snapshots: Vec::new(),
+            })
         }
 
         async fn delete_account_many(
@@ -1536,12 +1558,33 @@ mod tests {
 
         async fn takedown_record_many(
             &self,
-            _subjects: &[Subject],
-            _rationale: &str,
-            _precipitating_action_id: i64,
+            subjects: &[Subject],
+            rationale: &str,
+            precipitating_action_id: i64,
         ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
         {
-            unimplemented!("test backend does not stub v1.8.7 batch methods")
+            self.calls.lock().unwrap().push(RecordedCall {
+                method: "takedown_record_many",
+                did: subjects
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{}#{}",
+                            s.at_uri.as_deref().unwrap_or(""),
+                            s.cid.as_deref().unwrap_or("")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(","),
+                reason: rationale.to_string(),
+                action_id: precipitating_action_id,
+            });
+            Ok(crate::pds_admin::rust::action_types::ActionResponse {
+                event_id: "many-evt-1".to_string(),
+                audit_entry_id: "many-chain-1".to_string(),
+                snapshots: Vec::new(),
+                cascading_actions: Vec::new(),
+            })
         }
 
         async fn update_subject_status_many(
@@ -1868,6 +1911,223 @@ mod tests {
             duration_iso: None,
             action_detail: None,
         }
+    }
+
+    /// `ctx` with a batch-shaped action_detail (v1.8.7).
+    fn ctx_with_detail<'a>(action_id: i64, did: &'a str, detail: &'a str) -> DispatchContext<'a> {
+        DispatchContext {
+            action_detail: Some(detail),
+            ..ctx(action_id, did)
+        }
+    }
+
+    #[test]
+    fn batch_effective_method_maps_takedown_shapes() {
+        let dids = serde_json::json!({"batch": true, "dids": ["did:plc:a"]});
+        let uris = serde_json::json!({"batch": true, "uris": ["at://did:plc:a/c/r"]});
+        let subjects = serde_json::json!({"batch": true, "subjects": [{"uri": "u", "cid": "c"}]});
+        assert_eq!(
+            batch_effective_method(BackendMethod::TakedownAccount, &dids),
+            BackendMethod::TakedownAccount
+        );
+        assert_eq!(
+            batch_effective_method(BackendMethod::TakedownAccount, &uris),
+            BackendMethod::TakedownRecord
+        );
+        assert_eq!(
+            batch_effective_method(BackendMethod::TakedownAccount, &subjects),
+            BackendMethod::TakedownRecord
+        );
+        // Non-takedown verbs pass through untouched.
+        assert_eq!(
+            batch_effective_method(BackendMethod::DeleteAccount, &dids),
+            BackendMethod::DeleteAccount
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_dids_row_routes_to_batch_takedown_accounts_with_per_batch_stamp() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+        let detail = r#"{"batch": true, "dids": ["did:plc:s", "did:plc:t"]}"#;
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_with_detail(action_id, "did:plc:s", detail),
+        )
+        .await;
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "batch_takedown_accounts");
+        assert_eq!(calls[0].did, "did:plc:s,did:plc:t");
+        assert_eq!(calls[0].action_id, action_id);
+
+        // One audit row: singular wire string, PerBatch payload
+        // stored bare, NULL cascades (dedicated-batch output has
+        // no cascade channel), upstream ids persisted.
+        let row = sqlx::query!(
+            "SELECT backend_method, backend_action_id, outcome,
+                    upstream_audit_entry_id, cascading_actions_json, snapshots_json
+             FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+            action_id,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.backend_method, "takedown_account");
+        assert_eq!(row.backend_action_id.as_deref(), Some("batch-evt-1"));
+        assert_eq!(row.outcome, "success");
+        assert_eq!(
+            row.upstream_audit_entry_id.as_deref(),
+            Some("batch-chain-1")
+        );
+        assert!(row.cascading_actions_json.is_none());
+        assert_eq!(row.snapshots_json.as_deref(), Some("[]"));
+    }
+
+    #[tokio::test]
+    async fn batch_uris_row_routes_to_batch_takedown_records_audited_as_takedown_record() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+        let detail = r#"{"batch": true, "uris": ["at://did:plc:s/app.bsky.feed.post/r1", "at://did:plc:t/app.bsky.feed.post/r2"]}"#;
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_with_detail(action_id, "did:plc:s", detail),
+        )
+        .await;
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "batch_takedown_records");
+
+        let row = sqlx::query!(
+            "SELECT backend_method, backend_action_id FROM pds_admin_audit
+             WHERE precipitating_action_id = ?1",
+            action_id,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Audited under the record verb (v2 §5.3 shape
+        // disambiguation), PerBatch payload stored bare.
+        assert_eq!(row.backend_method, "takedown_record");
+        assert_eq!(row.backend_action_id.as_deref(), Some("batch-evt-2"));
+    }
+
+    #[tokio::test]
+    async fn batch_subjects_row_routes_to_takedown_record_many_with_aggregate_cascades() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::TakedownAccount),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+        let detail = r#"{"batch": true, "subjects": [
+            {"uri": "at://did:plc:s/app.bsky.feed.post/r1", "cid": "bafy1"},
+            {"uri": "at://did:plc:t/app.bsky.feed.post/r2", "cid": "bafy2"}
+        ]}"#;
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_with_detail(action_id, "did:plc:s", detail),
+        )
+        .await;
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].method, "takedown_record_many");
+        assert_eq!(
+            calls[0].did,
+            "at://did:plc:s/app.bsky.feed.post/r1#bafy1,at://did:plc:t/app.bsky.feed.post/r2#bafy2"
+        );
+
+        let row = sqlx::query!(
+            "SELECT backend_method, backend_action_id, cascading_actions_json
+             FROM pds_admin_audit WHERE precipitating_action_id = ?1",
+            action_id,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.backend_method, "takedown_record");
+        // Multi-subject responses stamp PerBatch too (one row, N
+        // subjects) and keep the emitEvent cascade projection
+        // ("[]" when nothing cascaded — channel present).
+        assert_eq!(row.backend_action_id.as_deref(), Some("many-evt-1"));
+        assert_eq!(row.cascading_actions_json.as_deref(), Some("[]"));
+    }
+
+    #[tokio::test]
+    async fn batch_row_under_length_1_only_verb_records_validation_failure() {
+        let pool = fresh_pool().await;
+        let action_id = fixture_subject_action(&pool).await;
+        let backend = RecordingBackend::new();
+        let mut map = BTreeMap::new();
+        map.insert(
+            ActionType::Takedown,
+            ActionMapEntry::Method(BackendMethod::SendEmail),
+        );
+        let bridge = PdsAdminBridge {
+            policy: policy_with_action_map(true, map),
+            backend: backend.clone(),
+        };
+        let detail = r#"{"batch": true, "dids": ["did:plc:s"]}"#;
+        dispatch_after_record_action(
+            Some(&bridge),
+            &pool,
+            ctx_with_detail(action_id, "did:plc:s", detail),
+        )
+        .await;
+
+        assert!(
+            backend.calls().is_empty(),
+            "no backend call for a batch-less verb"
+        );
+        let row = sqlx::query!(
+            "SELECT outcome, error_message FROM pds_admin_audit
+             WHERE precipitating_action_id = ?1",
+            action_id,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.outcome, "validation");
+        assert!(
+            row.error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("does not support batch-shaped rows"),
+            "{:?}",
+            row.error_message
+        );
     }
 
     #[tokio::test]

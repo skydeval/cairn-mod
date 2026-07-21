@@ -3852,3 +3852,142 @@ async fn shutdown_signal() {
         tracing::debug!("shutdown_signal: ctrl_c fired (non-unix path)");
     }
 }
+
+#[cfg(test)]
+mod batch_cli_tests {
+    use super::*;
+
+    #[test]
+    fn blob_ref_shorthand_parses_and_rejects() {
+        // v2 §6.3: `@` delimiter sidesteps DID-colon ambiguity.
+        let (did, cid) = parse_blob_ref("did:plc:abc123@bafyblobcid").unwrap();
+        assert_eq!(did, "did:plc:abc123");
+        assert_eq!(cid, "bafyblobcid");
+        // DIDs containing colons stay intact.
+        let (did, _) = parse_blob_ref("did:web:pds.example.com@bafy2").unwrap();
+        assert_eq!(did, "did:web:pds.example.com");
+        assert!(parse_blob_ref("did:plc:abc123").is_err());
+        assert!(parse_blob_ref("not-a-did@bafy").is_err());
+        assert!(parse_blob_ref("did:plc:abc123@").is_err());
+    }
+
+    #[test]
+    fn record_subject_fragment_required() {
+        let (uri, cid) =
+            parse_record_subject("at://did:plc:a/app.bsky.feed.post/r1#bafy1").unwrap();
+        assert_eq!(uri, "at://did:plc:a/app.bsky.feed.post/r1");
+        assert_eq!(cid, "bafy1");
+        // Bare URI (URI-level) is records batch-takedown territory.
+        let err = parse_record_subject("at://did:plc:a/app.bsky.feed.post/r1").unwrap_err();
+        assert!(err.to_string().contains("batch-takedown"), "{err}");
+    }
+
+    #[test]
+    fn batch_did_extraction_from_at_uri() {
+        assert_eq!(
+            batch_did_from_at_uri("at://did:plc:a/app.bsky.feed.post/r1").unwrap(),
+            "did:plc:a"
+        );
+        assert!(batch_did_from_at_uri("https://example.com/x").is_err());
+        assert!(batch_did_from_at_uri("at://handle.example.com/c/r").is_err());
+    }
+
+    #[test]
+    fn cli_batch_len_check_matches_aurora_shapes() {
+        assert!(cli_batch_len_check(49, 50, "batch").is_ok());
+        assert!(cli_batch_len_check(50, 50, "batch").is_ok());
+        let err = cli_batch_len_check(51, 50, "batch").unwrap_err();
+        assert_eq!(err.exit_code(), 7, "cap violation exits 7 (SERVER_4XX)");
+        assert!(
+            err.to_string()
+                .contains("batch length 51 exceeds limit of 50"),
+            "{err}"
+        );
+        assert!(cli_batch_len_check(0, 50, "batch").is_err());
+    }
+
+    #[test]
+    fn nine_batch_subcommands_parse_and_batch_restore_is_absent() {
+        use clap::Parser as _;
+        // The nine v1.8.7 subcommands round-trip through clap.
+        for argv in [
+            vec![
+                "cairn",
+                "pds-admin",
+                "accounts",
+                "batch-takedown",
+                "did:plc:a",
+                "did:plc:b",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "accounts",
+                "batch-suspend",
+                "did:plc:a",
+            ],
+            vec!["cairn", "pds-admin", "accounts", "delete-many", "did:plc:a"],
+            vec![
+                "cairn",
+                "pds-admin",
+                "blobs",
+                "quarantine-many",
+                "did:plc:a@bafy1",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "blobs",
+                "restore-many",
+                "did:plc:a@bafy1",
+                "--prior-action-id",
+                "evt-1",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "blobs",
+                "delete-many",
+                "did:plc:a@bafy1",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "records",
+                "batch-takedown",
+                "at://did:plc:a/c/r",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "records",
+                "takedown-many",
+                "at://did:plc:a/c/r#bafy1",
+            ],
+            vec![
+                "cairn",
+                "pds-admin",
+                "subjects",
+                "update-status-many",
+                "did:plc:a",
+                "--status",
+                "active",
+            ],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+        }
+        // Positional lists are required.
+        assert!(Cli::try_parse_from(["cairn", "pds-admin", "accounts", "batch-takedown"]).is_err());
+        // LB-A: batch-restore intentionally has no CLI surface.
+        assert!(
+            Cli::try_parse_from([
+                "cairn",
+                "pds-admin",
+                "accounts",
+                "batch-restore",
+                "did:plc:a"
+            ])
+            .is_err()
+        );
+    }
+}
