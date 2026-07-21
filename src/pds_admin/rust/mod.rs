@@ -19,6 +19,7 @@ pub mod action_types;
 pub mod audit_types;
 mod emit_event;
 pub mod read_types;
+pub mod upstream_verify;
 pub mod service_auth;
 
 use action_types::{ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus};
