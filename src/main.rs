@@ -217,6 +217,12 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminBlobsSub,
     },
+    /// Record-level batch takedowns (v1.8.7; via the recordAction
+    /// writer).
+    Records {
+        #[command(subcommand)]
+        sub: PdsAdminRecordsSub,
+    },
     /// Upstream report resolution actions (v1.8.5; via the
     /// recordAction writer).
     Reports {
@@ -250,6 +256,9 @@ enum PdsAdminSubjectsSub {
     /// Set the account's upstream moderation status (v1.8.5;
     /// tri-state takedown | deactivated | active).
     UpdateStatus(PdsAdminSubjectsUpdateStatusArgs),
+    /// Set one status on up to 50 accounts via one multi-subject
+    /// emitEvent (v1.8.7).
+    UpdateStatusMany(PdsAdminBatchStatusArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -270,6 +279,17 @@ enum PdsAdminAccountsSub {
     /// Permanently delete an account at the PDS (Admin+ role
     /// upstream).
     Delete(PdsAdminAccountsDeleteArgs),
+    /// Atomically take down up to 50 accounts in one upstream
+    /// batch (v1.8.7; requires the operator opt-in pin
+    /// `batch-takedown = "v1"` under
+    /// `[pds_admin.rust.pinned_versions]`).
+    BatchTakedown(PdsAdminBatchDidsArgs),
+    /// Atomically suspend up to 50 accounts (v1.8.7;
+    /// indefinite-only — the batch wire has no duration).
+    BatchSuspend(PdsAdminBatchDidsArgs),
+    /// Delete up to 10 accounts via one multi-subject emitEvent
+    /// (v1.8.7; Admin+ role upstream).
+    DeleteMany(PdsAdminBatchDidsArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -280,6 +300,26 @@ enum PdsAdminBlobsSub {
     Restore(PdsAdminBlobsRestoreArgs),
     /// Permanently delete a blob.
     Delete(PdsAdminBlobsDeleteArgs),
+    /// Quarantine up to 50 blobs via one multi-subject emitEvent
+    /// (v1.8.7; blob refs as `<did>@<cid>`).
+    QuarantineMany(PdsAdminBatchBlobsArgs),
+    /// Restore up to 50 quarantined blobs (v1.8.7).
+    RestoreMany(PdsAdminBatchBlobsRestoreArgs),
+    /// Permanently delete up to 25 blobs (v1.8.7).
+    DeleteMany(PdsAdminBatchBlobsArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminRecordsSub {
+    /// Atomically take down up to 50 records **URI-level** in one
+    /// upstream batch (v1.8.7): bare AT-URIs, all versions at
+    /// each URI.
+    BatchTakedown(PdsAdminBatchUrisArgs),
+    /// Take down up to 50 records **CID-level** via one
+    /// multi-subject emitEvent (v1.8.7): subjects as
+    /// `<at-uri>#<cid>` — the CID fragment is required; bare
+    /// URIs belong to `batch-takedown`.
+    TakedownMany(PdsAdminBatchRecordSubjectsArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -545,6 +585,172 @@ struct PdsAdminBlobsDeleteArgs {
     /// Referencing record URI, when known.
     #[arg(long = "record-uri")]
     record_uri: Option<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// v1.8.7 batch subcommand args over a DID list. One recordAction
+/// intent row per invocation (first-subject-primary; the full
+/// list rides `action_detail`); caps validated client-side before
+/// the POST (fail fast, exit 7) and again at the trait boundary.
+#[derive(Debug, Args)]
+struct PdsAdminBatchDidsArgs {
+    /// Subject DIDs (repeated positionals).
+    #[arg(required = true)]
+    dids: Vec<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// v1.8.7 batch blob args: blob refs as `<did>@<cid>` (the `@`
+/// delimiter avoids DID-colon ambiguity; `@` appears in neither
+/// DIDs nor CIDs). Per-blob record-URI attachment is deferred
+/// (v2 §6.3).
+#[derive(Debug, Args)]
+struct PdsAdminBatchBlobsArgs {
+    /// Blob references as `<did>@<cid>` (repeated positionals).
+    #[arg(required = true)]
+    blobs: Vec<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// `blobs restore-many` args — [`PdsAdminBatchBlobsArgs`] plus
+/// the prior-quarantine backend action id (one shared reference
+/// for the batch, mirroring the singular restore's trait shape).
+#[derive(Debug, Args)]
+struct PdsAdminBatchBlobsRestoreArgs {
+    /// Blob references as `<did>@<cid>` (repeated positionals).
+    #[arg(required = true)]
+    blobs: Vec<String>,
+    /// Backend action id of the prior quarantine (from the audit
+    /// row's backendActionId).
+    #[arg(long = "prior-action-id")]
+    prior_action_id: String,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// `records batch-takedown` args: bare AT-URIs — URI-level
+/// takedown of all versions at each URI (Aurora's empty-CID
+/// cascade convention, scoped to this endpoint).
+#[derive(Debug, Args)]
+struct PdsAdminBatchUrisArgs {
+    /// Record AT-URIs (repeated positionals; bare — no CID).
+    #[arg(required = true)]
+    uris: Vec<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// `records takedown-many` args: CID-level subjects as
+/// `<at-uri>#<cid>` — the fragment is required (S-2: multi-subject
+/// record takedowns are CID-required; URI-level belongs to
+/// `records batch-takedown`).
+#[derive(Debug, Args)]
+struct PdsAdminBatchRecordSubjectsArgs {
+    /// Record subjects as `<at-uri>#<cid>` (repeated positionals).
+    #[arg(required = true)]
+    subjects: Vec<String>,
+    /// Reason identifier from `[moderation_reasons]` (defaults to
+    /// the reserved pds-admin-cli code).
+    #[arg(long)]
+    reason: Option<String>,
+    /// Optional moderator note (local-only; not transmitted).
+    #[arg(long)]
+    notes: Option<String>,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Per-invocation override of the session's stored Cairn URL.
+    #[arg(long = "cairn-server")]
+    cairn_server: Option<String>,
+    /// One-line summary instead of the full JSON outcome.
+    #[arg(long)]
+    summary: bool,
+}
+
+/// `subjects update-status-many` args — DID list plus the shared
+/// tri-state status.
+#[derive(Debug, Args)]
+struct PdsAdminBatchStatusArgs {
+    /// Subject DIDs (repeated positionals).
+    #[arg(required = true)]
+    dids: Vec<String>,
+    /// Status applied to every subject:
+    /// takedown | deactivated | active.
+    #[arg(long)]
+    status: String,
     /// Reason identifier from `[moderation_reasons]` (defaults to
     /// the reserved pds-admin-cli code).
     #[arg(long)]
@@ -1803,6 +2009,24 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
         } => run_pds_admin_accounts_delete(args).await,
         Command::PdsAdmin {
             sub:
+                PdsAdminSub::Accounts {
+                    sub: PdsAdminAccountsSub::BatchTakedown(args),
+                },
+        } => run_pds_admin_accounts_batch_takedown(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Accounts {
+                    sub: PdsAdminAccountsSub::BatchSuspend(args),
+                },
+        } => run_pds_admin_accounts_batch_suspend(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Accounts {
+                    sub: PdsAdminAccountsSub::DeleteMany(args),
+                },
+        } => run_pds_admin_accounts_delete_many(args).await,
+        Command::PdsAdmin {
+            sub:
                 PdsAdminSub::Blobs {
                     sub: PdsAdminBlobsSub::Quarantine(args),
                 },
@@ -1819,6 +2043,36 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminBlobsSub::Delete(args),
                 },
         } => run_pds_admin_blobs_delete(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::QuarantineMany(args),
+                },
+        } => run_pds_admin_blobs_quarantine_many(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::RestoreMany(args),
+                },
+        } => run_pds_admin_blobs_restore_many(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Blobs {
+                    sub: PdsAdminBlobsSub::DeleteMany(args),
+                },
+        } => run_pds_admin_blobs_delete_many(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Records {
+                    sub: PdsAdminRecordsSub::BatchTakedown(args),
+                },
+        } => run_pds_admin_records_batch_takedown(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Records {
+                    sub: PdsAdminRecordsSub::TakedownMany(args),
+                },
+        } => run_pds_admin_records_takedown_many(args).await,
         Command::PdsAdmin {
             sub:
                 PdsAdminSub::Reports {
@@ -1855,6 +2109,12 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminSubjectsSub::UpdateStatus(args),
                 },
         } => run_pds_admin_subjects_update_status(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Subjects {
+                    sub: PdsAdminSubjectsSub::UpdateStatusMany(args),
+                },
+        } => run_pds_admin_subjects_update_status_many(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -2219,6 +2479,349 @@ async fn run_pds_admin_subjects_update_status(
             subject: args.did,
             cid: None,
             detail: Some(serde_json::json!({ "status": args.status })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+// ===========================================================================
+// v1.8.7 batch subcommands (v2 §6, chainlink #143)
+// ===========================================================================
+
+/// Client-side batch cap check (v2 §6.3/§7): fail fast before the
+/// recordAction POST with the same message shape and exit code (7,
+/// `SERVER_4XX` via `BackendError::Validation`) the trait boundary
+/// produces. The trait re-checks, and Aurora is the authority.
+fn cli_batch_len_check(len: usize, cap: usize, label: &str) -> Result<(), CliError> {
+    if len == 0 {
+        return Err(CliError::Backend(
+            cairn_mod::pds_admin::BackendError::Validation(format!(
+                "{label} must contain at least one entry"
+            )),
+        ));
+    }
+    if len > cap {
+        return Err(CliError::Backend(
+            cairn_mod::pds_admin::BackendError::Validation(format!(
+                "{label} length {len} exceeds limit of {cap}"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Authority (DID) segment of an `at://` URI — the batch intent
+/// row's first-subject-primary `subject_did` for record batches
+/// (the writer must see a bare DID so `subject_uri` stays NULL on
+/// the one-row-per-batch shape).
+fn batch_did_from_at_uri(uri: &str) -> Result<String, CliError> {
+    let authority = uri
+        .strip_prefix("at://")
+        .map(|rest| rest.split('/').next().unwrap_or(rest));
+    match authority {
+        Some(a) if a.starts_with("did:") => Ok(a.to_string()),
+        _ => Err(CliError::Config(format!(
+            "record URI {uri:?} is not an at:// URI with a DID authority"
+        ))),
+    }
+}
+
+/// Split a `<did>@<cid>` blob reference (v2 §6.3: `@` appears in
+/// neither DIDs nor CIDs, avoiding DID-colon ambiguity).
+fn parse_blob_ref(s: &str) -> Result<(String, String), CliError> {
+    match s.split_once('@') {
+        Some((did, cid)) if did.starts_with("did:") && !cid.is_empty() => {
+            Ok((did.to_string(), cid.to_string()))
+        }
+        _ => Err(CliError::Config(format!(
+            "blob reference {s:?} must be <did>@<cid>"
+        ))),
+    }
+}
+
+/// Split an `<at-uri>#<cid>` record subject for `records
+/// takedown-many`. The CID fragment is required (S-2) — bare URIs
+/// (URI-level takedowns) belong to `records batch-takedown`.
+fn parse_record_subject(s: &str) -> Result<(String, String), CliError> {
+    match s.split_once('#') {
+        Some((uri, cid)) if !uri.is_empty() && !cid.is_empty() => {
+            Ok((uri.to_string(), cid.to_string()))
+        }
+        _ => Err(CliError::Config(format!(
+            "record subject {s:?} must be <at-uri>#<cid> (CID-level); bare URIs \
+             (URI-level takedowns) belong to `records batch-takedown`"
+        ))),
+    }
+}
+
+async fn run_pds_admin_accounts_batch_takedown(
+    args: PdsAdminBatchDidsArgs,
+) -> Result<(), CliError> {
+    cli_batch_len_check(
+        args.dids.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_BATCH_SIZE,
+        "batch",
+    )?;
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "takedown",
+            subject: args.dids[0].clone(),
+            cid: None,
+            detail: Some(serde_json::json!({ "batch": true, "dids": args.dids })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_accounts_batch_suspend(args: PdsAdminBatchDidsArgs) -> Result<(), CliError> {
+    cli_batch_len_check(
+        args.dids.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_BATCH_SIZE,
+        "batch",
+    )?;
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            // Batch suspension is indefinite-only by wire
+            // contract; the duration-less indef_suspension verb
+            // is the matching intent row.
+            action_type: "indef_suspension",
+            subject: args.dids[0].clone(),
+            cid: None,
+            detail: Some(serde_json::json!({ "batch": true, "dids": args.dids })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_accounts_delete_many(args: PdsAdminBatchDidsArgs) -> Result<(), CliError> {
+    cli_batch_len_check(
+        args.dids.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DELETE_ACCOUNT,
+        "subjects",
+    )?;
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "delete_account",
+            subject: args.dids[0].clone(),
+            cid: None,
+            detail: Some(serde_json::json!({ "batch": true, "dids": args.dids })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+/// Shared body for the three blob `_many` subcommands: parse
+/// `<did>@<cid>` refs, cap-check, and submit one batch intent row
+/// (first blob's DID as primary; `subject_cid` deliberately NULL —
+/// the authoritative blob list rides `action_detail.blobs`).
+// The parameter list is the two arg structs' shared field set
+// (restore adds prior_action_id via extra_detail); a bundling
+// struct would only restate them.
+#[allow(clippy::too_many_arguments)]
+async fn run_pds_admin_blobs_many(
+    action_type: &'static str,
+    cap: usize,
+    blobs: Vec<String>,
+    extra_detail: Option<(&'static str, serde_json::Value)>,
+    reason: Option<String>,
+    notes: Option<String>,
+    config: Option<PathBuf>,
+    cairn_server: Option<String>,
+    summary: bool,
+) -> Result<(), CliError> {
+    cli_batch_len_check(blobs.len(), cap, "subjects")?;
+    let parsed: Vec<(String, String)> = blobs
+        .iter()
+        .map(|s| parse_blob_ref(s))
+        .collect::<Result<_, _>>()?;
+    let blob_entries: Vec<serde_json::Value> = parsed
+        .iter()
+        .map(|(did, cid)| serde_json::json!({ "did": did, "cid": cid }))
+        .collect();
+    let mut detail = serde_json::json!({ "batch": true, "blobs": blob_entries });
+    if let Some((key, value)) = extra_detail {
+        detail[key] = value;
+    }
+    let first_did = parsed[0].0.clone();
+    run_v185_action(config.as_deref(), cairn_server, summary, reason, |reason| {
+        cli_pds_admin_actions::ActionSubmission {
+            action_type,
+            subject: first_did,
+            cid: None,
+            detail: Some(detail),
+            reason,
+            notes,
+            cairn_server_override: None,
+        }
+    })
+    .await
+}
+
+async fn run_pds_admin_blobs_quarantine_many(args: PdsAdminBatchBlobsArgs) -> Result<(), CliError> {
+    run_pds_admin_blobs_many(
+        "quarantine_blob",
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DEFAULT,
+        args.blobs,
+        None,
+        args.reason,
+        args.notes,
+        args.config,
+        args.cairn_server,
+        args.summary,
+    )
+    .await
+}
+
+async fn run_pds_admin_blobs_restore_many(
+    args: PdsAdminBatchBlobsRestoreArgs,
+) -> Result<(), CliError> {
+    run_pds_admin_blobs_many(
+        "restore_blob",
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DEFAULT,
+        args.blobs,
+        Some((
+            "priorActionId",
+            serde_json::Value::String(args.prior_action_id),
+        )),
+        args.reason,
+        args.notes,
+        args.config,
+        args.cairn_server,
+        args.summary,
+    )
+    .await
+}
+
+async fn run_pds_admin_blobs_delete_many(args: PdsAdminBatchBlobsArgs) -> Result<(), CliError> {
+    run_pds_admin_blobs_many(
+        "delete_blob",
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DELETE_BLOB,
+        args.blobs,
+        None,
+        args.reason,
+        args.notes,
+        args.config,
+        args.cairn_server,
+        args.summary,
+    )
+    .await
+}
+
+async fn run_pds_admin_records_batch_takedown(args: PdsAdminBatchUrisArgs) -> Result<(), CliError> {
+    cli_batch_len_check(
+        args.uris.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_BATCH_SIZE,
+        "batch",
+    )?;
+    let first_did = batch_did_from_at_uri(&args.uris[0])?;
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "takedown",
+            subject: first_did,
+            cid: None,
+            detail: Some(serde_json::json!({ "batch": true, "uris": args.uris })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_records_takedown_many(
+    args: PdsAdminBatchRecordSubjectsArgs,
+) -> Result<(), CliError> {
+    cli_batch_len_check(
+        args.subjects.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DEFAULT,
+        "subjects",
+    )?;
+    let parsed: Vec<(String, String)> = args
+        .subjects
+        .iter()
+        .map(|s| parse_record_subject(s))
+        .collect::<Result<_, _>>()?;
+    let first_did = batch_did_from_at_uri(&parsed[0].0)?;
+    let subject_entries: Vec<serde_json::Value> = parsed
+        .iter()
+        .map(|(uri, cid)| serde_json::json!({ "uri": uri, "cid": cid }))
+        .collect();
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "takedown",
+            subject: first_did,
+            cid: None,
+            detail: Some(serde_json::json!({ "batch": true, "subjects": subject_entries })),
+            reason,
+            notes: args.notes,
+            cairn_server_override: None,
+        },
+    )
+    .await
+}
+
+async fn run_pds_admin_subjects_update_status_many(
+    args: PdsAdminBatchStatusArgs,
+) -> Result<(), CliError> {
+    if cairn_mod::pds_admin::rust::action_types::SubjectStatus::from_wire_str(&args.status)
+        .is_none()
+    {
+        return Err(CliError::Config(format!(
+            "--status must be one of takedown/deactivated/active; got {:?}",
+            args.status
+        )));
+    }
+    cli_batch_len_check(
+        args.dids.len(),
+        cairn_mod::pds_admin::rust::batch_types::MAX_SUBJECTS_DEFAULT,
+        "subjects",
+    )?;
+    run_v185_action(
+        args.config.as_deref(),
+        args.cairn_server,
+        args.summary,
+        args.reason,
+        |reason| cli_pds_admin_actions::ActionSubmission {
+            action_type: "update_subject_status",
+            subject: args.dids[0].clone(),
+            cid: None,
+            detail: Some(serde_json::json!({
+                "batch": true,
+                "dids": args.dids,
+                "status": args.status,
+            })),
             reason,
             notes: args.notes,
             cairn_server_override: None,
