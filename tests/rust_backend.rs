@@ -2058,12 +2058,14 @@ async fn cross_verify_end_to_end_verified_and_persisted() {
         action_id,
         cairn_mod::pds_admin::BackendMethod::DeleteAccount,
         Ok(Some(BackendActionId::PerEvent("42".to_string()))),
-        Some(&UpstreamActionResponse {
-            event_id: "42".to_string(),
-            audit_entry_id: "1".to_string(),
-            snapshots: Vec::new(),
-            cascading_actions: Vec::new(),
-        }),
+        Some(cairn_mod::pds_admin::UpstreamResponse::Action(
+            &UpstreamActionResponse {
+                event_id: "42".to_string(),
+                audit_entry_id: "1".to_string(),
+                snapshots: Vec::new(),
+                cascading_actions: Vec::new(),
+            },
+        )),
         1_000,
         1_500,
     )
@@ -2105,12 +2107,14 @@ async fn cross_verify_join_mismatch_and_persist_gate() {
         action_id,
         cairn_mod::pds_admin::BackendMethod::DeleteAccount,
         Ok(Some(BackendActionId::PerEvent("42".to_string()))),
-        Some(&UpstreamActionResponse {
-            event_id: "42".to_string(),
-            audit_entry_id: "1".to_string(),
-            snapshots: Vec::new(),
-            cascading_actions: Vec::new(),
-        }),
+        Some(cairn_mod::pds_admin::UpstreamResponse::Action(
+            &UpstreamActionResponse {
+                event_id: "42".to_string(),
+                audit_entry_id: "1".to_string(),
+                snapshots: Vec::new(),
+                cascading_actions: Vec::new(),
+            },
+        )),
         1_000,
         1_500,
     )

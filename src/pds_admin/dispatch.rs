@@ -217,6 +217,22 @@ pub async fn dispatch_after_record_action(
         );
     }
 
+    // v1.8.7 §5.2: batch-shaped rows (`action_detail.batch ==
+    // true`) route to the batch/`_many` trait methods. The
+    // action_map still maps the verb; the batch marker selects
+    // the batch arm — mirroring the v1.8.2 subject-shape
+    // auto-elevation precedent (shape data on the row modulates
+    // the dispatched method). Malformed batch JSON falls through
+    // to the singular arms, whose own action_detail parsing
+    // rejects it with `Validation` (no-silent-drop posture).
+    if let Some(raw) = ctx.action_detail
+        && let Ok(detail) = serde_json::from_str::<serde_json::Value>(raw)
+        && detail.get("batch").and_then(serde_json::Value::as_bool) == Some(true)
+    {
+        dispatch_batch_row(bridge, pool, ctx, method, &detail, reason).await;
+        return;
+    }
+
     // v1.8.2 §4.5.1: subject-shape-aware sub-routing. A
     // record-targeting row (uri + cid both present) under an
     // account-verb action_map entry auto-elevates to
@@ -311,7 +327,9 @@ pub async fn dispatch_after_record_action(
         ctx.action_id,
         effective_method,
         unified,
-        response_details.as_ref(),
+        response_details
+            .as_ref()
+            .map(crate::pds_admin::audit::UpstreamResponse::Action),
         started_at,
         completed_at,
     )
@@ -633,6 +651,368 @@ async fn invoke_backend_method(
                  dispatch_after_record_action should have filtered it"
             )
         }
+    }
+}
+
+// ===========================================================================
+// Batch dispatch (v1.8.7, v2 §5.2 — chainlink #143)
+// ===========================================================================
+
+/// Per-call outcome for batch-shaped rows, unifying the batch
+/// surface's three return shapes (dedicated-batch `BatchOutcome`,
+/// multi-subject `ActionResponse`, unit for `restore_blob_many`).
+enum BatchCallOutcome {
+    /// Dedicated `tools.aurora.admin.batch*` response.
+    Batch(crate::pds_admin::rust::batch_types::BatchOutcome),
+    /// Multi-subject `emitEvent` response.
+    Response(crate::pds_admin::rust::action_types::ActionResponse),
+    /// Unit-result (`restore_blob_many`).
+    Unit,
+}
+
+/// Audit-row method attribution for a batch-shaped row (v2 §5.3:
+/// the singular method's wire string — no `backend_method` CHECK
+/// extension). The takedown verbs need shape disambiguation: a
+/// `takedown` intent row carrying `uris` (URI-level dedicated
+/// batch) or record `subjects` (CID-level multi-subject) audits
+/// under `takedown_record`; a `dids` payload audits under
+/// `takedown_account`.
+fn batch_effective_method(method: BackendMethod, detail: &serde_json::Value) -> BackendMethod {
+    match method {
+        BackendMethod::TakedownAccount | BackendMethod::TakedownRecord => {
+            if detail.get("uris").is_some() || detail.get("subjects").is_some() {
+                BackendMethod::TakedownRecord
+            } else {
+                BackendMethod::TakedownAccount
+            }
+        }
+        other => other,
+    }
+}
+
+/// Extract a required array-of-strings field from a batch
+/// action_detail object.
+fn detail_string_vec(
+    detail: &serde_json::Value,
+    key: &str,
+    method: BackendMethod,
+) -> std::result::Result<Vec<String>, BackendError> {
+    let items = detail
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            BackendError::Validation(format!(
+                "{} batch dispatch: action_detail.{key} missing or not an array",
+                method.as_wire_str()
+            ))
+        })?;
+    items
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "{} batch dispatch: action_detail.{key} entries must be strings",
+                    method.as_wire_str()
+                ))
+            })
+        })
+        .collect()
+}
+
+/// Extract the blob-subject list (`[{"did", "cid",
+/// "recordUri"?}]`) from a batch action_detail object.
+fn detail_blob_subjects(
+    detail: &serde_json::Value,
+    method: BackendMethod,
+) -> std::result::Result<Vec<crate::pds_admin::rust::action_types::BlobSubject>, BackendError> {
+    let items = detail
+        .get("blobs")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            BackendError::Validation(format!(
+                "{} batch dispatch: action_detail.blobs missing or not an array",
+                method.as_wire_str()
+            ))
+        })?;
+    items
+        .iter()
+        .map(|v| {
+            let did = v.get("did").and_then(serde_json::Value::as_str);
+            let cid = v.get("cid").and_then(serde_json::Value::as_str);
+            let (Some(did), Some(cid)) = (did, cid) else {
+                return Err(BackendError::Validation(format!(
+                    "{} batch dispatch: each action_detail.blobs entry requires \
+                     string did and cid fields",
+                    method.as_wire_str()
+                )));
+            };
+            Ok(crate::pds_admin::rust::action_types::BlobSubject {
+                did: did.to_string(),
+                cid: cid.to_string(),
+                record_uri: v
+                    .get("recordUri")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// Extract the record-subject list (`[{"uri", "cid"}]`) from a
+/// batch action_detail object into crate [`Subject`]s. The parent
+/// DID is derived from each AT-URI's authority segment; the CID
+/// non-empty check is the trait boundary's job (S-2), not
+/// duplicated here.
+fn detail_record_subjects(
+    detail: &serde_json::Value,
+    method: BackendMethod,
+) -> std::result::Result<Vec<Subject>, BackendError> {
+    let items = detail
+        .get("subjects")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            BackendError::Validation(format!(
+                "{} batch dispatch: action_detail.subjects missing or not an array",
+                method.as_wire_str()
+            ))
+        })?;
+    items
+        .iter()
+        .map(|v| {
+            let uri = v
+                .get("uri")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    BackendError::Validation(format!(
+                        "{} batch dispatch: each action_detail.subjects entry requires \
+                         a string uri field",
+                        method.as_wire_str()
+                    ))
+                })?;
+            let did = did_from_at_uri(uri).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "{} batch dispatch: subject uri {uri:?} is not an at:// URI with \
+                     a DID authority",
+                    method.as_wire_str()
+                ))
+            })?;
+            Ok(Subject {
+                did: did.to_string(),
+                at_uri: Some(uri.to_string()),
+                cid: v
+                    .get("cid")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// Authority (DID) segment of an `at://` URI, when present.
+fn did_from_at_uri(uri: &str) -> Option<&str> {
+    let rest = uri.strip_prefix("at://")?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if authority.starts_with("did:") {
+        Some(authority)
+    } else {
+        None
+    }
+}
+
+/// Dispatch a batch-shaped row (v2 §5.2): resolve the audit-row
+/// method attribution, fire the batch/`_many` trait method, and
+/// record one `pds_admin_audit` row stamped
+/// `BackendActionId::PerBatch(event_id)` — the first `PerBatch`
+/// construction site (LB-5; the payload is the same join key
+/// cross-verify compares against `AuditEntry.event_id`, stored
+/// bare via the variant-agnostic `as_str`).
+async fn dispatch_batch_row(
+    bridge: &PdsAdminBridge,
+    pool: &Pool<Sqlite>,
+    ctx: DispatchContext<'_>,
+    method: BackendMethod,
+    detail: &serde_json::Value,
+    reason: &str,
+) {
+    let effective_method = batch_effective_method(method, detail);
+
+    let started_at = crate::writer::epoch_ms_now();
+    let call_result = invoke_backend_batch_method(
+        bridge.backend.as_ref(),
+        method,
+        detail,
+        reason,
+        ctx.action_id,
+    )
+    .await;
+    let completed_at = crate::writer::epoch_ms_now();
+
+    log_call_outcome(
+        effective_method,
+        ctx.action_id,
+        ctx.subject_did,
+        &call_result,
+    );
+    warn_rust_backend_capability_gap(bridge, effective_method, ctx.action_id, &call_result);
+
+    // Project into the audit shape. Every id-bearing batch
+    // outcome stamps PerBatch — one audit row covers N subjects,
+    // and the variant records exactly that.
+    use crate::pds_admin::audit::UpstreamResponse;
+    let (unified, batch_details, response_details): (
+        std::result::Result<Option<BackendActionId>, BackendError>,
+        Option<crate::pds_admin::rust::batch_types::BatchOutcome>,
+        Option<crate::pds_admin::rust::action_types::ActionResponse>,
+    ) = match call_result {
+        Ok(BatchCallOutcome::Batch(outcome)) => (
+            Ok(Some(BackendActionId::PerBatch(outcome.event_id.clone()))),
+            Some(outcome),
+            None,
+        ),
+        Ok(BatchCallOutcome::Response(resp)) => (
+            Ok(Some(BackendActionId::PerBatch(resp.event_id.clone()))),
+            None,
+            Some(resp),
+        ),
+        Ok(BatchCallOutcome::Unit) => (Ok(None), None, None),
+        Err(e) => (Err(e), None, None),
+    };
+    let upstream = batch_details
+        .as_ref()
+        .map(UpstreamResponse::Batch)
+        .or_else(|| response_details.as_ref().map(UpstreamResponse::Action));
+
+    if let Err(e) = record_pds_admin_call(
+        pool,
+        ctx.action_id,
+        effective_method,
+        unified,
+        upstream,
+        started_at,
+        completed_at,
+    )
+    .await
+    {
+        tracing::error!(
+            error = %e,
+            action_id = ctx.action_id,
+            method = effective_method.as_wire_str(),
+            "pds_admin audit insert failed for batch dispatch; cairn-mod-side action \
+             remains committed"
+        );
+    }
+}
+
+/// Route a batch-shaped row's payload to the matching batch or
+/// `_many` trait method. Payload-key conventions (v2 §5.1):
+/// `dids` (account verbs), `uris` (URI-level record batch),
+/// `subjects` (CID-level record multi-subject), `blobs` (blob
+/// verbs, plus `priorActionId` for restores), `status` (subject
+/// status). Verbs with no batch shape (reports, appeals, email —
+/// Aurora's length-1-only variants) reject with `Validation`.
+async fn invoke_backend_batch_method(
+    backend: &dyn PdsAdminBackend,
+    method: BackendMethod,
+    detail: &serde_json::Value,
+    reason: &str,
+    action_id: i64,
+) -> std::result::Result<BatchCallOutcome, BackendError> {
+    use crate::pds_admin::rust::action_types::SubjectStatus;
+    match method {
+        BackendMethod::TakedownAccount | BackendMethod::TakedownRecord => {
+            if detail.get("uris").is_some() {
+                let uris = detail_string_vec(detail, "uris", method)?;
+                backend
+                    .batch_takedown_records(&uris, reason, action_id)
+                    .await
+                    .map(BatchCallOutcome::Batch)
+            } else if detail.get("subjects").is_some() {
+                let subjects = detail_record_subjects(detail, method)?;
+                backend
+                    .takedown_record_many(&subjects, reason, action_id)
+                    .await
+                    .map(BatchCallOutcome::Response)
+            } else if method == BackendMethod::TakedownAccount && detail.get("dids").is_some() {
+                let dids = detail_string_vec(detail, "dids", method)?;
+                backend
+                    .batch_takedown_accounts(&dids, reason, action_id)
+                    .await
+                    .map(BatchCallOutcome::Batch)
+            } else {
+                Err(BackendError::Validation(format!(
+                    "{} batch dispatch requires one of action_detail.dids / .uris / \
+                     .subjects",
+                    method.as_wire_str()
+                )))
+            }
+        }
+        BackendMethod::SuspendAccount => {
+            let dids = detail_string_vec(detail, "dids", method)?;
+            backend
+                .batch_suspend_accounts(&dids, reason, action_id)
+                .await
+                .map(BatchCallOutcome::Batch)
+        }
+        BackendMethod::DeleteAccount => {
+            let dids = detail_string_vec(detail, "dids", method)?;
+            backend
+                .delete_account_many(&dids, reason, action_id)
+                .await
+                .map(BatchCallOutcome::Response)
+        }
+        BackendMethod::QuarantineBlob => {
+            let blobs = detail_blob_subjects(detail, method)?;
+            backend
+                .quarantine_blob_many(&blobs, reason, action_id)
+                .await
+                .map(BatchCallOutcome::Response)
+        }
+        BackendMethod::DeleteBlob => {
+            let blobs = detail_blob_subjects(detail, method)?;
+            backend
+                .delete_blob_many(&blobs, reason, action_id)
+                .await
+                .map(BatchCallOutcome::Response)
+        }
+        BackendMethod::RestoreBlob => {
+            let blobs = detail_blob_subjects(detail, method)?;
+            let prior = detail_str(detail, "priorActionId", method)?;
+            let prior_id = BackendActionId::PerEvent(prior.to_string());
+            backend
+                .restore_blob_many(&blobs, &prior_id, reason)
+                .await
+                .map(|()| BatchCallOutcome::Unit)
+        }
+        BackendMethod::UpdateSubjectStatus => {
+            let dids = detail_string_vec(detail, "dids", method)?;
+            let status_str = detail_str(detail, "status", method)?;
+            let status = SubjectStatus::from_wire_str(status_str).ok_or_else(|| {
+                BackendError::Validation(format!(
+                    "update_subject_status batch dispatch: action_detail.status \
+                     {status_str:?} is not one of takedown/deactivated/active"
+                ))
+            })?;
+            backend
+                .update_subject_status_many(&dids, status, reason, action_id)
+                .await
+                .map(BatchCallOutcome::Response)
+        }
+        // No batch shape exists for these verbs: Aurora's
+        // embedded-id variants + SendEmail are length-1-only,
+        // and restore/labels never reach this module's record
+        // path (filtered by the dispatch caller).
+        BackendMethod::ResolveReport
+        | BackendMethod::DismissReport
+        | BackendMethod::ResolveAppeal
+        | BackendMethod::EscalateAppeal
+        | BackendMethod::SendEmail
+        | BackendMethod::RestoreAccount
+        | BackendMethod::ApplyLabel
+        | BackendMethod::NegateLabel => Err(BackendError::Validation(format!(
+            "{} does not support batch-shaped rows (Aurora's variant is length-1-only \
+             or the verb has no batch surface)",
+            method.as_wire_str()
+        ))),
     }
 }
 

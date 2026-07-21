@@ -2114,8 +2114,24 @@ impl Writer {
         // (§F20 design + #48 semantics). Override with zero values
         // and was_dampened=false; defense-in-depth for an operator
         // who attaches a strike-bearing reason to a Note row.
+        //
+        // Batch-shaped rows (v1.8.7, detail.batch == true) are
+        // strike-exempt by design (v2 §5.2.1): one row aggregates
+        // N subjects, and the shipped one-subject-one-strike
+        // semantic doesn't compose with that — striking the row
+        // would either revoke all N subjects' strikes atomically
+        // or attribute one strike to N subjects, neither honest.
+        // Do NOT "fix" this zeroing: per-subject batch strike
+        // accounting needs its own design cycle if ever wanted.
+        let is_batch_row = req
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("batch"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
         let (strike_base, strike_applied, was_dampened) = match req.action_type {
             ActionType::Note | ActionType::Warning => (0u32, 0u32, false),
+            _ if is_batch_row => (0u32, 0u32, false),
             _ => (calc.base_weight, calc.applied, calc.was_dampened),
         };
 

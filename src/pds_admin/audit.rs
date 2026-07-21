@@ -499,6 +499,28 @@ fn project_error_columns<T>(
     }
 }
 
+/// Upstream success payload for the migration-0010 persistence
+/// columns (v1.8.7) — borrowed union over the two response shapes
+/// the dispatch layer produces.
+///
+/// Column projection differs by variant:
+/// - [`Self::Action`] (v1.8.5 singular verbs + v1.8.7 `_many`
+///   multi-subject verbs): `cascading_actions_json` stores the
+///   aggregate array (`"[]"` when no cascades fired) — the
+///   shipped v1.8.5 behavior, unchanged.
+/// - [`Self::Batch`] (v1.8.7 dedicated `tools.aurora.admin.batch*`
+///   dispatches): the output carries no cascade channel, so
+///   `cascading_actions_json` stays NULL (v2 §5.3) — NULL means
+///   "this response shape has no cascade channel", distinct from
+///   `"[]"`'s "cascade channel present, nothing cascaded".
+#[derive(Debug, Clone, Copy)]
+pub enum UpstreamResponse<'a> {
+    /// Full `emitEvent` response (`ActionResponse` mirror).
+    Action(&'a crate::pds_admin::rust::action_types::ActionResponse),
+    /// Dedicated-batch response (`BatchOutcome` mirror).
+    Batch(&'a crate::pds_admin::rust::batch_types::BatchOutcome),
+}
+
 /// Record a `pds_admin_audit` row for a backend-call attempt.
 ///
 /// Acquires a connection, issues `BEGIN IMMEDIATE` to serialize
@@ -518,6 +540,10 @@ fn project_error_columns<T>(
 /// `result.map(|_| None)`. Single function is cleaner than two
 /// near-identical entry points.
 ///
+/// `response_details` carries the upstream success payload for the
+/// migration-0010 persistence columns — see [`UpstreamResponse`]
+/// for the two shapes and their column-projection differences.
+///
 /// On insertion failure (FK violation, transport error during
 /// commit, etc.) the transaction is rolled back and the error
 /// surfaces. The cairn-mod-side action stays committed regardless —
@@ -531,7 +557,7 @@ pub async fn record_pds_admin_call(
     precipitating_action_id: i64,
     backend_method: BackendMethod,
     result: std::result::Result<Option<BackendActionId>, BackendError>,
-    response_details: Option<&crate::pds_admin::rust::action_types::ActionResponse>,
+    response_details: Option<UpstreamResponse<'_>>,
     call_started_at: i64,
     call_completed_at: i64,
 ) -> Result<PdsAdminAuditRecord> {
@@ -609,14 +635,13 @@ async fn perform_insert(
     error_code: Option<&str>,
     error_message: Option<&str>,
     retry_after_seconds: Option<u32>,
-    // v1.8.5: Aurora's full EmitEventOutput for successful
-    // dispatches of the new action methods. Persisted on the
+    // v1.8.5/v1.8.7: the upstream success payload for the
     // migration-0010 columns (upstream_audit_entry_id,
     // cascading_actions_json, snapshots_json). Deliberately NOT
-    // part of the row-hash preimage — the v1.7 hash contract
-    // covers the original column set; folding these in is a
-    // v1.8.6 cross-chain-verify decision.
-    response_details: Option<&crate::pds_admin::rust::action_types::ActionResponse>,
+    // part of the v1.7 hash contract's original column set; the
+    // v1.8.6 12-field preimage folds the stored values in
+    // key-omitted-when-NULL.
+    response_details: Option<UpstreamResponse<'_>>,
     call_started_at: i64,
     call_completed_at: i64,
 ) -> Result<PdsAdminAuditRecord> {
@@ -626,13 +651,28 @@ async fn perform_insert(
     let outcome_str = outcome.as_db_str();
     let retry_after_i64 = retry_after_seconds.map(i64::from);
 
-    let upstream_audit_entry_id = response_details.map(|r| r.audit_entry_id.as_str());
-    let cascading_actions_json = response_details
-        .map(|r| serde_json::to_string(&r.cascading_actions))
-        .transpose()
-        .map_err(|e| Error::Signing(format!("cascading_actions serialize: {e}")))?;
+    let upstream_audit_entry_id = response_details.map(|r| match r {
+        UpstreamResponse::Action(a) => a.audit_entry_id.as_str(),
+        UpstreamResponse::Batch(b) => b.audit_entry_id.as_str(),
+    });
+    // Dedicated-batch outputs carry no cascade channel — the
+    // column stays NULL rather than storing an empty array
+    // (v1.8.7 v2 §5.3); emitEvent responses keep the v1.8.5
+    // behavior (aggregate array, "[]" when no cascades fired).
+    let cascading_actions_json = match response_details {
+        Some(UpstreamResponse::Action(a)) => Some(
+            serde_json::to_string(&a.cascading_actions)
+                .map_err(|e| Error::Signing(format!("cascading_actions serialize: {e}")))?,
+        ),
+        Some(UpstreamResponse::Batch(_)) | None => None,
+    };
     let snapshots_json = response_details
-        .map(|r| serde_json::to_string(&r.snapshots))
+        .map(|r| {
+            serde_json::to_string(match r {
+                UpstreamResponse::Action(a) => &a.snapshots,
+                UpstreamResponse::Batch(b) => &b.snapshots,
+            })
+        })
         .transpose()
         .map_err(|e| Error::Signing(format!("snapshots serialize: {e}")))?;
 
