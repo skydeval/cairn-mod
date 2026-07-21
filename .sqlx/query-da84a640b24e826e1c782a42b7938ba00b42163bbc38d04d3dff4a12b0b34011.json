@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT boundary_id AS \"boundary_id!\" FROM pds_admin_audit_format_boundary WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "boundary_id!",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "da84a640b24e826e1c782a42b7938ba00b42163bbc38d04d3dff4a12b0b34011"
+}

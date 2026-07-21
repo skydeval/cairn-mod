@@ -1,11 +1,26 @@
 //! `cairn audit verify` (#41 / v1.3; #88 / v1.7 unified-chain
 //! extension) — operator command for verifying the audit hash chain.
 //!
-//! Walks the **unified** chain across `audit_log` AND
-//! `pds_admin_audit` (since #85 / §F23) in chain order, recomputes
-//! each attested row's `row_hash` from the running prev_hash + the
-//! row's stored content, and compares against the stored hash.
-//! Reports the **first** divergence and stops.
+//! Walks the **unified** chain across all four chained tables —
+//! `audit_log`, `pds_admin_audit` (#85 / §F23), and the
+//! `xrpc_known_callers` / `xrpc_trusted_pdses` membership tables
+//! (#94) — in chain order, recomputes each attested row's
+//! `row_hash` from the running prev_hash + the row's stored
+//! content, and compares against the stored hash. Reports the
+//! **first** divergence and stops. (The two-table wording that
+//! previously opened this comment predated #94's extension and
+//! misled the v1.8.6 recon; the walk has been four-table since
+//! the membership tables landed.)
+//!
+//! # v1.8.6 preimage format boundary
+//!
+//! `pds_admin_audit` rows hash under two forms (v2 §5.2):
+//! the v1.7 9-field preimage at or below the migration-0011
+//! format boundary, and the v1.8.6 12-field preimage (adding the
+//! Aurora response-persistence columns) above it — with a 9-field
+//! fallback for post-boundary rows written by a pre-upgrade
+//! binary mid-deploy (counted in
+//! [`VerifyOutcome::Verified::legacy_form_rows`], not failed).
 //!
 //! Continuing past first divergence would cascade — every row after
 //! a tampered row would also report mismatch, since the chain link
@@ -160,6 +175,11 @@ pub enum VerifyOutcome {
         /// (#94). Same defaulting as
         /// [`Self::Verified::xrpc_known_callers_rows`].
         xrpc_trusted_pdses_rows: i64,
+        /// v1.8.6: post-boundary `pds_admin_audit` rows that
+        /// verified only under the v1.7 9-field preimage
+        /// (mid-deploy writes by a pre-upgrade binary). Expected
+        /// 0; reported, never failed.
+        legacy_form_rows: i64,
     },
     /// First-divergence report. Walking halts once this is detected.
     Divergence {
@@ -201,6 +221,14 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
     // ("not in scope").
     let audit_log_rows = read_audit_log_rows(pool).await?;
     let pds_admin_rows = read_pds_admin_audit_rows(pool).await?;
+    // v1.8.6 preimage format boundary (migration 0011; one row,
+    // captured at apply time).
+    let format_boundary: i64 = sqlx::query_scalar!(
+        r#"SELECT boundary_id AS "boundary_id!" FROM pds_admin_audit_format_boundary WHERE id = 1"#
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| CliError::Startup(format!("audit verify boundary read: {e}")))?;
     let xrpc_known_callers_rows = read_xrpc_known_callers_rows(pool).await?;
     let xrpc_trusted_pdses_rows = read_xrpc_trusted_pdses_rows(pool).await?;
 
@@ -242,6 +270,7 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
     let mut running_prev_hash: [u8; 32] = GENESIS_PREV_HASH;
     let mut attested_rows: i64 = 0;
     let mut pre_attestation_rows: i64 = 0;
+    let mut legacy_form_rows: i64 = 0;
     let mut attestation_starts_at_row: Option<i64> = None;
     let mut seen_attested = false;
 
@@ -279,13 +308,49 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
             ))
         })?;
 
-        let recomputed = entry.recompute_row_hash(&running_prev_hash).map_err(|e| {
-            CliError::Startup(format!(
-                "audit verify: {}:{} hash compute: {e}",
-                entry.table().as_str(),
-                entry.id()
-            ))
-        })?;
+        let recomputed = match entry {
+            // v1.8.6 boundary-aware two-form verify for
+            // pds_admin_audit rows (v2 §5.2/§5.3).
+            UnifiedEntry::PdsAdmin(r) if r.id > format_boundary => {
+                let v12 = compute_pds_admin_audit_row_hash(&running_prev_hash, &r.hashing_row_v12())
+                    .map_err(|e| {
+                        CliError::Startup(format!(
+                            "audit verify: pds_admin_audit:{} hash compute: {e}",
+                            r.id
+                        ))
+                    })?;
+                if v12 == stored_row_hash {
+                    v12
+                } else {
+                    // Mid-deploy fallback: a post-boundary row
+                    // written by a pre-upgrade binary hashes under
+                    // the 9-field form. A match is counted, not
+                    // failed; a miss reports the 12-field
+                    // expectation (the boundary-prescribed form).
+                    let v9 =
+                        compute_pds_admin_audit_row_hash(&running_prev_hash, &r.hashing_row_v9())
+                            .map_err(|e| {
+                                CliError::Startup(format!(
+                                    "audit verify: pds_admin_audit:{} hash compute: {e}",
+                                    r.id
+                                ))
+                            })?;
+                    if v9 == stored_row_hash {
+                        legacy_form_rows += 1;
+                        v9
+                    } else {
+                        v12
+                    }
+                }
+            }
+            _ => entry.recompute_row_hash(&running_prev_hash).map_err(|e| {
+                CliError::Startup(format!(
+                    "audit verify: {}:{} hash compute: {e}",
+                    entry.table().as_str(),
+                    entry.id()
+                ))
+            })?,
+        };
 
         if recomputed != stored_row_hash {
             // First-divergence: bail with a structured report.
@@ -311,6 +376,7 @@ pub async fn verify(pool: &Pool<Sqlite>) -> Result<VerifyOutcome, CliError> {
         pds_admin_audit_rows: pds_admin_count,
         xrpc_known_callers_rows: xrpc_known_callers_count,
         xrpc_trusted_pdses_rows: xrpc_trusted_pdses_count,
+        legacy_form_rows,
     })
 }
 
@@ -344,6 +410,41 @@ struct PdsAdminAuditRow {
     call_started_at: i64,
     call_completed_at: i64,
     row_hash: Vec<u8>,
+    // v1.8.6 response-persistence columns (12-field preimage).
+    upstream_audit_entry_id: Option<String>,
+    cascading_actions_json: Option<String>,
+    snapshots_json: Option<String>,
+}
+
+impl PdsAdminAuditRow {
+    /// The v1.7 9-field hashing view (pre-boundary rows; also the
+    /// mid-deploy fallback form).
+    fn hashing_row_v9(&self) -> PdsAdminAuditRowForHashing<'_> {
+        PdsAdminAuditRowForHashing {
+            precipitating_action_id: self.precipitating_action_id,
+            backend_method: &self.backend_method,
+            backend_action_id: self.backend_action_id.as_deref(),
+            outcome: &self.outcome,
+            error_code: self.error_code.as_deref(),
+            error_message: self.error_message.as_deref(),
+            retry_after_seconds: self.retry_after_seconds,
+            call_started_at: self.call_started_at,
+            call_completed_at: self.call_completed_at,
+            upstream_audit_entry_id: None,
+            cascading_actions_json: None,
+            snapshots_json: None,
+        }
+    }
+
+    /// The v1.8.6 12-field hashing view (post-boundary rows).
+    fn hashing_row_v12(&self) -> PdsAdminAuditRowForHashing<'_> {
+        PdsAdminAuditRowForHashing {
+            upstream_audit_entry_id: self.upstream_audit_entry_id.as_deref(),
+            cascading_actions_json: self.cascading_actions_json.as_deref(),
+            snapshots_json: self.snapshots_json.as_deref(),
+            ..self.hashing_row_v9()
+        }
+    }
 }
 
 /// Owned `xrpc_known_callers` / `xrpc_trusted_pdses` row data.
@@ -432,20 +533,11 @@ impl UnifiedEntry {
                     reason: r.reason.as_deref(),
                 },
             ),
-            Self::PdsAdmin(r) => compute_pds_admin_audit_row_hash(
-                prev_hash,
-                &PdsAdminAuditRowForHashing {
-                    precipitating_action_id: r.precipitating_action_id,
-                    backend_method: &r.backend_method,
-                    backend_action_id: r.backend_action_id.as_deref(),
-                    outcome: &r.outcome,
-                    error_code: r.error_code.as_deref(),
-                    error_message: r.error_message.as_deref(),
-                    retry_after_seconds: r.retry_after_seconds,
-                    call_started_at: r.call_started_at,
-                    call_completed_at: r.call_completed_at,
-                },
-            ),
+            // Pre-boundary form only; the walk loop special-cases
+            // post-boundary PdsAdmin rows for the 12-then-9 dance.
+            Self::PdsAdmin(r) => {
+                compute_pds_admin_audit_row_hash(prev_hash, &r.hashing_row_v9())
+            }
             Self::XrpcKnownCaller(r) | Self::XrpcTrustedPds(r) => recompute_membership_row_hash(
                 prev_hash,
                 &r.did,
@@ -563,7 +655,8 @@ async fn read_pds_admin_audit_rows(pool: &Pool<Sqlite>) -> Result<Vec<PdsAdminAu
     let rows = sqlx::query!(
         r#"SELECT id AS "id!", precipitating_action_id, backend_method,
                   backend_action_id, outcome, error_code, error_message,
-                  retry_after_seconds, row_hash, call_started_at, call_completed_at
+                  retry_after_seconds, row_hash, call_started_at, call_completed_at,
+                  upstream_audit_entry_id, cascading_actions_json, snapshots_json
            FROM pds_admin_audit
            ORDER BY id ASC"#
     )
@@ -585,6 +678,9 @@ async fn read_pds_admin_audit_rows(pool: &Pool<Sqlite>) -> Result<Vec<PdsAdminAu
             call_started_at: r.call_started_at,
             call_completed_at: r.call_completed_at,
             row_hash: r.row_hash,
+            upstream_audit_entry_id: r.upstream_audit_entry_id,
+            cascading_actions_json: r.cascading_actions_json,
+            snapshots_json: r.snapshots_json,
         })
         .collect())
 }
@@ -604,6 +700,7 @@ pub fn format_human(outcome: &VerifyOutcome) -> String {
             total_rows,
             attested_rows,
             pre_attestation_rows,
+            legacy_form_rows,
             attestation_starts_at_row,
             audit_log_rows,
             pds_admin_audit_rows,
@@ -624,6 +721,13 @@ pub fn format_human(outcome: &VerifyOutcome) -> String {
                 let _ = writeln!(
                     s,
                     "  skipped {pre_attestation_rows} row(s) pre-dating audit chain attestation"
+                );
+            }
+            if *legacy_form_rows > 0 {
+                let _ = writeln!(
+                    s,
+                    "  {legacy_form_rows} post-boundary pds_admin_audit row(s) verified under \
+                     the v1.7 9-field preimage (mid-deploy writes; expected 0 in steady state)"
                 );
             }
             if let Some(n) = attestation_starts_at_row {
@@ -808,6 +912,7 @@ mod tests {
                 total_rows,
                 attested_rows,
                 pre_attestation_rows,
+                legacy_form_rows: _,
                 attestation_starts_at_row,
                 audit_log_rows,
                 pds_admin_audit_rows,
@@ -1072,6 +1177,7 @@ mod tests {
                 total_rows,
                 attested_rows,
                 pre_attestation_rows,
+                legacy_form_rows: _,
                 attestation_starts_at_row,
                 audit_log_rows,
                 pds_admin_audit_rows,
@@ -1133,6 +1239,7 @@ mod tests {
             pds_admin_audit_rows: 2,
             xrpc_known_callers_rows: 0,
             xrpc_trusted_pdses_rows: 0,
+            legacy_form_rows: 0,
         });
         assert!(verified.contains("7 attested"));
         assert!(verified.contains("of 10"));
@@ -1151,6 +1258,7 @@ mod tests {
             pds_admin_audit_rows: 0,
             xrpc_known_callers_rows: 0,
             xrpc_trusted_pdses_rows: 0,
+            legacy_form_rows: 0,
         });
         assert!(!no_horizon.contains("horizon"), "no horizon line when None");
         assert!(!no_horizon.contains("skipped"), "no skipped line when 0");
@@ -1188,6 +1296,7 @@ mod tests {
             pds_admin_audit_rows: 2,
             xrpc_known_callers_rows: 0,
             xrpc_trusted_pdses_rows: 0,
+            legacy_form_rows: 0,
         });
         assert!(s.contains(r#""outcome":"verified""#), "got: {s}");
         assert!(

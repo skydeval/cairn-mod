@@ -373,6 +373,14 @@ pub(crate) struct PdsAdminAuditRowForHashing<'a> {
     pub(crate) retry_after_seconds: Option<i64>,
     pub(crate) call_started_at: i64,
     pub(crate) call_completed_at: i64,
+    // v1.8.6 additions (12-field form, v2 §5.1): Aurora response
+    // details persisted since migration 0010, folded into the
+    // preimage from the 0011 format boundary forward. Key-omitted
+    // when None — an all-None row hashes identically under the
+    // 9-field and 12-field forms.
+    pub(crate) upstream_audit_entry_id: Option<&'a str>,
+    pub(crate) cascading_actions_json: Option<&'a str>,
+    pub(crate) snapshots_json: Option<&'a str>,
 }
 
 /// Build the `LexValue::Map` representation of a `pds_admin_audit`
@@ -422,6 +430,28 @@ fn row_to_lex_value(row: &PdsAdminAuditRowForHashing<'_>) -> LexValue {
         "call_completed_at".to_string(),
         LexValue::Integer(row.call_completed_at),
     );
+    // v1.8.6 (12-field form): conditionally inserted so absence
+    // canonicalizes as "key omitted" — the load-bearing convention
+    // that makes an all-None row hash identically under the v1.7
+    // 9-field form (see the format boundary in migration 0011).
+    if let Some(v) = row.upstream_audit_entry_id {
+        m.insert(
+            "upstream_audit_entry_id".to_string(),
+            LexValue::String(v.to_string()),
+        );
+    }
+    if let Some(v) = row.cascading_actions_json {
+        m.insert(
+            "cascading_actions_json".to_string(),
+            LexValue::String(v.to_string()),
+        );
+    }
+    if let Some(v) = row.snapshots_json {
+        m.insert(
+            "snapshots_json".to_string(),
+            LexValue::String(v.to_string()),
+        );
+    }
     LexValue::Map(m)
 }
 
@@ -596,6 +626,16 @@ async fn perform_insert(
     let outcome_str = outcome.as_db_str();
     let retry_after_i64 = retry_after_seconds.map(i64::from);
 
+    let upstream_audit_entry_id = response_details.map(|r| r.audit_entry_id.as_str());
+    let cascading_actions_json = response_details
+        .map(|r| serde_json::to_string(&r.cascading_actions))
+        .transpose()
+        .map_err(|e| Error::Signing(format!("cascading_actions serialize: {e}")))?;
+    let snapshots_json = response_details
+        .map(|r| serde_json::to_string(&r.snapshots))
+        .transpose()
+        .map_err(|e| Error::Signing(format!("snapshots serialize: {e}")))?;
+
     let row_hash = compute_pds_admin_audit_row_hash(
         &prev_hash,
         &PdsAdminAuditRowForHashing {
@@ -608,20 +648,14 @@ async fn perform_insert(
             retry_after_seconds: retry_after_i64,
             call_started_at,
             call_completed_at,
+            upstream_audit_entry_id,
+            cascading_actions_json: cascading_actions_json.as_deref(),
+            snapshots_json: snapshots_json.as_deref(),
         },
     )?;
 
     let prev_hash_slice: &[u8] = &prev_hash;
     let row_hash_slice: &[u8] = &row_hash;
-    let upstream_audit_entry_id = response_details.map(|r| r.audit_entry_id.as_str());
-    let cascading_actions_json = response_details
-        .map(|r| serde_json::to_string(&r.cascading_actions))
-        .transpose()
-        .map_err(|e| Error::Signing(format!("cascading_actions serialize: {e}")))?;
-    let snapshots_json = response_details
-        .map(|r| serde_json::to_string(&r.snapshots))
-        .transpose()
-        .map_err(|e| Error::Signing(format!("snapshots serialize: {e}")))?;
 
     let id = sqlx::query_scalar!(
         r#"INSERT INTO pds_admin_audit

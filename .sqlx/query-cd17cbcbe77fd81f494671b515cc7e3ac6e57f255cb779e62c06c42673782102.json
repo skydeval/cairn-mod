@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\", precipitating_action_id, backend_method,\n                  backend_action_id, outcome, error_code, error_message,\n                  retry_after_seconds, row_hash, call_started_at, call_completed_at\n           FROM pds_admin_audit\n           ORDER BY id ASC",
+  "query": "SELECT id AS \"id!\", precipitating_action_id, backend_method,\n                  backend_action_id, outcome, error_code, error_message,\n                  retry_after_seconds, row_hash, call_started_at, call_completed_at,\n                  upstream_audit_entry_id, cascading_actions_json, snapshots_json\n           FROM pds_admin_audit\n           ORDER BY id ASC",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,21 @@
         "name": "call_completed_at",
         "ordinal": 10,
         "type_info": "Integer"
+      },
+      {
+        "name": "upstream_audit_entry_id",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "cascading_actions_json",
+        "ordinal": 12,
+        "type_info": "Text"
+      },
+      {
+        "name": "snapshots_json",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -73,8 +88,11 @@
       true,
       false,
       false,
-      false
+      false,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "a121e2d78402b1e349fac4b5a07e5db772626f2e0ebbe388a4707c0ac0e26ad7"
+  "hash": "cd17cbcbe77fd81f494671b515cc7e3ac6e57f255cb779e62c06c42673782102"
 }
