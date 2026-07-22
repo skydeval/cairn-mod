@@ -13,7 +13,7 @@ use cairn_mod::cli::{
     logout::{self, LogoutOutcome},
     moderator, moderator_action, moderator_events, moderator_pending, operator_login,
     pds_admin as cli_pds_admin, pds_admin_actions as cli_pds_admin_actions,
-    pds_admin_reads as cli_pds_admin_reads,
+    pds_admin_ops as cli_pds_admin_ops, pds_admin_reads as cli_pds_admin_reads,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
     retention, session, stream as cli_stream, trust_chain,
@@ -244,6 +244,94 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminEmailsSub,
     },
+    /// Aggregated instance metrics (v1.8.9; direct read against
+    /// the ops namespace; absent counters shown as '-', never 0).
+    Metrics(PdsAdminMetricsArgs),
+    /// Runtime-setting read/write (v1.8.9; requires the
+    /// runtime-settings operator opt-in pin; writes need a
+    /// SuperAdmin-granted service DID upstream).
+    Runtime {
+        #[command(subcommand)]
+        sub: PdsAdminRuntimeSub,
+    },
+    /// Per-moderator activity view over the upstream event stream
+    /// (v1.8.9; presentation over the v1.8.3 actor-scoped
+    /// queryEvents — read-only).
+    ModeratorActivity(PdsAdminModeratorActivityArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminRuntimeSub {
+    /// Read one runtime setting (value + resolution source).
+    Get(PdsAdminRuntimeGetArgs),
+    /// Write one runtime setting. Aurora's key allowlist and
+    /// per-key value validation are authoritative; unknown keys
+    /// are rejected upstream with the known-keys list.
+    Set(PdsAdminRuntimeSetArgs),
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminMetricsArgs {
+    /// Emit the full mirror as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminRuntimeGetArgs {
+    /// Setting key (e.g. moderation-mode).
+    key: String,
+    /// Emit the full mirror as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminRuntimeSetArgs {
+    /// Setting key (pass-through; Aurora's allowlist is
+    /// authoritative).
+    key: String,
+    /// New value — parsed as JSON, falling back to a plain
+    /// string (`full` and `"full"` are equivalent).
+    value: String,
+    /// Rationale for the audit-chained upstream write (required,
+    /// non-empty).
+    #[arg(long)]
+    reason: String,
+    /// Confirm the write without prompting (SuperAdmin blast
+    /// radius).
+    #[arg(long)]
+    yes: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminModeratorActivityArgs {
+    /// Actor (moderator) DID.
+    did: String,
+    /// Lower bound on created_at (inclusive), RFC3339.
+    #[arg(long)]
+    after: Option<String>,
+    /// Upper bound on created_at (inclusive), RFC3339.
+    #[arg(long)]
+    before: Option<String>,
+    /// Maximum events to fetch across pages.
+    #[arg(long, default_value_t = 200)]
+    limit: u32,
+    /// Emit raw events as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2182,6 +2270,24 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminSubjectsSub::UpdateStatusMany(args),
                 },
         } => run_pds_admin_subjects_update_status_many(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::Metrics(args),
+        } => run_pds_admin_metrics(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Runtime {
+                    sub: PdsAdminRuntimeSub::Get(args),
+                },
+        } => run_pds_admin_runtime_get(args).await,
+        Command::PdsAdmin {
+            sub:
+                PdsAdminSub::Runtime {
+                    sub: PdsAdminRuntimeSub::Set(args),
+                },
+        } => run_pds_admin_runtime_set(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::ModeratorActivity(args),
+        } => run_pds_admin_moderator_activity(args).await,
         Command::Stream {
             sub: StreamSub::Status(args),
         } => run_stream_status(args).await,
@@ -2914,6 +3020,71 @@ async fn run_pds_admin_subjects_update_status_many(
         },
     )
     .await
+}
+
+// ===========================================================================
+// v1.8.9 ops-and-runtime CLI (v2 §6, chainlink #151)
+// ===========================================================================
+
+async fn run_pds_admin_metrics(args: PdsAdminMetricsArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    println!("{}", cli_pds_admin_ops::metrics(&config, args.json).await?);
+    Ok(())
+}
+
+async fn run_pds_admin_runtime_get(args: PdsAdminRuntimeGetArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    println!(
+        "{}",
+        cli_pds_admin_ops::runtime_get(&config, &args.key, args.json).await?
+    );
+    Ok(())
+}
+
+async fn run_pds_admin_runtime_set(args: PdsAdminRuntimeSetArgs) -> Result<(), CliError> {
+    if args.reason.trim().is_empty() {
+        // Matches Aurora's server-side check byte-identically; the
+        // local check just saves a round-trip.
+        return Err(CliError::Config(
+            "rationale is required and must be non-empty".to_string(),
+        ));
+    }
+    if !args.yes {
+        return Err(CliError::Config(
+            "runtime set mutates PDS-global configuration (SuperAdmin upstream); \
+             re-run with --yes to confirm"
+                .to_string(),
+        ));
+    }
+    let config = load_config(args.config.as_deref())?;
+    let pool = storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))?;
+    println!(
+        "{}",
+        cli_pds_admin_ops::runtime_set(&config, &pool, &args.key, &args.value, &args.reason)
+            .await?
+    );
+    Ok(())
+}
+
+async fn run_pds_admin_moderator_activity(
+    args: PdsAdminModeratorActivityArgs,
+) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    println!(
+        "{}",
+        cli_pds_admin_ops::moderator_activity(
+            &config,
+            &args.did,
+            args.after.as_deref(),
+            args.before.as_deref(),
+            args.limit,
+            args.json,
+        )
+        .await?
+    );
+    Ok(())
 }
 
 // ===========================================================================

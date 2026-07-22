@@ -29,6 +29,7 @@ pub mod output;
 pub mod pds;
 pub mod pds_admin;
 pub mod pds_admin_actions;
+pub mod pds_admin_ops;
 pub mod pds_admin_reads;
 pub mod publish_service_record;
 pub mod report;
