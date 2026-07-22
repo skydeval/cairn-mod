@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-07-22
+
+The v1.8 series ships as one release: the Rust-PDS (Aurora-Locus)
+backend, from the service-auth foundation (v1.8.1) through
+protocol parity, reads, writes, audit verification, batch,
+realtime, ops-and-runtime, operator extensions, and this series
+wrap (v1.8.11). Per-release subsections below preserve the
+development attribution.
+
+### Added — v1.8.11 series wrap
+- New `cairn pds-admin probe` compatibility check: runs
+  `describeCapabilities` against the configured Rust PDS and
+  reports the registry-vs-advertised capability match
+  (advertised-and-registered, upstream extensions, and
+  registered-but-not-advertised drift) with an overall verdict;
+  `--json` for the structured report. This is the operator's tool
+  for verifying a PDS advertises what cairn-mod expects before
+  enabling gated surfaces.
+- The deprecated `acknowledge_v1_8_1_audit_divergence` config
+  field is removed (advisory-WARN since v1.8.6; the divergence it
+  acknowledged has been closed by `cairn audit cross-verify`
+  since then). Configs still carrying the key are silently
+  ignored — drop it at leisure. The coexistence gates the same
+  validator enforces (no auto-mode policy rules with the Rust
+  backend; no inbound XRPC gateway coexistence) remain in force,
+  and their error names drop the stale "Inspector" wording.
+- The `[pds_admin.locus]` → `[pds_admin.rust]` rename aid is
+  retained: a stale `locus` block still gets a precise
+  operator-facing error rather than a silent ignore.
+- Internal: capability test fixtures consolidated to advertise
+  all ten shipped families; umbrella design-doc reconciled
+  against shipped source (scope-language, ops capability model,
+  stub taxonomy, flag lifecycle).
+
 ### Added — v1.8.10 operator extensions
 - Eight new read-only instance-visibility endpoints consumed from
   the upstream PDS's ops namespace (trait 40 → 48, all Unsupported
