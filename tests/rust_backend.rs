@@ -2956,3 +2956,41 @@ async fn recovery_mode_read_surfaces_source_verbatim() {
     assert_eq!(s.source, SettingSource::RecoveryMode);
     assert_eq!(s.value, json!("full"));
 }
+
+#[tokio::test]
+async fn runtime_settings_writes_ledger_shape_and_dedup() {
+    // Migration 0013 pin: STRICT table, TEXT audit id UNIQUE (A5),
+    // source CHECK, dedup via ON CONFLICT DO NOTHING.
+    let pool = cross_verify_pool().await;
+    let insert = |id: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO runtime_settings_writes (key, value, rationale, aurora_audit_entry_id)
+                 VALUES ('moderation-mode', '\"reduced\"', 'load shed', ?1)
+                 ON CONFLICT (aurora_audit_entry_id) DO NOTHING",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected()
+        }
+    };
+    assert_eq!(insert("917").await, 1);
+    assert_eq!(insert("917").await, 0, "audit-entry id dedups");
+    let (source, count): (String, i64) =
+        sqlx::query_as("SELECT source, COUNT(*) FROM runtime_settings_writes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((source.as_str(), count), ("local", 1));
+    // CHECK rejects out-of-vocabulary source values.
+    let bad = sqlx::query(
+        "INSERT INTO runtime_settings_writes (key, value, rationale, aurora_audit_entry_id, source)
+         VALUES ('k', 'v', 'r', '918', 'stream')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(bad.is_err(), "source CHECK is (local|upstream) only");
+}

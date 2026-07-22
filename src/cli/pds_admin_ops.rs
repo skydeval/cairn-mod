@@ -203,3 +203,20 @@ pub async fn moderator_activity(
     }
     Ok(out.trim_end().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn value_arg_parses_json_with_string_fallback() {
+        assert_eq!(parse_value_arg("\"full\""), json!("full"));
+        assert_eq!(parse_value_arg("full"), json!("full"));
+        assert_eq!(parse_value_arg("true"), json!(true));
+        assert_eq!(parse_value_arg("42"), json!(42));
+        assert_eq!(parse_value_arg("{\"a\": 1}"), json!({"a": 1}));
+        // Malformed JSON degrades to a string, not an error.
+        assert_eq!(parse_value_arg("{not json"), json!("{not json"));
+    }
+}

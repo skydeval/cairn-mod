@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.9 ops and runtime
+- Three new backend methods (trait 37 → 40), all Unsupported on
+  Ozone: `get_instance_metrics` (aggregated instance health /
+  resource / growth / federation metrics from the upstream PDS's
+  ops namespace — absent counters mean "not instrumented" and are
+  rendered as such, never zero-filled), `get_runtime_setting`, and
+  `set_runtime_setting` (the upstream's two-tier runtime
+  configuration surface).
+- **Operator opt-in required for the runtime-settings pair** —
+  `runtime-settings` is the registry's third `OperatorOptIn`
+  family, and the pin gates read AND write (family-level):
+  `runtime-settings = "v1"` under `[pds_admin.rust.pinned_versions]`
+  (dual-posture rules identical to the batch and stream opt-ins).
+  `instance-metrics` is AutoAdvance. Registry 8 → 10.
+- Runtime-setting reads surface the upstream's four-tier
+  resolution verbatim (`Runtime` / `File` / `Default` /
+  `RecoveryMode`) — including the recovery-mode override that
+  forces `moderation-mode` reads to `"full"`, so operators see
+  the override honestly. Unknown keys are a normal answer with
+  `source: Default`, not an error. cairn-mod reads
+  `moderation-mode` for visibility only; its moderation dispatches
+  work regardless of the upstream's mode.
+- Writes require a SuperAdmin-granted service DID upstream
+  (403 → `Auth`); the upstream's key allowlist and per-key value
+  validation are authoritative — **cairn-mod deliberately copies
+  no key list** (unknown keys are rejected upstream with the
+  known-keys enumeration), and its only local checks are a
+  non-empty `--reason` and a `--yes` confirm. Successful writes
+  return the value diff plus the upstream audit-chain entry id
+  (setting writes are audit-chained upstream and emit no
+  moderation event — they appear on the v1.8.8 stream only as
+  audit-entry frames).
+- New local ledger `runtime_settings_writes` (migration `0013`,
+  additive-only, unchained): what this cairn-mod changed, when,
+  and under which upstream chain entry. Best-effort (the upstream
+  chain entry is the authoritative record); not auto-joined by
+  `cairn audit cross-verify` — correlate via the stored entry id;
+  operators MAY prune.
+- Shared capability-gate helper extracted (`require_opt_in`) and
+  the batch POST dispatch generalized — the v1.8.7 batch and
+  v1.8.8 stream gates now use the same implementation, with their
+  shipped posture tests passing unchanged.
+- New CLI, all under `cairn pds-admin`: `metrics [--json]`,
+  `runtime get <key>`, `runtime set <key> <value> --reason … --yes`,
+  and `moderator-activity <did> [--after/--before/--limit]` — a
+  per-moderator activity view (summary counts + rows) over the
+  actor-scoped event query shipped in v1.8.3; read-only, no new
+  wire surface.
+
 ### Added — v1.8.8 realtime stream consumption
 - cairn-mod now consumes the upstream PDS's realtime moderation
   event stream (`subscribeModEvents` WebSocket): a long-lived
