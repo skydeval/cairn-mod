@@ -220,3 +220,186 @@ mod tests {
         assert_eq!(parse_value_arg("{not json"), json!("{not json"));
     }
 }
+
+// ===========================================================================
+// v1.8.10 ops visibility subgroup (v2 §6, chainlink #155)
+// ===========================================================================
+
+/// Append the F19 operator hint to `Terminal` failures from the
+/// capability-bare ops block: a 404 here means "this upstream
+/// doesn't ship the endpoint", and describeCapabilities is
+/// advisory — the honest pointer is the upstream's own output +
+/// release notes.
+fn with_f19_hint(nsid: &str, err: CliError) -> CliError {
+    match err {
+        CliError::Backend(crate::pds_admin::BackendError::Terminal(msg)) => {
+            CliError::Backend(crate::pds_admin::BackendError::Terminal(format!(
+                "{msg}\nthis upstream may not ship {nsid}; endpoint availability varies \
+                 by PDS version — check tools.aurora.describeCapabilities output and \
+                 your Aurora release notes"
+            )))
+        }
+        other => other,
+    }
+}
+
+/// Render a `Value` body: format the known headline fields that
+/// are present (field-presence checks, never validation), then
+/// fall through to pretty JSON for everything else / on shape
+/// surprise. Pass-through discipline: the body is never
+/// restructured.
+fn render_value_with_known(value: &serde_json::Value, known: &[(&str, &str)]) -> String {
+    let mut lines = Vec::new();
+    if let Some(obj) = value.as_object() {
+        for (label, pointer) in known {
+            if let Some(v) = value.pointer(pointer) {
+                lines.push(format!("{label}: {v}"));
+            }
+        }
+        let recognized: std::collections::BTreeSet<&str> = known
+            .iter()
+            .filter_map(|(_, p)| p.trim_start_matches('/').split('/').next())
+            .collect();
+        let unrecognized: Vec<&String> = obj
+            .keys()
+            .filter(|k| !recognized.contains(k.as_str()))
+            .collect();
+        if !unrecognized.is_empty() || lines.is_empty() {
+            lines.push(
+                serde_json::to_string_pretty(value)
+                    .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}")),
+            );
+        }
+        lines.join("\n")
+    } else {
+        serde_json::to_string_pretty(value)
+            .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}"))
+    }
+}
+
+/// Which v1.8.10 ops read to run — one enum so the CLI handler
+/// stays a single function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpsRead {
+    /// `getSystemHealth`.
+    Health,
+    /// `getSequencerStatus`.
+    Sequencer,
+    /// `getFederationStatus` (typed).
+    Federation,
+    /// `getBlobStatistics`.
+    Blobs,
+    /// `getDatabaseStatus`.
+    Database,
+    /// `getResourceUsage`.
+    Resources,
+    /// `getVersionInfo`.
+    Version,
+    /// `getSystemMetrics`.
+    SystemMetrics,
+}
+
+impl OpsRead {
+    fn nsid(self) -> &'static str {
+        match self {
+            Self::Health => "tools.aurora.ops.getSystemHealth",
+            Self::Sequencer => "tools.aurora.ops.getSequencerStatus",
+            Self::Federation => "tools.aurora.ops.getFederationStatus",
+            Self::Blobs => "tools.aurora.ops.getBlobStatistics",
+            Self::Database => "tools.aurora.ops.getDatabaseStatus",
+            Self::Resources => "tools.aurora.ops.getResourceUsage",
+            Self::Version => "tools.aurora.ops.getVersionInfo",
+            Self::SystemMetrics => "tools.aurora.ops.getSystemMetrics",
+        }
+    }
+
+    /// Known headline fields (formatter-only; M-1) as
+    /// (label, JSON pointer) pairs.
+    fn known_fields(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Health => &[
+                ("status", "/status"),
+                ("version", "/version"),
+                ("uptime seconds", "/uptime_seconds"),
+                ("active http requests", "/active_http_requests"),
+                ("active sessions", "/active_sessions"),
+            ],
+            Self::Database => &[
+                ("status", "/status"),
+                ("pool size", "/pool/size"),
+                ("idle connections", "/pool/idle_connections"),
+                ("latency ms", "/latency_ms"),
+                ("total accounts", "/statistics/total_accounts"),
+            ],
+            Self::Resources => &[
+                ("memory resident bytes", "/memory/resident_bytes"),
+                ("cpu seconds total", "/cpu/seconds_total"),
+                ("open file descriptors", "/file_descriptors/open"),
+            ],
+            Self::Version => &[
+                ("version", "/version"),
+                ("service did", "/service_did"),
+                ("rust version", "/rust_version"),
+                ("build profile", "/build_profile"),
+            ],
+            Self::SystemMetrics => &[
+                ("uptime seconds", "/uptime_seconds"),
+                ("cache hit rate %", "/cache/hit_rate_percent"),
+                ("sequencer current sequence", "/sequencer/current_sequence"),
+                ("total accounts", "/accounts/total"),
+            ],
+            // Dynamically-assembled / aggregate bodies: rendered
+            // via the pretty-JSON fallback (M-1: expand at
+            // implementer's discretion once observed).
+            Self::Sequencer | Self::Blobs => &[],
+            Self::Federation => &[], // typed path, not used
+        }
+    }
+}
+
+/// `cairn pds-admin ops <sub>` — one entry point for the eight
+/// v1.8.10 reads (`metrics` keeps its dedicated function above).
+pub async fn ops_read(config: &Config, which: OpsRead, json: bool) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    if which == OpsRead::Federation {
+        let s = backend
+            .get_federation_status()
+            .await
+            .map_err(CliError::from)
+            .map_err(|e| with_f19_hint(which.nsid(), e))?;
+        if json {
+            return Ok(serde_json::to_string_pretty(&s)
+                .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}")));
+        }
+        return Ok(format!(
+            "federation enabled: {}\nservice did: {}\nrelays: {} (connected: {})\n\
+             discovery enabled: {}\nsearch enabled: {}\nknown instances: {}\nstatus: {}",
+            s.enabled,
+            s.service_did,
+            s.relay_count,
+            s.relay_connected,
+            s.discovery_enabled,
+            s.search_enabled,
+            s.known_instances,
+            s.status,
+        ));
+    }
+    let value = match which {
+        OpsRead::Health => backend.get_system_health().await,
+        OpsRead::Sequencer => backend.get_sequencer_status().await,
+        OpsRead::Blobs => backend.get_blob_statistics().await,
+        OpsRead::Database => backend.get_database_status().await,
+        OpsRead::Resources => backend.get_resource_usage().await,
+        OpsRead::Version => backend.get_version_info().await,
+        OpsRead::SystemMetrics => backend.get_system_metrics().await,
+        OpsRead::Federation => unreachable!("typed path handled above"),
+    }
+    .map_err(CliError::from)
+    .map_err(|e| with_f19_hint(which.nsid(), e))?;
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&value)
+            .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}")));
+    }
+    Ok(render_value_with_known(&value, which.known_fields()))
+}

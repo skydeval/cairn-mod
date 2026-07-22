@@ -244,9 +244,12 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminEmailsSub,
     },
-    /// Aggregated instance metrics (v1.8.9; direct read against
-    /// the ops namespace; absent counters shown as '-', never 0).
-    Metrics(PdsAdminMetricsArgs),
+    /// Ops visibility subgroup (v1.8.10): instance metrics plus
+    /// the eight capability-bare tools.aurora.ops.* reads.
+    Ops {
+        #[command(subcommand)]
+        sub: PdsAdminOpsSub,
+    },
     /// Runtime-setting read/write (v1.8.9; requires the
     /// runtime-settings operator opt-in pin; writes need a
     /// SuperAdmin-granted service DID upstream).
@@ -258,6 +261,39 @@ enum PdsAdminSub {
     /// (v1.8.9; presentation over the v1.8.3 actor-scoped
     /// queryEvents — read-only).
     ModeratorActivity(PdsAdminModeratorActivityArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdsAdminOpsSub {
+    /// Aggregated instance metrics (migrated from
+    /// `cairn pds-admin metrics` in v1.8.10; direct rename).
+    Metrics(PdsAdminMetricsArgs),
+    /// System health (`getSystemHealth`).
+    Health(PdsAdminOpsReadArgs),
+    /// Sequencer status (`getSequencerStatus`, read-only).
+    Sequencer(PdsAdminOpsReadArgs),
+    /// Federation status (`getFederationStatus`, typed).
+    Federation(PdsAdminOpsReadArgs),
+    /// Blob statistics (`getBlobStatistics`).
+    Blobs(PdsAdminOpsReadArgs),
+    /// Database status (`getDatabaseStatus`).
+    Database(PdsAdminOpsReadArgs),
+    /// Resource usage (`getResourceUsage`).
+    Resources(PdsAdminOpsReadArgs),
+    /// Version info (`getVersionInfo`).
+    Version(PdsAdminOpsReadArgs),
+    /// System metrics (`getSystemMetrics`).
+    SystemMetrics(PdsAdminOpsReadArgs),
+}
+
+#[derive(Debug, Args)]
+struct PdsAdminOpsReadArgs {
+    /// Emit the raw upstream body as JSON.
+    #[arg(long)]
+    json: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2271,8 +2307,14 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                 },
         } => run_pds_admin_subjects_update_status_many(args).await,
         Command::PdsAdmin {
-            sub: PdsAdminSub::Metrics(args),
+            sub:
+                PdsAdminSub::Ops {
+                    sub: PdsAdminOpsSub::Metrics(args),
+                },
         } => run_pds_admin_metrics(args).await,
+        Command::PdsAdmin {
+            sub: PdsAdminSub::Ops { sub },
+        } => run_pds_admin_ops_read(sub).await,
         Command::PdsAdmin {
             sub:
                 PdsAdminSub::Runtime {
@@ -3029,6 +3071,30 @@ async fn run_pds_admin_subjects_update_status_many(
 async fn run_pds_admin_metrics(args: PdsAdminMetricsArgs) -> Result<(), CliError> {
     let config = load_config(args.config.as_deref())?;
     println!("{}", cli_pds_admin_ops::metrics(&config, args.json).await?);
+    Ok(())
+}
+
+/// v1.8.10 ops visibility reads (everything in the subgroup
+/// except the migrated `metrics`, which keeps its dedicated
+/// handler above).
+async fn run_pds_admin_ops_read(sub: PdsAdminOpsSub) -> Result<(), CliError> {
+    use cli_pds_admin_ops::OpsRead;
+    let (which, args) = match sub {
+        PdsAdminOpsSub::Health(a) => (OpsRead::Health, a),
+        PdsAdminOpsSub::Sequencer(a) => (OpsRead::Sequencer, a),
+        PdsAdminOpsSub::Federation(a) => (OpsRead::Federation, a),
+        PdsAdminOpsSub::Blobs(a) => (OpsRead::Blobs, a),
+        PdsAdminOpsSub::Database(a) => (OpsRead::Database, a),
+        PdsAdminOpsSub::Resources(a) => (OpsRead::Resources, a),
+        PdsAdminOpsSub::Version(a) => (OpsRead::Version, a),
+        PdsAdminOpsSub::SystemMetrics(a) => (OpsRead::SystemMetrics, a),
+        PdsAdminOpsSub::Metrics(_) => unreachable!("dedicated arm above"),
+    };
+    let config = load_config(args.config.as_deref())?;
+    println!(
+        "{}",
+        cli_pds_admin_ops::ops_read(&config, which, args.json).await?
+    );
     Ok(())
 }
 
