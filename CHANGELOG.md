@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.8 realtime stream consumption
+- cairn-mod now consumes the upstream PDS's realtime moderation
+  event stream (`subscribeModEvents` WebSocket): a long-lived
+  consumer task with a reconnect state machine, spawned by
+  `cairn serve` when `[pds_admin.rust.stream].enabled = true`.
+  The stream is JSON text frames (hello / event / auditEntry /
+  heartbeat / outdatedCursor / error); delivery is near-realtime
+  (the upstream polls on a 5-second tick over a retention-bounded
+  channel, 7-day default).
+- **Operator opt-in required** — `mod-events-stream` is the
+  capability registry's second `OperatorOptIn` family: the
+  consumer connects only when the upstream advertises
+  `mod-events-stream-v1` AND the operator pins
+  `mod-events-stream = "v1"` under
+  `[pds_admin.rust.pinned_versions]` (same dual-posture rules as
+  v1.8.7's batch opt-in). Unpinned or unadvertised, the task
+  parks dormant and re-evaluates with backoff.
+- One new backend method, `subscribe_mod_events` (trait 36 → 37)
+  — the trait's first stream-returning method. Ozone:
+  Unsupported. Reconciliation deliberately adds NO second method:
+  it reuses v1.8.3's `query_events` in a consumer-side page loop.
+- **At-most-once ingestion (F10), realized cairn-mod-side**: two
+  independent cursors (event stream + audit chain) persist to the
+  new `stream_cursors` table BEFORE each frame is processed. A
+  frame whose ingestion fails is lost by design (logged with full
+  context); nothing is ever re-delivered into side effects.
+  Heartbeats never advance cursors; a cursor-less connect seeds
+  from the server's hello.
+- **Echo suppression**: events whose id matches a recent local
+  dispatch (`pds_admin_audit.backend_action_id`, PerEvent and
+  PerBatch alike) are acknowledged but not mirrored — cairn-mod's
+  own actions are already first-class locally. Cascade reversals
+  of cairn-mod-approved appeals are ingested by design
+  (identifiable via `details.cascadeOf` + the service DID);
+  check failures fail open to ingestion.
+- Genuinely-upstream events land in the new unchained
+  `upstream_events` table (verbatim payload; UNIQUE event id =
+  reconciliation dedup; operators MAY prune). Upstream
+  `report_review` resolutions annotate matching pending local
+  reports via the new write-once `reports.upstream_resolution`
+  column (`resolved`/`dismissed`; matched by subject coordinates
+  — report ids do not ride the wire; local `status` stays
+  operator-owned).
+- Optional `include_audit_chain`: streamed audit-chain entries
+  are independently re-verified through v1.8.6's Path A pipeline
+  and mirrored to the new `upstream_audit_mirror` table with BOTH
+  verdicts (`verified_upstream` = the upstream's own recompute,
+  `verified_local` = cairn-mod's) — disagreement is itself
+  signal. Tampered entries are mirrored as evidence, not dropped;
+  `cairn audit cross-verify` remains the authoritative exit-15
+  surface.
+- On `outdatedCursor` (client fell behind the retention window):
+  automatic reconciliation backfills the gap from the unpruned
+  historical aggregate via `query_events`, then resubscribes
+  live; overlap is absorbed by the dedup key.
+- New `cairn stream` CLI: `status` (durable cursor +
+  observational-table state), `cursor get`, and the confirmed
+  overrides `cursor set` / `cursor reset` (at-most-once escape
+  hatches; replay is idempotent). `stream start`/`stop`
+  subcommands are deferred — they need an authenticated
+  server-side control endpoint (its own small design); the
+  v1.8.8 mechanism is the `enabled` toggle + restart, which also
+  clears an auth HardStop.
+- Migration `0012` (additive-only): `stream_cursors`,
+  `upstream_events`, `upstream_audit_mirror`,
+  `reports.upstream_resolution`, and the previously-missing
+  index on `pds_admin_audit.backend_action_id`.
+- Config: `[pds_admin.rust.stream]` — `enabled` (default false),
+  `include_audit_chain` (default false), `reconnect_max_backoff`
+  (default 60s), `silence_timeout` (default 35s; must exceed the
+  upstream's 30-second heartbeat), `reconnect_on_normal_close`
+  (default false).
+
 ### Added — v1.8.7 batch endpoints + multi-subject dispatch
 - Ten new backend methods (trait 26 → 36). Four dedicated batch
   methods consume the upstream PDS's atomic batch endpoints —

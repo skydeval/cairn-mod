@@ -16,7 +16,7 @@ use cairn_mod::cli::{
     pds_admin_reads as cli_pds_admin_reads,
     publish_service_record::{self, PublishOutcome},
     report::{self, ReportCreateInput},
-    retention, session, trust_chain,
+    retention, session, stream as cli_stream, trust_chain,
     unpublish_service_record::{self, UnpublishOutcome},
 };
 use cairn_mod::config::Config;
@@ -50,6 +50,15 @@ enum Command {
     /// (network down, server error) — the user's intent is to
     /// sever access.
     Logout,
+
+    /// Realtime stream operator surface (v1.8.8): durable
+    /// consumer state + cursor overrides. The consumer itself
+    /// runs inside `cairn serve` when
+    /// `[pds_admin.rust.stream].enabled = true`.
+    Stream {
+        #[command(subcommand)]
+        sub: StreamSub,
+    },
 
     /// Report management.
     Report {
@@ -320,6 +329,64 @@ enum PdsAdminRecordsSub {
     /// `<at-uri>#<cid>` — the CID fragment is required; bare
     /// URIs belong to `batch-takedown`.
     TakedownMany(PdsAdminBatchRecordSubjectsArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum StreamSub {
+    /// Durable stream state: cursor rows + observational-table
+    /// statistics (live task counters are in the serve logs).
+    Status(StreamStatusArgs),
+    /// Cursor overrides — the at-most-once escape hatches.
+    Cursor {
+        #[command(subcommand)]
+        sub: StreamCursorSub,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StreamCursorSub {
+    /// Print both cursor rows.
+    Get(StreamStatusArgs),
+    /// Set a cursor position (deliberate replay; replayed frames
+    /// re-ingest idempotently).
+    Set(StreamCursorSetArgs),
+    /// Delete a cursor row: next connect is cursor-less
+    /// (mod_events → live-only from tail; audit_chain →
+    /// re-verify from 0 into the deduping mirror).
+    Reset(StreamCursorResetArgs),
+}
+
+#[derive(Debug, Args)]
+struct StreamStatusArgs {
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct StreamCursorSetArgs {
+    /// Cursor kind: mod_events | audit_chain.
+    kind: String,
+    /// New position (sequence value).
+    position: i64,
+    /// Confirm the override without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct StreamCursorResetArgs {
+    /// Cursor kind: mod_events | audit_chain.
+    kind: String,
+    /// Confirm the override without prompting.
+    #[arg(long)]
+    yes: bool,
+    /// Path to cairn.toml (defaults to ./cairn.toml).
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2115,6 +2182,25 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
                     sub: PdsAdminSubjectsSub::UpdateStatusMany(args),
                 },
         } => run_pds_admin_subjects_update_status_many(args).await,
+        Command::Stream {
+            sub: StreamSub::Status(args),
+        } => run_stream_status(args).await,
+        Command::Stream {
+            sub: StreamSub::Cursor {
+                sub: StreamCursorSub::Get(args),
+            },
+        } => run_stream_cursor_get(args).await,
+        Command::Stream {
+            sub: StreamSub::Cursor {
+                sub: StreamCursorSub::Set(args),
+            },
+        } => run_stream_cursor_set(args).await,
+        Command::Stream {
+            sub:
+                StreamSub::Cursor {
+                    sub: StreamCursorSub::Reset(args),
+                },
+        } => run_stream_cursor_reset(args).await,
         Command::XrpcCallers {
             sub: XrpcMembershipSub::Add(args),
         } => run_xrpc_callers_add(args).await,
@@ -2828,6 +2914,62 @@ async fn run_pds_admin_subjects_update_status_many(
         },
     )
     .await
+}
+
+// ===========================================================================
+// v1.8.8 stream CLI (v2 §8, chainlink #147)
+// ===========================================================================
+
+/// Open the pool for a stream CLI command (config-driven; no
+/// session required — these are local-DB reads/overrides).
+async fn stream_pool(config: Option<&Path>) -> Result<sqlx::Pool<sqlx::Sqlite>, CliError> {
+    let config = load_config(config)?;
+    storage::open(&config.db_path)
+        .await
+        .map_err(|e| CliError::MigrationFailed(e.to_string()))
+}
+
+fn confirm_or_bail(yes: bool, what: &str) -> Result<(), CliError> {
+    if yes {
+        return Ok(());
+    }
+    Err(CliError::Config(format!(
+        "{what} is an at-most-once escape hatch; re-run with --yes to confirm"
+    )))
+}
+
+async fn run_stream_status(args: StreamStatusArgs) -> Result<(), CliError> {
+    let pool = stream_pool(args.config.as_deref()).await?;
+    println!("{}", cli_stream::status(&pool).await?);
+    Ok(())
+}
+
+async fn run_stream_cursor_get(args: StreamStatusArgs) -> Result<(), CliError> {
+    let pool = stream_pool(args.config.as_deref()).await?;
+    println!("{}", cli_stream::cursor_get(&pool).await?);
+    Ok(())
+}
+
+async fn run_stream_cursor_set(args: StreamCursorSetArgs) -> Result<(), CliError> {
+    confirm_or_bail(args.yes, "cursor set")?;
+    let pool = stream_pool(args.config.as_deref()).await?;
+    cli_stream::cursor_set(&pool, &args.kind, args.position).await?;
+    println!(
+        "cursor {} set to {} (replayed frames re-ingest idempotently)",
+        args.kind, args.position
+    );
+    Ok(())
+}
+
+async fn run_stream_cursor_reset(args: StreamCursorResetArgs) -> Result<(), CliError> {
+    confirm_or_bail(args.yes, "cursor reset")?;
+    let pool = stream_pool(args.config.as_deref()).await?;
+    let deleted = cli_stream::cursor_reset(&pool, &args.kind).await?;
+    println!(
+        "cursor {} reset ({} row deleted); next connect is cursor-less",
+        args.kind, deleted
+    );
+    Ok(())
 }
 
 // ===========================================================================

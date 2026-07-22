@@ -130,21 +130,6 @@ pub struct OzoneBackendConfig {
     pub request_timeout: Duration,
 }
 
-/// Resolved Rust-PDS backend config.
-///
-/// Built from [`crate::config::PdsAdminRustToml`] by the
-/// resolver. v1.8.1 shape: ES256K service-auth identity fields
-/// (the OAuth-model residue — `client_id`/`client_secret`/
-/// `scopes` — was dropped before ever shipping to a live
-/// deployment), plus refresh cadence, capability declarations,
-/// and the audit-divergence acknowledgment flag that gates the
-/// v1.8.1 inspector-only posture.
-///
-/// The signing key itself is deliberately NOT resolved here —
-/// config holds only the env-var *name*
-/// ([`Self::service_signing_key_env`]); `RustBackend::new` reads
-/// and parses the key material at construction so key bytes
-/// never sit in the resolved-config layer.
 /// Resolved `[pds_admin.rust.stream]` block (v1.8.8, v2 §9.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustStreamConfig {
@@ -176,10 +161,21 @@ impl Default for RustStreamConfig {
     }
 }
 
-/// Resolved `[pds_admin.rust]` block (v1.8.1+): validated
-/// connection/auth surface for the Rust backend. The signing key
-/// itself is never resolved here — config holds the env-var name
-/// only; `RustBackend::new` reads the key material.
+/// Resolved Rust-PDS backend config.
+///
+/// Built from [`crate::config::PdsAdminRustToml`] by the
+/// resolver. v1.8.1 shape: ES256K service-auth identity fields
+/// (the OAuth-model residue — `client_id`/`client_secret`/
+/// `scopes` — was dropped before ever shipping to a live
+/// deployment), plus refresh cadence, capability declarations,
+/// and the audit-divergence acknowledgment flag that gates the
+/// v1.8.1 inspector-only posture.
+///
+/// The signing key itself is deliberately NOT resolved here —
+/// config holds only the env-var *name*
+/// ([`Self::service_signing_key_env`]); `RustBackend::new` reads
+/// and parses the key material at construction so key bytes
+/// never sit in the resolved-config layer.
 #[derive(Debug, Clone)]
 pub struct RustBackendConfig {
     /// Parsed PDS base URL. TOML wire key: `url`.

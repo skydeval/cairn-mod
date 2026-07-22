@@ -123,6 +123,34 @@ where
         run_pds_admin_startup_probe(bridge).await;
     }
 
+    // v1.8.8: realtime stream consumer (v2 §5, chainlink #147).
+    // Spawned only when the operator set
+    // [pds_admin.rust.stream].enabled = true; the OperatorOptIn
+    // capability + pin gate is additionally enforced per
+    // connection attempt inside subscribe_mod_events (an
+    // unpinned/unadvertised family parks the consumer dormant,
+    // re-evaluated with backoff). HardStop (auth/role rejection
+    // at upgrade) ends the task; a process restart is the v1.8.8
+    // clear mechanism.
+    if let Some(bridge) = pds_admin_bridge.as_ref()
+        && let Some(crate::pds_admin::PdsAdminBackendConfig::Rust(rust_cfg)) =
+            bridge.policy.backend.as_ref()
+        && rust_cfg.stream.enabled
+    {
+        let status = Arc::new(crate::pds_admin::rust::stream::StreamStatus::default());
+        let consumer = crate::pds_admin::rust::stream::StreamConsumer::new(
+            bridge.backend.clone(),
+            pool.clone(),
+            rust_cfg.stream.clone(),
+            status,
+        );
+        tokio::spawn(consumer.run());
+        tracing::info!(
+            include_audit_chain = rust_cfg.stream.include_audit_chain,
+            "pds_admin: realtime stream consumer spawned (subscribeModEvents)"
+        );
+    }
+
     let writer = crate::writer::spawn_with_pds_admin(
         pool.clone(),
         key,
