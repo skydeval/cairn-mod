@@ -131,20 +131,15 @@ const BATCH_TAKEDOWN_FAMILY: &str = "batch-takedown";
 /// advertised-but-unpinned refusals).
 const BATCH_TAKEDOWN_CAPABILITY: &str = "batch-takedown-v1";
 
-// Transient Phase-1 allow: consumed by Phase 4's real dispatch
-// (chainlink #147).
-#[allow(dead_code)]
 /// NSID of the v1.8.8 realtime stream endpoint (WebSocket GET
 /// upgrade; Aurora `admin.rs:675-684`).
 const SUBSCRIBE_MOD_EVENTS_NSID: &str = "tools.aurora.admin.subscribeModEvents";
 
-#[allow(dead_code)]
 /// Capability family gating the stream (v1.8.8 §8) — the second
 /// OperatorOptIn family after v1.8.7's `batch-takedown`; the gate
 /// requires advertisement AND a `pinned_versions` entry.
 const MOD_EVENTS_STREAM_FAMILY: &str = "mod-events-stream";
 
-#[allow(dead_code)]
 /// Wire string embedded in `CapabilityNotAdvertised` returns for
 /// the stream method.
 const MOD_EVENTS_STREAM_CAPABILITY: &str = "mod-events-stream-v1";
@@ -1494,13 +1489,19 @@ impl PdsAdminBackend for RustBackend {
         self.dispatch_emit_event(&dispatch).await
     }
 
-    // v1.8.8 Phase 1 compile-stub; the real WebSocket dispatch
-    // lands in Phase 4 (chainlink #147).
+    /// Real dispatch (v1.8.8): WebSocket upgrade to
+    /// `subscribeModEvents` with per-connection service-auth JWT.
+    /// Capability gate mirrors `dispatch_batch`'s OperatorOptIn
+    /// semantics against the `mod-events-stream` family. Frames
+    /// arrive as JSON text; unknown/malformed frames are skipped
+    /// in the adapter (no sequence extracted → no cursor
+    /// advance); transport errors surface as one final
+    /// `Err(Transient)` item.
     async fn subscribe_mod_events(
         &self,
-        _cursor: Option<i64>,
-        _audit_chain_cursor: Option<i64>,
-        _include_audit_chain: bool,
+        cursor: Option<i64>,
+        audit_chain_cursor: Option<i64>,
+        include_audit_chain: bool,
     ) -> Result<
         std::pin::Pin<
             Box<
@@ -1510,7 +1511,109 @@ impl PdsAdminBackend for RustBackend {
         >,
         BackendError,
     > {
-        Err(BackendError::Unsupported)
+        // Blocking read — guards never cross an await point.
+        {
+            let caps = self
+                .capabilities
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !caps.has(MOD_EVENTS_STREAM_FAMILY) {
+                return Err(BackendError::CapabilityNotAdvertised(
+                    MOD_EVENTS_STREAM_CAPABILITY.to_string(),
+                ));
+            }
+            let _advertised_version = caps
+                .version_of(MOD_EVENTS_STREAM_FAMILY)
+                .expect("has() returned true for the same family");
+        }
+        // OperatorOptIn gate — second consumer of the v1.8.7
+        // semantics: advertisement alone is not consent for a
+        // long-lived ingesting connection.
+        if classification_for(MOD_EVENTS_STREAM_FAMILY)
+            == Some(CapabilityClassification::OperatorOptIn)
+            && !self.pinned_versions.contains_key(MOD_EVENTS_STREAM_FAMILY)
+        {
+            tracing::warn!(
+                target: "cairn_mod::pds_admin::rust::capability",
+                "stream refused: {MOD_EVENTS_STREAM_FAMILY:?} is operator-opt-in and no \
+                 pinned_versions entry exists; add `{MOD_EVENTS_STREAM_FAMILY} = \"v1\"` \
+                 under [pds_admin.rust.pinned_versions] to enable the realtime consumer"
+            );
+            return Err(BackendError::CapabilityNotAdvertised(
+                MOD_EVENTS_STREAM_CAPABILITY.to_string(),
+            ));
+        }
+
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            SUBSCRIBE_MOD_EVENTS_NSID,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let mut url = self.xrpc_url(SUBSCRIBE_MOD_EVENTS_NSID)?;
+        let ws_scheme = if url.scheme() == "https" { "wss" } else { "ws" };
+        url.set_scheme(ws_scheme)
+            .map_err(|()| BackendError::Validation("pds_url scheme not ws-convertible".into()))?;
+        {
+            let mut qp = url.query_pairs_mut();
+            if let Some(c) = cursor {
+                qp.append_pair("cursor", &c.to_string());
+            }
+            if include_audit_chain {
+                qp.append_pair("includeAuditChain", "true");
+                if let Some(c) = audit_chain_cursor {
+                    qp.append_pair("auditChainCursor", &c.to_string());
+                }
+            }
+        }
+
+        use tokio_tungstenite::tungstenite;
+        use tungstenite::client::IntoClientRequest;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| BackendError::Validation(format!("ws request build: {e}")))?;
+        request.headers_mut().insert(
+            tungstenite::http::header::AUTHORIZATION,
+            format!("Bearer {jwt}")
+                .parse()
+                .map_err(|e| BackendError::Auth(format!("authorization header: {e}")))?,
+        );
+
+        let (ws, _response) =
+            tokio_tungstenite::connect_async(request)
+                .await
+                .map_err(|e| match &e {
+                    tungstenite::Error::Http(resp)
+                        if resp.status() == tungstenite::http::StatusCode::UNAUTHORIZED
+                            || resp.status() == tungstenite::http::StatusCode::FORBIDDEN =>
+                    {
+                        BackendError::Auth(format!(
+                            "subscribeModEvents upgrade rejected: HTTP {}",
+                            resp.status()
+                        ))
+                    }
+                    _ => BackendError::Transient(format!("subscribeModEvents connect: {e}")),
+                })?;
+
+        use futures_util::StreamExt as _;
+        let frames = ws.filter_map(|msg| async move {
+            match msg {
+                Ok(tungstenite::Message::Text(text)) => {
+                    stream_types::parse_frame_text(text.as_str()).map(Ok)
+                }
+                // Binary/ping/pong are outside the JSON-text
+                // contract; Close ends the stream cleanly.
+                Ok(tungstenite::Message::Close(_)) | Ok(_) => None,
+                Err(e) => Some(Err(BackendError::Transient(format!(
+                    "websocket transport: {e}"
+                )))),
+            }
+        });
+        Ok(Box::pin(frames))
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful
@@ -1618,6 +1721,7 @@ mod tests {
             pinned_versions: BTreeMap::new(),
             verification_persist: true,
             acknowledge_v1_8_1_audit_divergence: true,
+            stream: crate::pds_admin::config::RustStreamConfig::default(),
         }
     }
 

@@ -351,6 +351,16 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // `CapabilityNotAdvertised`. See
     // `rust::RustBackend::dispatch_batch`.
     ("batch-takedown", CapabilityClassification::OperatorOptIn),
+    // Aurora advertises `mod-events-stream-v1` on
+    // `tools.aurora.admin.subscribeModEvents` (single-route
+    // attribution, admin.rs:675-684); v1.8.8's realtime consumer
+    // dispatches on it. **OperatorOptIn — the second such entry**
+    // (audit-trail is AutoAdvance): a long-lived ingesting
+    // WebSocket doesn't activate on advertisement alone; the
+    // operator opts in with `mod-events-stream = "v1"` under
+    // `[pds_admin.rust.pinned_versions]` (plus
+    // `[pds_admin.rust.stream].enabled = true`).
+    ("mod-events-stream", CapabilityClassification::OperatorOptIn),
 ];
 
 /// Look up a family's classification in the registry.
@@ -710,8 +720,9 @@ mod cross_release_type_tests {
         // subject-history, appeals); v1.8.6 adds audit-trail;
         // v1.8.7 adds batch-takedown — the first OperatorOptIn
         // entry AND the first runtime consumer of the
-        // classification. Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 7);
+        // classification; v1.8.8 adds mod-events-stream (second
+        // OperatorOptIn). Entries are suffix-less family names.
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 8);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -739,6 +750,10 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[6],
             ("batch-takedown", CapabilityClassification::OperatorOptIn)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[7],
+            ("mod-events-stream", CapabilityClassification::OperatorOptIn)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that

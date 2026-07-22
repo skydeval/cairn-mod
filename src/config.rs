@@ -355,6 +355,11 @@ pub struct PdsAdminRustToml {
     /// 1s..=5m. Parses as a human-readable duration string.
     #[serde(default)]
     pub request_timeout: Option<String>,
+    /// v1.8.8 realtime-stream consumer sub-block
+    /// (`[pds_admin.rust.stream]`). Absent = all defaults
+    /// (stream dormant).
+    #[serde(default)]
+    pub stream: Option<PdsAdminStreamToml>,
     /// REMOVED in v1.8.1 (OAuth → service-auth rewrite).
     /// Accepted at the serde layer only so config load can
     /// reject it with a migration error naming the key.
@@ -409,6 +414,33 @@ pub struct PdsAdminRustToml {
     /// in v1.8.3.
     #[serde(default)]
     pub acknowledge_v1_8_1_audit_divergence: Option<bool>,
+}
+
+/// Raw `[pds_admin.rust.stream]` sub-block (v1.8.8, v2 §9.1).
+/// All fields optional; defaults resolve in
+/// `validated_rust_from_toml` (stream dormant unless
+/// `enabled = true`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdsAdminStreamToml {
+    /// Spawn the consumer task at startup. Default false.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Opt into audit-chain co-delivery. Default false.
+    #[serde(default)]
+    pub include_audit_chain: Option<bool>,
+    /// Reconnect backoff cap (floor 1s fixed). Default "60s".
+    #[serde(default)]
+    pub reconnect_max_backoff: Option<String>,
+    /// Dead-connection detection; also bounds the hello wait and
+    /// the drain deadline. Must exceed Aurora's 30s heartbeat.
+    /// Default "35s".
+    #[serde(default)]
+    pub silence_timeout: Option<String>,
+    /// Reconnect after a bare clean close (1000). Default false
+    /// (a bare 1000 is treated as intended shutdown).
+    #[serde(default)]
+    pub reconnect_on_normal_close: Option<bool>,
 }
 
 /// One entry in [`PdsAdminConfigToml::action_map`]. v1.7's TOML

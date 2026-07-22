@@ -145,6 +145,41 @@ pub struct OzoneBackendConfig {
 /// ([`Self::service_signing_key_env`]); `RustBackend::new` reads
 /// and parses the key material at construction so key bytes
 /// never sit in the resolved-config layer.
+/// Resolved `[pds_admin.rust.stream]` block (v1.8.8, v2 §9.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustStreamConfig {
+    /// Spawn the consumer task at startup (the OperatorOptIn
+    /// capability pin is additionally required at dispatch time).
+    pub enabled: bool,
+    /// Opt into audit-chain co-delivery frames.
+    pub include_audit_chain: bool,
+    /// Reconnect backoff cap (floor 1s fixed).
+    pub reconnect_max_backoff: Duration,
+    /// Dead-connection detection bound; also bounds the hello
+    /// wait and the drain deadline (R1 M-4). Validated > 30s
+    /// (Aurora's heartbeat interval) so healthy-idle connections
+    /// don't flap.
+    pub silence_timeout: Duration,
+    /// Reconnect after a bare clean close (1000).
+    pub reconnect_on_normal_close: bool,
+}
+
+impl Default for RustStreamConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            include_audit_chain: false,
+            reconnect_max_backoff: Duration::from_secs(60),
+            silence_timeout: Duration::from_secs(35),
+            reconnect_on_normal_close: false,
+        }
+    }
+}
+
+/// Resolved `[pds_admin.rust]` block (v1.8.1+): validated
+/// connection/auth surface for the Rust backend. The signing key
+/// itself is never resolved here — config holds the env-var name
+/// only; `RustBackend::new` reads the key material.
 #[derive(Debug, Clone)]
 pub struct RustBackendConfig {
     /// Parsed PDS base URL. TOML wire key: `url`.
@@ -196,6 +231,10 @@ pub struct RustBackendConfig {
     /// across the v1.8 series: required v1.8.1, deprecated
     /// v1.8.2, removed v1.8.3.
     pub acknowledge_v1_8_1_audit_divergence: bool,
+    /// v1.8.8 realtime-stream consumer settings. Defaults when
+    /// the `[pds_admin.rust.stream]` block is absent (stream
+    /// dormant).
+    pub stream: RustStreamConfig,
 }
 
 /// Resolver discriminator for the active backend.
@@ -1044,6 +1083,47 @@ where
     let acknowledge_v1_8_1_audit_divergence =
         toml.acknowledge_v1_8_1_audit_divergence.unwrap_or(false);
 
+    // v1.8.8 stream sub-block (v2 §9.1). Defaults when absent;
+    // silence_timeout must exceed Aurora's 30s heartbeat or every
+    // healthy-idle connection flaps.
+    let stream = {
+        use PdsAdminConfigError as E;
+        let raw = toml.stream.clone().unwrap_or_default();
+        let backoff_str = raw.reconnect_max_backoff.as_deref().unwrap_or("60s");
+        let reconnect_max_backoff = parse_duration_string(backoff_str).ok_or_else(|| {
+            E::RustBlockInvalid(format!(
+                "`stream.reconnect_max_backoff` = {backoff_str:?} is not a valid duration \
+                 (expected forms like \"60s\", \"2m\")"
+            ))
+        })?;
+        if reconnect_max_backoff < Duration::from_secs(1) {
+            return Err(E::RustBlockInvalid(format!(
+                "`stream.reconnect_max_backoff` = {backoff_str:?} is below the 1s floor"
+            ))
+            .into());
+        }
+        let silence_str = raw.silence_timeout.as_deref().unwrap_or("35s");
+        let silence_timeout = parse_duration_string(silence_str).ok_or_else(|| {
+            E::RustBlockInvalid(format!(
+                "`stream.silence_timeout` = {silence_str:?} is not a valid duration"
+            ))
+        })?;
+        if silence_timeout <= Duration::from_secs(30) {
+            return Err(E::RustBlockInvalid(format!(
+                "`stream.silence_timeout` = {silence_str:?} must exceed the upstream's 30s \
+                 heartbeat interval (a smaller value makes every healthy-idle connection flap)"
+            ))
+            .into());
+        }
+        RustStreamConfig {
+            enabled: raw.enabled.unwrap_or(false),
+            include_audit_chain: raw.include_audit_chain.unwrap_or(false),
+            reconnect_max_backoff,
+            silence_timeout,
+            reconnect_on_normal_close: raw.reconnect_on_normal_close.unwrap_or(false),
+        }
+    };
+
     Ok(RustBackendConfig {
         pds_url,
         service_did: toml.service_did.clone(),
@@ -1056,6 +1136,7 @@ where
         pinned_versions,
         verification_persist,
         acknowledge_v1_8_1_audit_divergence,
+        stream,
     })
 }
 
@@ -2027,6 +2108,7 @@ mod tests {
 
     fn rust_toml() -> crate::config::PdsAdminRustToml {
         crate::config::PdsAdminRustToml {
+            stream: None,
             url: "https://rust-pds.example.test".into(),
             service_did: "did:web:cairn-mod.example.test".into(),
             service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),
@@ -2461,6 +2543,7 @@ mod tests {
         PdsAdminPolicy {
             enabled: true,
             backend: Some(PdsAdminBackendConfig::Rust(Box::new(RustBackendConfig {
+                stream: RustStreamConfig::default(),
                 pds_url: url::Url::parse("https://rust-pds.example.test").unwrap(),
                 service_did: "did:web:cairn-mod.example.test".into(),
                 service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),

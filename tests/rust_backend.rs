@@ -69,6 +69,7 @@ fn canonical_body() -> String {
             {"name": "mod-events-emit-v1"},
             {"name": "audit-trail-v1"},
             {"name": "batch-takedown-v1"},
+            {"name": "mod-events-stream-v1"},
             {"name": "queue-stats-v1", "value": {"note": "placeholder"}}
         ],
         "implementation": "aurora-locus",
@@ -128,6 +129,7 @@ fn backend_config(addr: SocketAddr, required: Vec<String>) -> RustBackendConfig 
         pinned_versions: BTreeMap::new(),
         verification_persist: true,
         acknowledge_v1_8_1_audit_divergence: true,
+        stream: cairn_mod::pds_admin::config::RustStreamConfig::default(),
     }
 }
 
@@ -162,6 +164,7 @@ async fn probe_end_to_end_against_canonical_mock_aurora() {
             "mod-events-emit-v1".to_string(),
             "audit-trail-v1".to_string(),
             "batch-takedown-v1".to_string(),
+            "mod-events-stream-v1".to_string(),
             "queue-stats-v1".to_string(),
         ]
     );

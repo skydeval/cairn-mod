@@ -111,6 +111,66 @@ pub enum StreamFrame {
     },
 }
 
+/// Two-stage frame parse for one WebSocket text payload (v2
+/// §4.2): unknown `$type` values are skipped (forward-compat — a
+/// future Aurora frame type must not kill the stream), malformed
+/// known frames are logged and skipped. Skipped frames yield no
+/// sequence, so the consumer never advances a cursor for them —
+/// the one deliberate at-least-once edge, re-delivering into
+/// idempotent ingestion.
+pub(crate) fn parse_frame_text(text: &str) -> Option<StreamFrame> {
+    const KNOWN: [&str; 6] = [
+        "hello",
+        "event",
+        "auditEntry",
+        "heartbeat",
+        "outdatedCursor",
+        "error",
+    ];
+    let raw: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                target: "cairn_mod::pds_admin::rust::stream",
+                error = %e,
+                "unparseable stream frame skipped (cursor NOT advanced)"
+            );
+            return None;
+        }
+    };
+    let Some(t) = raw
+        .get("$type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+    else {
+        tracing::error!(
+            target: "cairn_mod::pds_admin::rust::stream",
+            "stream frame without $type skipped"
+        );
+        return None;
+    };
+    if !KNOWN.contains(&t.as_str()) {
+        tracing::warn!(
+            target: "cairn_mod::pds_admin::rust::stream",
+            frame_type = t,
+            "unknown stream frame $type skipped (forward-compat)"
+        );
+        return None;
+    }
+    match serde_json::from_value(raw) {
+        Ok(frame) => Some(frame),
+        Err(e) => {
+            tracing::error!(
+                target: "cairn_mod::pds_admin::rust::stream",
+                frame_type = t,
+                error = %e,
+                "malformed known stream frame skipped (cursor NOT advanced)"
+            );
+            None
+        }
+    }
+}
+
 /// Best-effort verb classification for an incoming event (v2
 /// §4.3): `details.action` carries the PascalCase emitEvent kind
 /// for emitEvent-originated events; dedicated-batch events carry
