@@ -21,6 +21,7 @@ pub mod batch_types;
 mod emit_event;
 pub mod read_types;
 pub mod service_auth;
+pub mod stream_ingest;
 pub mod stream_types;
 pub mod upstream_verify;
 
