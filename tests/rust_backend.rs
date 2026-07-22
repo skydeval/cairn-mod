@@ -2994,3 +2994,122 @@ async fn runtime_settings_writes_ledger_shape_and_dedup() {
     .await;
     assert!(bad.is_err(), "source CHECK is (local|upstream) only");
 }
+
+// =========================================================================
+// v1.8.10 — ops visibility reads (v2 §10)
+// =========================================================================
+
+/// Mock serving describe + a configurable subset of the eight ops
+/// visibility routes; unrouted NSIDs 404 (the F19 case).
+async fn spawn_ops_visibility_mock() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    async fn describe() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            canonical_body(),
+        )
+    }
+    fn json_route(
+        seen: Arc<Mutex<Vec<String>>>,
+        body: serde_json::Value,
+    ) -> axum::routing::MethodRouter {
+        get(move |uri: axum::http::Uri| {
+            let seen = seen.clone();
+            let body = body.clone();
+            async move {
+                seen.lock().unwrap().push(uri.path().to_string());
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body.to_string(),
+                )
+            }
+        })
+    }
+
+    let router = Router::new()
+        .route("/xrpc/tools.aurora.describeCapabilities", get(describe))
+        .route(
+            "/xrpc/tools.aurora.ops.getSystemHealth",
+            json_route(
+                seen.clone(),
+                json!({
+                    "status": "healthy", "version": "0.10.0",
+                    "uptime_seconds": 12.0,
+                    "services": {"database": "ok", "sequencer": "ok", "relay": "down", "federation": "off"},
+                    "active_http_requests": 1, "active_sessions": 2
+                }),
+            ),
+        )
+        .route(
+            "/xrpc/tools.aurora.ops.getFederationStatus",
+            json_route(
+                seen.clone(),
+                json!({
+                    "enabled": true,
+                    "serviceDid": "did:web:pds.example.test",
+                    "relayCount": 2,
+                    "relayConnected": true,
+                    "discoveryEnabled": false,
+                    "searchEnabled": false,
+                    "knownInstances": 5,
+                    "status": "federating"
+                }),
+            ),
+        )
+        .route(
+            "/xrpc/tools.aurora.ops.getDatabaseStatus",
+            json_route(
+                seen.clone(),
+                json!({
+                    "status": "ok",
+                    "pool": {"size": 10, "idle_connections": 9, "active_connections": 1},
+                    "latency_ms": 0.4,
+                    "statistics": {"total_accounts": 42, "active_sessions": 3},
+                    "some_new_field": {"nested": true}
+                }),
+            ),
+        );
+    // getSequencerStatus etc. deliberately NOT routed → 404 (F19).
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, seen)
+}
+
+#[tokio::test]
+async fn ops_reads_pass_through_and_typed_federation() {
+    let (addr, seen) = spawn_ops_visibility_mock().await;
+    let backend = probed_backend(addr).await; // no pin needed: capability-bare block
+
+    // Value pass-through: byte-equal round trip of the body.
+    let health = backend.get_system_health().await.unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(health["services"]["relay"], "down");
+
+    // Unknown upstream additions survive verbatim (pass-through).
+    let db = backend.get_database_status().await.unwrap();
+    assert_eq!(db["some_new_field"]["nested"], true);
+
+    // Typed camelCase mirror (LB-1 positive path end-to-end).
+    let fed = backend.get_federation_status().await.unwrap();
+    assert_eq!(fed.service_did, "did:web:pds.example.test");
+    assert_eq!(fed.relay_count, 2);
+    assert_eq!(fed.known_instances, 5);
+
+    let paths = seen.lock().unwrap();
+    assert!(paths.contains(&"/xrpc/tools.aurora.ops.getSystemHealth".to_string()));
+    assert!(paths.contains(&"/xrpc/tools.aurora.ops.getFederationStatus".to_string()));
+}
+
+#[tokio::test]
+async fn ops_read_unshipped_endpoint_maps_terminal_404() {
+    // F19: unrouted NSID → 404 → Terminal ("endpoint not shipped
+    // at this upstream"); no capability gate involved.
+    let (addr, _seen) = spawn_ops_visibility_mock().await;
+    let backend = probed_backend(addr).await;
+    let err = backend.get_sequencer_status().await.unwrap_err();
+    assert!(matches!(err, BackendError::Terminal(_)), "{err:?}");
+}

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.10 operator extensions
+- Eight new read-only instance-visibility endpoints consumed from
+  the upstream PDS's ops namespace (trait 40 → 48, all Unsupported
+  on Ozone): system health, sequencer status, federation status,
+  blob statistics, database status, resource usage, version info,
+  and system metrics. All are **capability-bare upstream** — no
+  advertisement strings exist for them, so there is no capability
+  gate and no operator pin: availability is discovered at the
+  wire, and a 404 surfaces with an operator hint pointing at the
+  upstream's `describeCapabilities` output and release notes
+  (endpoint availability varies by PDS version; the advertised
+  list is advisory for this surface).
+- Seven of the eight return the upstream's JSON verbatim — the
+  upstream builds those bodies ad hoc with no contract types, so
+  cairn-mod deliberately ships **no fabricated mirrors**: the raw
+  body passes through, human rendering formats known headline
+  fields when present and falls back to pretty JSON otherwise,
+  and `--json` always emits the body untouched. Federation status
+  is the one typed response (camelCase wire).
+- New `cairn pds-admin ops` subcommand group: `metrics` (moved
+  from `cairn pds-admin metrics` — direct rename, old path
+  removed), `health`, `sequencer`, `federation`, `blobs`,
+  `database`, `resources`, `version`, `system-metrics`; all take
+  `--json`. The existing `blobs` *action* group is unaffected by
+  the same-named read inside `ops`.
+- No new capability registry entries, no migration, no config
+  changes — deliberately: the consumed surface advertises
+  nothing, persists nothing, and configures nothing. The
+  registry-additions cadence of v1.8.6–v1.8.9 breaks here by
+  fidelity to source, not oversight.
+
 ### Added — v1.8.9 ops and runtime
 - Three new backend methods (trait 37 → 40), all Unsupported on
   Ozone: `get_instance_metrics` (aggregated instance health /

@@ -4286,6 +4286,43 @@ mod batch_cli_tests {
     }
 
     #[test]
+    fn ops_subgroup_parses_and_old_metrics_path_is_gone() {
+        use clap::Parser as _;
+        // v1.8.10: nine ops subcommands parse.
+        for sub in [
+            "metrics",
+            "health",
+            "sequencer",
+            "federation",
+            "blobs",
+            "database",
+            "resources",
+            "version",
+            "system-metrics",
+        ] {
+            Cli::try_parse_from(["cairn", "pds-admin", "ops", sub])
+                .unwrap_or_else(|e| panic!("ops {sub} should parse: {e}"));
+            Cli::try_parse_from(["cairn", "pds-admin", "ops", sub, "--json"])
+                .unwrap_or_else(|e| panic!("ops {sub} --json should parse: {e}"));
+        }
+        // LB-7 migration: the old path is GONE (direct rename, no
+        // alias — v1.8 ships as one release).
+        assert!(Cli::try_parse_from(["cairn", "pds-admin", "metrics"]).is_err());
+        // The blobs ACTION group is untouched by the ops read of
+        // the same name (D-2 coexistence).
+        assert!(
+            Cli::try_parse_from([
+                "cairn",
+                "pds-admin",
+                "blobs",
+                "quarantine-many",
+                "did:plc:a@b"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn nine_batch_subcommands_parse_and_batch_restore_is_absent() {
         use clap::Parser as _;
         // The nine v1.8.7 subcommands round-trip through clap.
