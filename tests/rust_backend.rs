@@ -2650,3 +2650,309 @@ async fn batch_audit_row_persists_per_batch_id_with_null_cascades() {
         Some("[]")
     );
 }
+
+// =========================================================================
+// v1.8.9 — ops metrics + runtime settings (v2 §10)
+// =========================================================================
+
+use cairn_mod::pds_admin::rust::ops_types::SettingSource;
+
+struct MockOpsAurora {
+    /// Captured (path, query-or-body) pairs in arrival order.
+    requests: Mutex<Vec<(String, String)>>,
+    set_status: StatusCode,
+    set_body: String,
+    get_setting_body: String,
+}
+
+async fn spawn_ops_mock(
+    set_status: StatusCode,
+    set_body: String,
+    get_setting_body: String,
+) -> (SocketAddr, Arc<MockOpsAurora>) {
+    let state = Arc::new(MockOpsAurora {
+        requests: Mutex::new(Vec::new()),
+        set_status,
+        set_body,
+        get_setting_body,
+    });
+
+    async fn metrics(State(s): State<Arc<MockOpsAurora>>, uri: axum::http::Uri) -> Response {
+        s.requests
+            .lock()
+            .unwrap()
+            .push((uri.path().to_string(), String::new()));
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            json!({
+                "systemHealth": {
+                    "status": "healthy", "version": "0.10.0",
+                    "uptimeSeconds": 99.5, "activeHttpRequests": 2,
+                    "activeSessions": 4, "activeBackgroundJobs": 1
+                },
+                // openFds deliberately absent: absence-is-meaningful pin.
+                "resourceUsage": {
+                    "memoryResidentBytes": 2048.0,
+                    "dbPoolSize": 10, "dbPoolIdleConnections": 9
+                },
+                "accountGrowth": {
+                    "signupsLast24h": 0, "signupsLast7d": 2,
+                    "signupsLast30d": 9, "totalAccounts": 120
+                },
+                "federationHealth": {
+                    "federationEnabled": false, "relayConnected": false,
+                    "knownInstances": 0
+                }
+            })
+            .to_string(),
+        )
+            .into_response()
+    }
+
+    async fn get_setting(State(s): State<Arc<MockOpsAurora>>, uri: axum::http::Uri) -> Response {
+        s.requests.lock().unwrap().push((
+            uri.path().to_string(),
+            uri.query().unwrap_or_default().to_string(),
+        ));
+        (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            s.get_setting_body.clone(),
+        )
+            .into_response()
+    }
+
+    async fn set_setting(
+        State(s): State<Arc<MockOpsAurora>>,
+        uri: axum::http::Uri,
+        body: String,
+    ) -> Response {
+        let status = s.set_status;
+        let resp = s.set_body.clone();
+        s.requests
+            .lock()
+            .unwrap()
+            .push((uri.path().to_string(), body));
+        (
+            status,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            resp,
+        )
+            .into_response()
+    }
+
+    let router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(|| async {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    canonical_body(),
+                )
+            }),
+        )
+        .route(
+            "/xrpc/tools.aurora.ops.getInstanceMetrics",
+            get(metrics).with_state(state.clone()),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.getRuntimeSetting",
+            get(get_setting).with_state(state.clone()),
+        )
+        .route(
+            "/xrpc/tools.aurora.admin.setRuntimeSetting",
+            axum::routing::post(set_setting).with_state(state.clone()),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    (addr, state)
+}
+
+/// Backend with the runtime-settings opt-in pin, probed.
+async fn runtime_pinned_backend(addr: SocketAddr) -> RustBackend {
+    let mut cfg = backend_config(addr, Vec::new());
+    cfg.pinned_versions = BTreeMap::from([("runtime-settings".to_string(), "v1".to_string())]);
+    let backend =
+        RustBackend::new_with_key_source(&cfg, &|_| Ok(TEST_KEY_HEX.to_string())).unwrap();
+    backend.probe().await.expect("probe succeeds");
+    backend
+}
+
+fn set_success_body() -> String {
+    json!({
+        "key": "moderation-mode",
+        "previousValue": "full",
+        "newValue": "reduced",
+        "auditEntryId": "917"
+    })
+    .to_string()
+}
+
+fn default_source_body(key: &str) -> String {
+    json!({
+        "key": key,
+        "value": null,
+        "source": "Default",
+        "lastModified": null,
+        "lastModifiedBy": null
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn instance_metrics_parse_with_absent_optionals_and_no_pin_needed() {
+    let (addr, state) =
+        spawn_ops_mock(StatusCode::OK, set_success_body(), default_source_body("x")).await;
+    // AutoAdvance family: advertisement alone suffices (no pin).
+    let backend = probed_backend(addr).await;
+    let m = backend.get_instance_metrics().await.expect("metrics");
+    assert_eq!(m.system_health.status, "healthy");
+    assert_eq!(m.resource_usage.memory_resident_bytes, Some(2048.0));
+    assert!(
+        m.resource_usage.open_fds.is_none(),
+        "absent optional stays None — never zero-filled"
+    );
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].0, "/xrpc/tools.aurora.ops.getInstanceMetrics");
+}
+
+#[tokio::test]
+async fn runtime_settings_family_pin_gates_read_and_write() {
+    let (addr, state) = spawn_ops_mock(
+        StatusCode::OK,
+        set_success_body(),
+        default_source_body("moderation-mode"),
+    )
+    .await;
+    // Advertised but unpinned: BOTH methods refuse (family-level
+    // opt-in), no wire traffic.
+    let unpinned = probed_backend(addr).await;
+    for err in [
+        unpinned
+            .get_runtime_setting("moderation-mode")
+            .await
+            .unwrap_err(),
+        unpinned
+            .set_runtime_setting("moderation-mode", &json!("reduced"), "why")
+            .await
+            .unwrap_err(),
+    ] {
+        match err {
+            BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "runtime-settings-v1"),
+            other => panic!("expected CapabilityNotAdvertised, got {other:?}"),
+        }
+    }
+    assert!(state.requests.lock().unwrap().is_empty());
+
+    // Pinned: read sends ?key=, write POSTs the camelCase body.
+    let pinned = runtime_pinned_backend(addr).await;
+    let setting = pinned.get_runtime_setting("moderation-mode").await.unwrap();
+    assert_eq!(setting.source, SettingSource::Default);
+    let outcome = pinned
+        .set_runtime_setting("moderation-mode", &json!("reduced"), "load shed")
+        .await
+        .unwrap();
+    assert_eq!(outcome.previous_value, json!("full"));
+    assert_eq!(outcome.new_value, json!("reduced"));
+    assert_eq!(outcome.audit_entry_id, "917");
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].1, "key=moderation-mode");
+    let posted: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+    assert_eq!(
+        posted,
+        json!({"key": "moderation-mode", "value": "reduced", "rationale": "load shed"})
+    );
+}
+
+#[tokio::test]
+async fn set_runtime_setting_local_rationale_check_and_wire_error_mapping() {
+    // Empty rationale: local Validation, byte-matched message, no
+    // wire call.
+    let (addr, state) = spawn_ops_mock(
+        StatusCode::FORBIDDEN,
+        json!({
+            "error": "Forbidden",
+            "message": "setRuntimeSetting requires SuperAdmin role; caller has Moderator"
+        })
+        .to_string(),
+        default_source_body("x"),
+    )
+    .await;
+    let backend = runtime_pinned_backend(addr).await;
+    match backend
+        .set_runtime_setting("moderation-mode", &json!("full"), "   ")
+        .await
+        .unwrap_err()
+    {
+        BackendError::Validation(msg) => {
+            assert_eq!(msg, "rationale is required and must be non-empty");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+    assert!(state.requests.lock().unwrap().is_empty());
+
+    // 403 SuperAdmin floor → Auth, message preserved.
+    match backend
+        .set_runtime_setting("moderation-mode", &json!("full"), "ok")
+        .await
+        .unwrap_err()
+    {
+        BackendError::Auth(msg) => assert!(msg.contains("SuperAdmin"), "{msg}"),
+        other => panic!("expected Auth, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn set_runtime_setting_unknown_key_maps_validation_with_enumerated_message() {
+    let (addr, _state) = spawn_ops_mock(
+        StatusCode::BAD_REQUEST,
+        json!({
+            "error": "InvalidRequest",
+            "message": "unknown runtime setting key 'nope'; known keys: [\"moderation-mode\", …]"
+        })
+        .to_string(),
+        default_source_body("x"),
+    )
+    .await;
+    let backend = runtime_pinned_backend(addr).await;
+    match backend
+        .set_runtime_setting("nope", &json!(1), "r")
+        .await
+        .unwrap_err()
+    {
+        BackendError::Validation(msg) => {
+            assert!(msg.contains("unknown runtime setting key"), "{msg}");
+            assert!(msg.contains("known keys"), "{msg}");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn recovery_mode_read_surfaces_source_verbatim() {
+    let (addr, _state) = spawn_ops_mock(
+        StatusCode::OK,
+        set_success_body(),
+        json!({
+            "key": "moderation-mode",
+            "value": "full",
+            "source": "RecoveryMode",
+            "lastModified": null,
+            "lastModifiedBy": null
+        })
+        .to_string(),
+    )
+    .await;
+    let backend = runtime_pinned_backend(addr).await;
+    let s = backend
+        .get_runtime_setting("moderation-mode")
+        .await
+        .unwrap();
+    assert_eq!(s.source, SettingSource::RecoveryMode);
+    assert_eq!(s.value, json!("full"));
+}

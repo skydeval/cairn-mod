@@ -146,27 +146,18 @@ const MOD_EVENTS_STREAM_FAMILY: &str = "mod-events-stream";
 /// the stream method.
 const MOD_EVENTS_STREAM_CAPABILITY: &str = "mod-events-stream-v1";
 
-// Transient Phase-1 allows: consumed by Phase 3's real dispatch
-// bodies (chainlink #151).
-#[allow(dead_code)]
 /// NSIDs + capability families of the v1.8.9 ops-and-runtime
 /// surfaces (v2 §3; chainlink #151). `getInstanceMetrics` is the
 /// ONE ops-namespace endpoint; the runtime-settings pair is
 /// admin-namespace (Aurora `admin.rs:243-249`, `:685-700`).
 const GET_INSTANCE_METRICS_NSID: &str = "tools.aurora.ops.getInstanceMetrics";
-#[allow(dead_code)]
 const GET_RUNTIME_SETTING_NSID: &str = "tools.aurora.admin.getRuntimeSetting";
-#[allow(dead_code)]
 const SET_RUNTIME_SETTING_NSID: &str = "tools.aurora.admin.setRuntimeSetting";
-#[allow(dead_code)]
 const INSTANCE_METRICS_FAMILY: &str = "instance-metrics";
-#[allow(dead_code)]
 const INSTANCE_METRICS_CAPABILITY: &str = "instance-metrics-v1";
-#[allow(dead_code)]
 /// Third OperatorOptIn family (after batch-takedown and
 /// mod-events-stream): the family gate covers read AND write.
 const RUNTIME_SETTINGS_FAMILY: &str = "runtime-settings";
-#[allow(dead_code)]
 const RUNTIME_SETTINGS_CAPABILITY: &str = "runtime-settings-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
@@ -1623,26 +1614,81 @@ impl PdsAdminBackend for RustBackend {
         Ok(Box::pin(frames))
     }
 
-    // v1.8.9 Phase 1 compile-stubs; real dispatch bodies land in
-    // Phase 3 (chainlink #151).
+    /// Real dispatch (v1.8.9): GET `getInstanceMetrics` — the one
+    /// ops-namespace consumption. AutoAdvance family; no params;
+    /// absent optionals stay absent (never zero-filled).
     async fn get_instance_metrics(&self) -> Result<ops_types::InstanceMetrics, BackendError> {
-        Err(BackendError::Unsupported)
+        #[derive(serde::Serialize)]
+        struct NoParams {}
+        self.dispatch_moderator_read(
+            INSTANCE_METRICS_FAMILY,
+            INSTANCE_METRICS_CAPABILITY,
+            GET_INSTANCE_METRICS_NSID,
+            &NoParams {},
+            None,
+            None,
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.9): GET `getRuntimeSetting?key=…`.
+    /// Family-level OperatorOptIn gate first (the read shares the
+    /// write's pin — v2 §7.4); the read helper's own
+    /// advertisement check then re-passes trivially.
     async fn get_runtime_setting(
         &self,
-        _key: &str,
+        key: &str,
     ) -> Result<ops_types::RuntimeSetting, BackendError> {
-        Err(BackendError::Unsupported)
+        self.require_opt_in(RUNTIME_SETTINGS_FAMILY, RUNTIME_SETTINGS_CAPABILITY)?;
+        #[derive(serde::Serialize)]
+        struct Params<'a> {
+            key: &'a str,
+        }
+        self.dispatch_moderator_read(
+            RUNTIME_SETTINGS_FAMILY,
+            RUNTIME_SETTINGS_CAPABILITY,
+            GET_RUNTIME_SETTING_NSID,
+            &Params { key },
+            None,
+            None,
+        )
+        .await
     }
 
+    /// Real dispatch (v1.8.9): POST `setRuntimeSetting`. Local
+    /// pre-validation is the one check Aurora enforces globally —
+    /// non-empty rationale, byte-matched message; everything else
+    /// (SuperAdmin floor, key allowlist, per-key value shapes) is
+    /// Aurora's authority (LB-5 pass-through).
     async fn set_runtime_setting(
         &self,
-        _key: &str,
-        _value: &serde_json::Value,
-        _rationale: &str,
+        key: &str,
+        value: &serde_json::Value,
+        rationale: &str,
     ) -> Result<ops_types::SetRuntimeSettingOutcome, BackendError> {
-        Err(BackendError::Unsupported)
+        if rationale.trim().is_empty() {
+            return Err(BackendError::Validation(
+                "rationale is required and must be non-empty".to_string(),
+            ));
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            key: &'a str,
+            value: &'a serde_json::Value,
+            rationale: &'a str,
+        }
+        self.dispatch_admin_post(
+            SET_RUNTIME_SETTING_NSID,
+            RUNTIME_SETTINGS_FAMILY,
+            RUNTIME_SETTINGS_CAPABILITY,
+            &Body {
+                key,
+                value,
+                rationale,
+            },
+        )
+        .await
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful
