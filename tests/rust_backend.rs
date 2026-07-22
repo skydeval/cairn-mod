@@ -67,6 +67,10 @@ fn canonical_body() -> String {
         },
         "extensions": [
             {"name": "mod-events-emit-v1"},
+            {"name": "moderator-activity-v1"},
+            {"name": "subject-context-v1"},
+            {"name": "subject-history-v1"},
+            {"name": "appeals-v1"},
             {"name": "audit-trail-v1"},
             {"name": "batch-takedown-v1"},
             {"name": "mod-events-stream-v1"},
@@ -163,6 +167,10 @@ async fn probe_end_to_end_against_canonical_mock_aurora() {
         report.capabilities,
         vec![
             "mod-events-emit-v1".to_string(),
+            "moderator-activity-v1".to_string(),
+            "subject-context-v1".to_string(),
+            "subject-history-v1".to_string(),
+            "appeals-v1".to_string(),
             "audit-trail-v1".to_string(),
             "batch-takedown-v1".to_string(),
             "mod-events-stream-v1".to_string(),
@@ -3110,4 +3118,25 @@ async fn ops_read_unshipped_endpoint_maps_terminal_404() {
     let backend = probed_backend(addr).await;
     let err = backend.get_sequencer_status().await.unwrap_err();
     assert!(matches!(err, BackendError::Terminal(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn probe_match_report_all_families_match_against_consolidated_fixture() {
+    // v1.8.11 item 5+8 coordinate: the consolidated canonical
+    // fixture advertises all 10 registered families, so the probe
+    // match report is all-match end-to-end.
+    let (addr, _state) = spawn_mock_aurora(MockAuroraBehavior {
+        status: StatusCode::OK,
+        body: canonical_body(),
+    })
+    .await;
+    let backend = backend_against(addr, Vec::new());
+    let report = backend.probe().await.expect("probe succeeds");
+    let matches = cairn_mod::cli::pds_admin_ops::CapabilityMatchReport::build(&report.capabilities);
+    assert!(matches.all_match(), "{matches:?}");
+    assert_eq!(matches.advertised_and_registered.len(), 10);
+    assert_eq!(
+        matches.advertised_not_registered,
+        vec!["queue-stats-v1".to_string()]
+    );
 }

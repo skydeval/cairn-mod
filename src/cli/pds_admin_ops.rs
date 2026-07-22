@@ -403,3 +403,168 @@ pub async fn ops_read(config: &Config, which: OpsRead, json: bool) -> Result<Str
     }
     Ok(render_value_with_known(&value, which.known_fields()))
 }
+
+// ===========================================================================
+// v1.8.11 probe CLI (series-wrap item 8, chainlink #159)
+// ===========================================================================
+
+/// Registry-vs-advertised capability match report (v1.8.11 item
+/// 8). Pure function over the probe's advertised strings so the
+/// match logic is unit-testable without a backend.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityMatchReport {
+    /// Registered families whose wire string is advertised.
+    pub advertised_and_registered: Vec<String>,
+    /// Advertised strings whose family is not in cairn-mod's
+    /// registry (upstream extension — advisory, not an error).
+    pub advertised_not_registered: Vec<String>,
+    /// Registered families the upstream does not advertise
+    /// (upstream drift, older PDS, or un-opted surfaces).
+    pub registered_not_advertised: Vec<String>,
+}
+
+impl CapabilityMatchReport {
+    /// Build from the probe's advertised wire strings against
+    /// the shipped `CAPABILITY_CLASSIFICATIONS` registry.
+    pub fn build(advertised: &[String]) -> Self {
+        use crate::pds_admin::types::{CAPABILITY_CLASSIFICATIONS, parse_capability_string};
+        let advertised_families: std::collections::BTreeSet<String> = advertised
+            .iter()
+            .filter_map(|s| parse_capability_string(s).map(|(family, _)| family))
+            .collect();
+        let mut advertised_and_registered = Vec::new();
+        let mut registered_not_advertised = Vec::new();
+        for (family, _) in CAPABILITY_CLASSIFICATIONS {
+            if advertised_families.contains(*family) {
+                advertised_and_registered.push((*family).to_string());
+            } else {
+                registered_not_advertised.push((*family).to_string());
+            }
+        }
+        let registered: std::collections::BTreeSet<&str> = CAPABILITY_CLASSIFICATIONS
+            .iter()
+            .map(|(family, _)| *family)
+            .collect();
+        let advertised_not_registered = advertised
+            .iter()
+            .filter(|s| {
+                parse_capability_string(s)
+                    .map(|(family, _)| !registered.contains(family.as_str()))
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        Self {
+            advertised_and_registered,
+            advertised_not_registered,
+            registered_not_advertised,
+        }
+    }
+
+    /// All shipped families advertised?
+    pub fn all_match(&self) -> bool {
+        self.registered_not_advertised.is_empty()
+    }
+}
+
+/// `cairn pds-admin probe` — run the shipped startup probe on
+/// demand and report the registry-vs-advertised match.
+pub async fn probe(config: &Config, json: bool) -> Result<String, CliError> {
+    let backend = backend_for_reads(config).await?;
+    let report = backend.probe().await?;
+    let matches = CapabilityMatchReport::build(&report.capabilities);
+
+    if json {
+        return Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "backend": report.backend_name,
+            "pdsUrl": report.pds_url,
+            "detectedVersion": report.detected_version,
+            "advertised": report.capabilities,
+            "match": matches,
+            "allShippedFamiliesMatch": matches.all_match(),
+        }))
+        .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}")));
+    }
+
+    let mut out = format!(
+        "backend: {}\npds url: {}\ndetected version: {}\n\n",
+        report.backend_name,
+        report.pds_url,
+        report.detected_version.as_deref().unwrap_or("-"),
+    );
+    out.push_str(&format!(
+        "advertised and registered ({}):\n",
+        matches.advertised_and_registered.len()
+    ));
+    for f in &matches.advertised_and_registered {
+        out.push_str(&format!("  {f}\n"));
+    }
+    if !matches.advertised_not_registered.is_empty() {
+        out.push_str(&format!(
+            "advertised but not registered — upstream extension? ({}):\n",
+            matches.advertised_not_registered.len()
+        ));
+        for f in &matches.advertised_not_registered {
+            out.push_str(&format!("  {f}\n"));
+        }
+    }
+    if !matches.registered_not_advertised.is_empty() {
+        out.push_str(&format!(
+            "registered but not advertised — upstream drift? ({}):\n",
+            matches.registered_not_advertised.len()
+        ));
+        for f in &matches.registered_not_advertised {
+            out.push_str(&format!("  {f}\n"));
+        }
+    }
+    out.push_str(&if matches.all_match() {
+        "verdict: all shipped families match".to_string()
+    } else {
+        format!(
+            "verdict: {} mismatch(es) — investigate",
+            matches.registered_not_advertised.len()
+        )
+    });
+    Ok(out)
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    #[test]
+    fn match_report_full_registry_matches() {
+        // All 10 registered families advertised (+ one unknown).
+        let advertised: Vec<String> = [
+            "mod-events-emit-v1",
+            "moderator-activity-v1",
+            "subject-context-v1",
+            "subject-history-v1",
+            "appeals-v1",
+            "audit-trail-v1",
+            "batch-takedown-v1",
+            "mod-events-stream-v1",
+            "instance-metrics-v1",
+            "runtime-settings-v1",
+            "queue-stats-v1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let r = CapabilityMatchReport::build(&advertised);
+        assert_eq!(r.advertised_and_registered.len(), 10);
+        assert_eq!(r.advertised_not_registered, vec!["queue-stats-v1"]);
+        assert!(r.registered_not_advertised.is_empty());
+        assert!(r.all_match());
+    }
+
+    #[test]
+    fn match_report_flags_drift() {
+        let advertised = vec!["mod-events-emit-v1".to_string()];
+        let r = CapabilityMatchReport::build(&advertised);
+        assert!(!r.all_match());
+        assert_eq!(r.advertised_and_registered, vec!["mod-events-emit"]);
+        assert_eq!(r.registered_not_advertised.len(), 9);
+    }
+}

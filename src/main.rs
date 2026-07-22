@@ -244,6 +244,10 @@ enum PdsAdminSub {
         #[command(subcommand)]
         sub: PdsAdminEmailsSub,
     },
+    /// Compatibility probe (v1.8.11): run describeCapabilities
+    /// against the configured Rust PDS and report the
+    /// registry-vs-advertised capability match.
+    Probe(PdsAdminOpsReadArgs),
     /// Ops visibility subgroup (v1.8.10): instance metrics plus
     /// the eight capability-bare tools.aurora.ops.* reads.
     Ops {
@@ -2316,6 +2320,9 @@ async fn dispatch(cmd: Command) -> Result<(), CliError> {
             sub: PdsAdminSub::Ops { sub },
         } => run_pds_admin_ops_read(sub).await,
         Command::PdsAdmin {
+            sub: PdsAdminSub::Probe(args),
+        } => run_pds_admin_probe(args).await,
+        Command::PdsAdmin {
             sub:
                 PdsAdminSub::Runtime {
                     sub: PdsAdminRuntimeSub::Get(args),
@@ -3071,6 +3078,12 @@ async fn run_pds_admin_subjects_update_status_many(
 async fn run_pds_admin_metrics(args: PdsAdminMetricsArgs) -> Result<(), CliError> {
     let config = load_config(args.config.as_deref())?;
     println!("{}", cli_pds_admin_ops::metrics(&config, args.json).await?);
+    Ok(())
+}
+
+async fn run_pds_admin_probe(args: PdsAdminOpsReadArgs) -> Result<(), CliError> {
+    let config = load_config(args.config.as_deref())?;
+    println!("{}", cli_pds_admin_ops::probe(&config, args.json).await?);
     Ok(())
 }
 
