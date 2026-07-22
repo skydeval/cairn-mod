@@ -84,8 +84,8 @@ async fn persist_cursor(
 }
 
 /// One consumer over one backend. Constructed at server startup
-/// when `[pds_admin.rust.stream].enabled = true`; the capability
-/// + pin gate is enforced per connection attempt by
+/// when the stream config block sets `enabled = true`; the
+/// capability + pin gate is enforced per connection attempt by
 /// `subscribe_mod_events` itself (advertisement can change with
 /// the background refresh).
 pub struct StreamConsumer {
