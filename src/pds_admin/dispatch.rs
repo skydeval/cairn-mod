@@ -1598,6 +1598,27 @@ mod tests {
             unimplemented!("test backend does not stub v1.8.7 batch methods")
         }
 
+        async fn subscribe_mod_events(
+            &self,
+            _cursor: Option<i64>,
+            _audit_chain_cursor: Option<i64>,
+            _include_audit_chain: bool,
+        ) -> std::result::Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures_util::Stream<
+                            Item = std::result::Result<
+                                crate::pds_admin::rust::stream_types::StreamFrame,
+                                BackendError,
+                            >,
+                        > + Send,
+                >,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.8 stream method")
+        }
+
         async fn probe(
             &self,
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
@@ -3043,6 +3064,27 @@ mod tests {
         ) -> std::result::Result<crate::pds_admin::rust::action_types::ActionResponse, BackendError>
         {
             unimplemented!("test backend does not stub v1.8.7 batch methods")
+        }
+
+        async fn subscribe_mod_events(
+            &self,
+            _cursor: Option<i64>,
+            _audit_chain_cursor: Option<i64>,
+            _include_audit_chain: bool,
+        ) -> std::result::Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures_util::Stream<
+                            Item = std::result::Result<
+                                crate::pds_admin::rust::stream_types::StreamFrame,
+                                BackendError,
+                            >,
+                        > + Send,
+                >,
+            >,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.8 stream method")
         }
 
         async fn probe(

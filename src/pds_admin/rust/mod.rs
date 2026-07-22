@@ -21,6 +21,7 @@ pub mod batch_types;
 mod emit_event;
 pub mod read_types;
 pub mod service_auth;
+pub mod stream_types;
 pub mod upstream_verify;
 
 use action_types::{ActionResponse, AppealDecision, BlobSubject, ReportResolution, SubjectStatus};
@@ -128,6 +129,24 @@ const BATCH_TAKEDOWN_FAMILY: &str = "batch-takedown";
 /// the dedicated batch methods (both the not-advertised and the
 /// advertised-but-unpinned refusals).
 const BATCH_TAKEDOWN_CAPABILITY: &str = "batch-takedown-v1";
+
+// Transient Phase-1 allow: consumed by Phase 4's real dispatch
+// (chainlink #147).
+#[allow(dead_code)]
+/// NSID of the v1.8.8 realtime stream endpoint (WebSocket GET
+/// upgrade; Aurora `admin.rs:675-684`).
+const SUBSCRIBE_MOD_EVENTS_NSID: &str = "tools.aurora.admin.subscribeModEvents";
+
+#[allow(dead_code)]
+/// Capability family gating the stream (v1.8.8 §8) — the second
+/// OperatorOptIn family after v1.8.7's `batch-takedown`; the gate
+/// requires advertisement AND a `pinned_versions` entry.
+const MOD_EVENTS_STREAM_FAMILY: &str = "mod-events-stream";
+
+#[allow(dead_code)]
+/// Wire string embedded in `CapabilityNotAdvertised` returns for
+/// the stream method.
+const MOD_EVENTS_STREAM_CAPABILITY: &str = "mod-events-stream-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -1472,6 +1491,25 @@ impl PdsAdminBackend for RustBackend {
             metadata: None,
         };
         self.dispatch_emit_event(&dispatch).await
+    }
+
+    // v1.8.8 Phase 1 compile-stub; the real WebSocket dispatch
+    // lands in Phase 4 (chainlink #147).
+    async fn subscribe_mod_events(
+        &self,
+        _cursor: Option<i64>,
+        _audit_chain_cursor: Option<i64>,
+        _include_audit_chain: bool,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<Item = Result<stream_types::StreamFrame, BackendError>>
+                    + Send,
+            >,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

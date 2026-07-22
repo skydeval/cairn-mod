@@ -985,6 +985,29 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.8 stream: `Unsupported` on Ozone — the realtime
+    /// surface is Aurora-specific.
+    async fn subscribe_mod_events(
+        &self,
+        _cursor: Option<i64>,
+        _audit_chain_cursor: Option<i64>,
+        _include_audit_chain: bool,
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<
+                        Item = Result<
+                            crate::pds_admin::rust::stream_types::StreamFrame,
+                            BackendError,
+                        >,
+                    > + Send,
+            >,
+        >,
+        BackendError,
+    > {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.4 moderator reads: same `Unsupported` posture as the
     /// v1.8.3 reads (no Ozone-service URL in config; honest
     /// "switch backends" refusal).

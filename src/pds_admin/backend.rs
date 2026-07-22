@@ -30,6 +30,7 @@ use super::rust::read_types::{
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
     SubjectHistoryFilter,
 };
+use super::rust::stream_types::StreamFrame;
 use super::types::Subject;
 
 /// Backend-specific identifier for a recorded enforcement
@@ -1107,6 +1108,36 @@ pub trait PdsAdminBackend: Send + Sync {
         rationale: &str,
         precipitating_action_id: i64,
     ) -> Result<ActionResponse, BackendError>;
+
+    /// Open the realtime moderation-event stream (v1.8.8) —
+    /// `tools.aurora.admin.subscribeModEvents` WebSocket upgrade.
+    /// Gated on the `mod-events-stream` capability family
+    /// (**OperatorOptIn**: advertised AND pinned — the second
+    /// consumer of the v1.8.7 pin-gate semantics).
+    ///
+    /// Returns a boxed frame stream — the first stream-returning
+    /// method in this trait. `Pin<Box<dyn Stream …>>` rather than
+    /// `impl Stream` because the trait is consumed as
+    /// `Arc<dyn PdsAdminBackend>` (dyn-safety). Stream items are
+    /// per-frame results; a transport failure surfaces as one
+    /// final `Err(Transient)` item and the stream ends.
+    ///
+    /// `cursor` / `audit_chain_cursor` are the two independent
+    /// resume positions (Aurora's event seq and chain seq are
+    /// separate monotonic counters); `None` means live-only from
+    /// the current tail. `audit_chain_cursor` is meaningful only
+    /// when `include_audit_chain` is true.
+    async fn subscribe_mod_events(
+        &self,
+        cursor: Option<i64>,
+        audit_chain_cursor: Option<i64>,
+        include_audit_chain: bool,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<StreamFrame, BackendError>> + Send>,
+        >,
+        BackendError,
+    >;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///
