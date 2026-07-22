@@ -272,10 +272,10 @@ async fn probe_required_capability_absent_returns_capability_not_advertised() {
         body: canonical_body(),
     })
     .await;
-    let backend = backend_against(addr, vec!["runtime-settings-v1".into()]);
+    let backend = backend_against(addr, vec!["sequencer-control-v1".into()]);
     let err = backend.probe().await.unwrap_err();
     match err {
-        BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "runtime-settings-v1"),
+        BackendError::CapabilityNotAdvertised(s) => assert_eq!(s, "sequencer-control-v1"),
         other => panic!("expected CapabilityNotAdvertised, got {other:?}"),
     }
 }

@@ -509,68 +509,70 @@ impl RustBackend {
             .map_err(|e| BackendError::Transient(format!("{nsid} response parse: {e}")))
     }
 
-    /// Shared dedicated-batch dispatch (v1.8.7, §4.1): capability
-    /// gate (including the OperatorOptIn pin requirement, §8.1) →
-    /// per-call JWT → POST JSON → HTTP error mapping → parse
-    /// [`batch_types::BatchOutcome`]. Mirrors
-    /// [`Self::dispatch_emit_event`]'s shape, parameterized on
-    /// NSID + body because the four batch endpoints are distinct
-    /// routes rather than one polymorphic endpoint.
+    /// Shared capability gate (v1.8.9 §7.2, extracted as the third
+    /// OperatorOptIn consumer arrived): advertisement check plus
+    /// the OperatorOptIn pin requirement (v1.8.7 semantics).
+    /// AutoAdvance families pass on advertisement alone. Both
+    /// refusals surface as `CapabilityNotAdvertised(wire)` —
+    /// "operator didn't opt in" and "upstream doesn't offer it"
+    /// are equally capability-unavailable to the caller.
     ///
-    /// Per-subject upstream failures abort the whole batch
-    /// transaction (Aurora's whole-tx atomicity contract) and
-    /// arrive as a structured error body whose message carries
-    /// `failingSubject` (index) and `failingSubjectId`; the
-    /// standard XRPC-envelope mapping preserves both in the
-    /// captured message — no new error variant.
-    async fn dispatch_batch<B>(
-        &self,
-        nsid: &'static str,
-        body: &B,
-    ) -> Result<batch_types::BatchOutcome, BackendError>
-    where
-        B: serde::Serialize + Sync,
-    {
+    /// Consumers: v1.8.7 dedicated-batch dispatch, v1.8.8 stream
+    /// subscribe, v1.8.9 runtime-settings read/write (the
+    /// retrofit landed with v1.8.9; the four shipped posture
+    /// tests pin that semantics didn't move).
+    fn require_opt_in(&self, family: &str, wire: &'static str) -> Result<(), BackendError> {
         // Blocking read — guards never cross an await point.
         {
             let caps = self
                 .capabilities
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !caps.has(BATCH_TAKEDOWN_FAMILY) {
-                return Err(BackendError::CapabilityNotAdvertised(
-                    BATCH_TAKEDOWN_CAPABILITY.to_string(),
-                ));
+            if !caps.has(family) {
+                return Err(BackendError::CapabilityNotAdvertised(wire.to_string()));
             }
             let _advertised_version = caps
-                .version_of(BATCH_TAKEDOWN_FAMILY)
+                .version_of(family)
                 .expect("has() returned true for the same family");
         }
-
-        // OperatorOptIn gate (v1.8.7 §8.1 — first runtime consumer
-        // of the classification registry): for an OperatorOptIn
-        // family, advertisement alone is not consent. The operator
-        // opts in with a `[pds_admin.rust.pinned_versions]` entry
-        // for the family; an unpinned family refuses dispatch with
-        // the same `CapabilityNotAdvertised` shape ("operator
-        // didn't opt in" and "upstream doesn't offer it" are both
-        // capability-unavailable to the caller).
-        if classification_for(BATCH_TAKEDOWN_FAMILY)
-            == Some(CapabilityClassification::OperatorOptIn)
-            && !self.pinned_versions.contains_key(BATCH_TAKEDOWN_FAMILY)
+        if classification_for(family) == Some(CapabilityClassification::OperatorOptIn)
+            && !self.pinned_versions.contains_key(family)
         {
             tracing::warn!(
                 target: "cairn_mod::pds_admin::rust::capability",
-                nsid,
-                "batch dispatch refused: {BATCH_TAKEDOWN_FAMILY:?} is an operator-opt-in \
-                 capability family and no pinned_versions entry exists; add \
-                 `{BATCH_TAKEDOWN_FAMILY} = \"v1\"` under [pds_admin.rust.pinned_versions] \
-                 to enable batch dispatch"
+                "dispatch refused: {family:?} is an operator-opt-in capability family \
+                 and no pinned_versions entry exists; add `{family} = \"v1\"` under \
+                 [pds_admin.rust.pinned_versions] to enable it"
             );
-            return Err(BackendError::CapabilityNotAdvertised(
-                BATCH_TAKEDOWN_CAPABILITY.to_string(),
-            ));
+            return Err(BackendError::CapabilityNotAdvertised(wire.to_string()));
         }
+        Ok(())
+    }
+
+    /// Shared admin POST-JSON dispatch (v1.8.9 §4.4 — the
+    /// generalization of v1.8.7's `dispatch_batch`, which was
+    /// hard-bound to the batch family and `BatchOutcome`):
+    /// capability gate (including the OperatorOptIn pin, via
+    /// [`Self::require_opt_in`]) → per-call JWT → POST → HTTP
+    /// error mapping → parse `T`. Consumers: the four dedicated
+    /// batch methods (retrofit) and `set_runtime_setting`.
+    ///
+    /// Per-subject batch failures abort the whole upstream
+    /// transaction and arrive as structured bodies whose message
+    /// carries the failing index/identifier; the standard
+    /// XRPC-envelope mapping preserves them — no new variant.
+    async fn dispatch_admin_post<B, T>(
+        &self,
+        nsid: &'static str,
+        family: &'static str,
+        wire_capability: &'static str,
+        body: &B,
+    ) -> Result<T, BackendError>
+    where
+        B: serde::Serialize + Sync,
+        T: serde::de::DeserializeOwned,
+    {
+        self.require_opt_in(family, wire_capability)?;
 
         let jwt = mint_service_auth_jwt(
             &self.signing_key,
@@ -1296,8 +1298,10 @@ impl PdsAdminBackend for RustBackend {
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
         batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
-        self.dispatch_batch(
+        self.dispatch_admin_post(
             BATCH_TAKEDOWN_ACCOUNTS_NSID,
+            BATCH_TAKEDOWN_FAMILY,
+            BATCH_TAKEDOWN_CAPABILITY,
             &batch_types::BatchDidsBody { dids, rationale },
         )
         .await
@@ -1313,8 +1317,10 @@ impl PdsAdminBackend for RustBackend {
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
         batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
-        self.dispatch_batch(
+        self.dispatch_admin_post(
             BATCH_SUSPEND_ACCOUNTS_NSID,
+            BATCH_TAKEDOWN_FAMILY,
+            BATCH_TAKEDOWN_CAPABILITY,
             &batch_types::BatchDidsBody { dids, rationale },
         )
         .await
@@ -1330,8 +1336,10 @@ impl PdsAdminBackend for RustBackend {
         rationale: &str,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
         batch_types::validate_batch_len(dids, batch_types::MAX_BATCH_SIZE, "batch")?;
-        self.dispatch_batch(
+        self.dispatch_admin_post(
             BATCH_RESTORE_ACCOUNTS_NSID,
+            BATCH_TAKEDOWN_FAMILY,
+            BATCH_TAKEDOWN_CAPABILITY,
             &batch_types::BatchDidsBody { dids, rationale },
         )
         .await
@@ -1348,8 +1356,10 @@ impl PdsAdminBackend for RustBackend {
         _precipitating_action_id: i64,
     ) -> Result<batch_types::BatchOutcome, BackendError> {
         batch_types::validate_batch_len(uris, batch_types::MAX_BATCH_SIZE, "batch")?;
-        self.dispatch_batch(
+        self.dispatch_admin_post(
             BATCH_TAKEDOWN_RECORDS_NSID,
+            BATCH_TAKEDOWN_FAMILY,
+            BATCH_TAKEDOWN_CAPABILITY,
             &batch_types::BatchUrisBody { uris, rationale },
         )
         .await
@@ -1536,38 +1546,10 @@ impl PdsAdminBackend for RustBackend {
         >,
         BackendError,
     > {
-        // Blocking read — guards never cross an await point.
-        {
-            let caps = self
-                .capabilities
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !caps.has(MOD_EVENTS_STREAM_FAMILY) {
-                return Err(BackendError::CapabilityNotAdvertised(
-                    MOD_EVENTS_STREAM_CAPABILITY.to_string(),
-                ));
-            }
-            let _advertised_version = caps
-                .version_of(MOD_EVENTS_STREAM_FAMILY)
-                .expect("has() returned true for the same family");
-        }
-        // OperatorOptIn gate — second consumer of the v1.8.7
-        // semantics: advertisement alone is not consent for a
-        // long-lived ingesting connection.
-        if classification_for(MOD_EVENTS_STREAM_FAMILY)
-            == Some(CapabilityClassification::OperatorOptIn)
-            && !self.pinned_versions.contains_key(MOD_EVENTS_STREAM_FAMILY)
-        {
-            tracing::warn!(
-                target: "cairn_mod::pds_admin::rust::capability",
-                "stream refused: {MOD_EVENTS_STREAM_FAMILY:?} is operator-opt-in and no \
-                 pinned_versions entry exists; add `{MOD_EVENTS_STREAM_FAMILY} = \"v1\"` \
-                 under [pds_admin.rust.pinned_versions] to enable the realtime consumer"
-            );
-            return Err(BackendError::CapabilityNotAdvertised(
-                MOD_EVENTS_STREAM_CAPABILITY.to_string(),
-            ));
-        }
+        // Capability + opt-in gate — shared helper since v1.8.9
+        // (semantics identical to the inline block this replaced;
+        // the shipped posture tests pin it).
+        self.require_opt_in(MOD_EVENTS_STREAM_FAMILY, MOD_EVENTS_STREAM_CAPABILITY)?;
 
         let jwt = mint_service_auth_jwt(
             &self.signing_key,
