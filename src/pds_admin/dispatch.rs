@@ -1619,6 +1619,33 @@ mod tests {
             unimplemented!("test backend does not stub the v1.8.8 stream method")
         }
 
+        async fn get_instance_metrics(
+            &self,
+        ) -> std::result::Result<crate::pds_admin::rust::ops_types::InstanceMetrics, BackendError>
+        {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
+        async fn get_runtime_setting(
+            &self,
+            _key: &str,
+        ) -> std::result::Result<crate::pds_admin::rust::ops_types::RuntimeSetting, BackendError>
+        {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
+        async fn set_runtime_setting(
+            &self,
+            _key: &str,
+            _value: &serde_json::Value,
+            _rationale: &str,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::ops_types::SetRuntimeSettingOutcome,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
         async fn probe(
             &self,
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
@@ -3085,6 +3112,33 @@ mod tests {
             BackendError,
         > {
             unimplemented!("test backend does not stub the v1.8.8 stream method")
+        }
+
+        async fn get_instance_metrics(
+            &self,
+        ) -> std::result::Result<crate::pds_admin::rust::ops_types::InstanceMetrics, BackendError>
+        {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
+        async fn get_runtime_setting(
+            &self,
+            _key: &str,
+        ) -> std::result::Result<crate::pds_admin::rust::ops_types::RuntimeSetting, BackendError>
+        {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
+        async fn set_runtime_setting(
+            &self,
+            _key: &str,
+            _value: &serde_json::Value,
+            _rationale: &str,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::ops_types::SetRuntimeSettingOutcome,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.9 ops methods")
         }
 
         async fn probe(

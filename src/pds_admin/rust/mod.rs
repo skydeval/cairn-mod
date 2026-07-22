@@ -19,6 +19,7 @@ pub mod action_types;
 pub mod audit_types;
 pub mod batch_types;
 mod emit_event;
+pub mod ops_types;
 pub mod read_types;
 pub mod service_auth;
 pub mod stream;
@@ -144,6 +145,29 @@ const MOD_EVENTS_STREAM_FAMILY: &str = "mod-events-stream";
 /// Wire string embedded in `CapabilityNotAdvertised` returns for
 /// the stream method.
 const MOD_EVENTS_STREAM_CAPABILITY: &str = "mod-events-stream-v1";
+
+// Transient Phase-1 allows: consumed by Phase 3's real dispatch
+// bodies (chainlink #151).
+#[allow(dead_code)]
+/// NSIDs + capability families of the v1.8.9 ops-and-runtime
+/// surfaces (v2 §3; chainlink #151). `getInstanceMetrics` is the
+/// ONE ops-namespace endpoint; the runtime-settings pair is
+/// admin-namespace (Aurora `admin.rs:243-249`, `:685-700`).
+const GET_INSTANCE_METRICS_NSID: &str = "tools.aurora.ops.getInstanceMetrics";
+#[allow(dead_code)]
+const GET_RUNTIME_SETTING_NSID: &str = "tools.aurora.admin.getRuntimeSetting";
+#[allow(dead_code)]
+const SET_RUNTIME_SETTING_NSID: &str = "tools.aurora.admin.setRuntimeSetting";
+#[allow(dead_code)]
+const INSTANCE_METRICS_FAMILY: &str = "instance-metrics";
+#[allow(dead_code)]
+const INSTANCE_METRICS_CAPABILITY: &str = "instance-metrics-v1";
+#[allow(dead_code)]
+/// Third OperatorOptIn family (after batch-takedown and
+/// mod-events-stream): the family gate covers read AND write.
+const RUNTIME_SETTINGS_FAMILY: &str = "runtime-settings";
+#[allow(dead_code)]
+const RUNTIME_SETTINGS_CAPABILITY: &str = "runtime-settings-v1";
 
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
@@ -1615,6 +1639,28 @@ impl PdsAdminBackend for RustBackend {
             }
         });
         Ok(Box::pin(frames))
+    }
+
+    // v1.8.9 Phase 1 compile-stubs; real dispatch bodies land in
+    // Phase 3 (chainlink #151).
+    async fn get_instance_metrics(&self) -> Result<ops_types::InstanceMetrics, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_runtime_setting(
+        &self,
+        _key: &str,
+    ) -> Result<ops_types::RuntimeSetting, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn set_runtime_setting(
+        &self,
+        _key: &str,
+        _value: &serde_json::Value,
+        _rationale: &str,
+    ) -> Result<ops_types::SetRuntimeSettingOutcome, BackendError> {
+        Err(BackendError::Unsupported)
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

@@ -70,6 +70,8 @@ fn canonical_body() -> String {
             {"name": "audit-trail-v1"},
             {"name": "batch-takedown-v1"},
             {"name": "mod-events-stream-v1"},
+            {"name": "instance-metrics-v1"},
+            {"name": "runtime-settings-v1"},
             {"name": "queue-stats-v1", "value": {"note": "placeholder"}}
         ],
         "implementation": "aurora-locus",
@@ -165,6 +167,8 @@ async fn probe_end_to_end_against_canonical_mock_aurora() {
             "audit-trail-v1".to_string(),
             "batch-takedown-v1".to_string(),
             "mod-events-stream-v1".to_string(),
+            "instance-metrics-v1".to_string(),
+            "runtime-settings-v1".to_string(),
             "queue-stats-v1".to_string(),
         ]
     );

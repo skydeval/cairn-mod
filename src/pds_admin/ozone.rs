@@ -985,6 +985,30 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.9 ops-and-runtime: `Unsupported` on Ozone across the
+    /// board (Aurora-specific surfaces).
+    async fn get_instance_metrics(
+        &self,
+    ) -> Result<crate::pds_admin::rust::ops_types::InstanceMetrics, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_runtime_setting(
+        &self,
+        _key: &str,
+    ) -> Result<crate::pds_admin::rust::ops_types::RuntimeSetting, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn set_runtime_setting(
+        &self,
+        _key: &str,
+        _value: &serde_json::Value,
+        _rationale: &str,
+    ) -> Result<crate::pds_admin::rust::ops_types::SetRuntimeSettingOutcome, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.8 stream: `Unsupported` on Ozone — the realtime
     /// surface is Aurora-specific.
     async fn subscribe_mod_events(

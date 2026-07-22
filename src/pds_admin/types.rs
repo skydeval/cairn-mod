@@ -361,6 +361,18 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // `[pds_admin.rust.pinned_versions]` (plus
     // `[pds_admin.rust.stream].enabled = true`).
     ("mod-events-stream", CapabilityClassification::OperatorOptIn),
+    // Aurora advertises `instance-metrics-v1` on
+    // `tools.aurora.ops.getInstanceMetrics` (the one ops-namespace
+    // consumption; admin.rs:243-249); v1.8.9's metrics read
+    // consumes it. AutoAdvance: read-only visibility surface.
+    ("instance-metrics", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `runtime-settings-v1` on
+    // `tools.aurora.admin.getRuntimeSetting` with setRuntimeSetting
+    // sharing (admin.rs:685-700); v1.8.9 consumes both.
+    // **OperatorOptIn — the third such entry** (family-level: the
+    // pin gates read AND write; the write mutates PDS-global
+    // config under a SuperAdmin floor upstream).
+    ("runtime-settings", CapabilityClassification::OperatorOptIn),
 ];
 
 /// Look up a family's classification in the registry.
@@ -721,8 +733,10 @@ mod cross_release_type_tests {
         // v1.8.7 adds batch-takedown — the first OperatorOptIn
         // entry AND the first runtime consumer of the
         // classification; v1.8.8 adds mod-events-stream (second
-        // OperatorOptIn). Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 8);
+        // OperatorOptIn); v1.8.9 adds instance-metrics
+        // (AutoAdvance) + runtime-settings (third OperatorOptIn).
+        // Entries are suffix-less family names.
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 10);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -754,6 +768,14 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[7],
             ("mod-events-stream", CapabilityClassification::OperatorOptIn)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[8],
+            ("instance-metrics", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[9],
+            ("runtime-settings", CapabilityClassification::OperatorOptIn)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that

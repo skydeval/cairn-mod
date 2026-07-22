@@ -25,6 +25,7 @@ use super::rust::audit_types::{
     AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry,
 };
 use super::rust::batch_types::BatchOutcome;
+use super::rust::ops_types::{InstanceMetrics, RuntimeSetting, SetRuntimeSettingOutcome};
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -1138,6 +1139,37 @@ pub trait PdsAdminBackend: Send + Sync {
         >,
         BackendError,
     >;
+
+    /// Fetch aggregated instance metrics (v1.8.9) —
+    /// `tools.aurora.ops.getInstanceMetrics`. Gates on the
+    /// `instance-metrics` family (AutoAdvance). No role floor
+    /// upstream beyond authentication. Absent optional fields
+    /// mean "not instrumented", never zero.
+    async fn get_instance_metrics(&self) -> Result<InstanceMetrics, BackendError>;
+
+    /// Read one runtime setting (v1.8.9) —
+    /// `tools.aurora.admin.getRuntimeSetting`. Gates on the
+    /// `runtime-settings` family (**OperatorOptIn**, family-level:
+    /// the read shares the write's pin). Unknown keys are a 200
+    /// with `source: Default` upstream (no 404 path).
+    /// `moderation-mode` reads are any-role; most other keys need
+    /// Admin+ upstream (403 → [`BackendError::Auth`]).
+    async fn get_runtime_setting(&self, key: &str) -> Result<RuntimeSetting, BackendError>;
+
+    /// Write one runtime setting (v1.8.9) —
+    /// `tools.aurora.admin.setRuntimeSetting`. Same family gate.
+    /// SuperAdmin upstream (403 → `Auth`); Aurora's key allowlist
+    /// + per-key value validation are authoritative (400 →
+    /// `Validation` — cairn-mod deliberately validates nothing
+    /// locally beyond a non-empty rationale). Returns the value
+    /// diff + the upstream audit-chain entry id; there is no
+    /// event id (setting writes emit no moderation event).
+    async fn set_runtime_setting(
+        &self,
+        key: &str,
+        value: &serde_json::Value,
+        rationale: &str,
+    ) -> Result<SetRuntimeSettingOutcome, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///
