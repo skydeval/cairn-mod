@@ -25,7 +25,9 @@ use super::rust::audit_types::{
     AuditEntryLookup, AuditTrailFilter, AuditTrailPage, AuroraAuditEntry,
 };
 use super::rust::batch_types::BatchOutcome;
-use super::rust::ops_types::{InstanceMetrics, RuntimeSetting, SetRuntimeSettingOutcome};
+use super::rust::ops_types::{
+    FederationStatusResponse, InstanceMetrics, RuntimeSetting, SetRuntimeSettingOutcome,
+};
 use super::rust::read_types::{
     AppealDetail, AppealView, EventWithContext, ListAppealsFilter, PaginatedResponse,
     QueryEventsFilter, QueryStatusesFilter, StatusWithContext, SubjectContextResponse,
@@ -1170,6 +1172,30 @@ pub trait PdsAdminBackend: Send + Sync {
         value: &serde_json::Value,
         rationale: &str,
     ) -> Result<SetRuntimeSettingOutcome, BackendError>;
+
+    /// v1.8.10 ops visibility reads — capability-bare upstream (no
+    /// gate; availability is wire-discovered per F19; 404 →
+    /// [`BackendError::Terminal`]). Seven return the upstream's
+    /// ad-hoc JSON verbatim (`Value` pass-through — those bodies
+    /// are handler-internal `json!` blocks with no contract
+    /// structs; fabricated mirrors would break on upstream field
+    /// tweaks). `get_federation_status` is the one typed response
+    /// (camelCase wire). All Unsupported on Ozone.
+    async fn get_system_health(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_sequencer_status(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_federation_status(&self) -> Result<FederationStatusResponse, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_blob_statistics(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_database_status(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_resource_usage(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_version_info(&self) -> Result<serde_json::Value, BackendError>;
+    /// See the group doc on [`Self::get_system_health`].
+    async fn get_system_metrics(&self) -> Result<serde_json::Value, BackendError>;
 
     /// Probe the configured backend at startup (§A15, #90).
     ///

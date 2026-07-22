@@ -1646,6 +1646,49 @@ mod tests {
             unimplemented!("test backend does not stub the v1.8.9 ops methods")
         }
 
+        async fn get_system_health(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_sequencer_status(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_federation_status(
+            &self,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::ops_types::FederationStatusResponse,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_blob_statistics(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_database_status(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_resource_usage(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_version_info(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_system_metrics(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
         async fn probe(
             &self,
         ) -> std::result::Result<crate::pds_admin::backend::ProbeReport, BackendError> {
@@ -3139,6 +3182,49 @@ mod tests {
             BackendError,
         > {
             unimplemented!("test backend does not stub the v1.8.9 ops methods")
+        }
+
+        async fn get_system_health(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_sequencer_status(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_federation_status(
+            &self,
+        ) -> std::result::Result<
+            crate::pds_admin::rust::ops_types::FederationStatusResponse,
+            BackendError,
+        > {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_blob_statistics(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_database_status(
+            &self,
+        ) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_resource_usage(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_version_info(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
+        }
+
+        async fn get_system_metrics(&self) -> std::result::Result<serde_json::Value, BackendError> {
+            unimplemented!("test backend does not stub the v1.8.10 ops methods")
         }
 
         async fn probe(

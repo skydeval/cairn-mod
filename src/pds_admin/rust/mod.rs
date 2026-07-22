@@ -160,6 +160,18 @@ const INSTANCE_METRICS_CAPABILITY: &str = "instance-metrics-v1";
 const RUNTIME_SETTINGS_FAMILY: &str = "runtime-settings";
 const RUNTIME_SETTINGS_CAPABILITY: &str = "runtime-settings-v1";
 
+/// NSIDs of the v1.8.10 ops visibility subset (v2 §3.1; all GET,
+/// all capability-bare in the core admin ops block — no gate, no
+/// pin; availability is 404-discovered per F19).
+const OPS_GET_SYSTEM_HEALTH_NSID: &str = "tools.aurora.ops.getSystemHealth";
+const OPS_GET_SEQUENCER_STATUS_NSID: &str = "tools.aurora.ops.getSequencerStatus";
+const OPS_GET_FEDERATION_STATUS_NSID: &str = "tools.aurora.ops.getFederationStatus";
+const OPS_GET_BLOB_STATISTICS_NSID: &str = "tools.aurora.ops.getBlobStatistics";
+const OPS_GET_DATABASE_STATUS_NSID: &str = "tools.aurora.ops.getDatabaseStatus";
+const OPS_GET_RESOURCE_USAGE_NSID: &str = "tools.aurora.ops.getResourceUsage";
+const OPS_GET_VERSION_INFO_NSID: &str = "tools.aurora.ops.getVersionInfo";
+const OPS_GET_SYSTEM_METRICS_NSID: &str = "tools.aurora.ops.getSystemMetrics";
+
 /// The Rust-PDS backend (v1.8.1 skeleton).
 ///
 /// Holds the per-call signing identity in memory — the private key
@@ -580,6 +592,63 @@ impl RustBackend {
             .post(url)
             .bearer_auth(&jwt)
             .json(body)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("{nsid} response parse: {e}")))
+    }
+
+    /// Gate-less ops-namespace GET dispatch (v1.8.10 §5): the core
+    /// admin ops block is capability-bare (no extension strings on
+    /// those routes — S-1 scope), so the capability-gated read
+    /// helper cannot carry it. Same JWT → GET → error-map → parse
+    /// pipeline as `dispatch_moderator_read`, minus the capability
+    /// check; availability is wire-discovered (404 → `Terminal`)
+    /// and `describeCapabilities` stays advisory (F19). Sibling
+    /// primitive — deliberately NOT merged with the gated helper.
+    async fn dispatch_ops_read<T>(
+        &self,
+        nsid: &'static str,
+        query: Option<&[(&str, &str)]>,
+    ) -> Result<T, BackendError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            nsid,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let url = self.xrpc_url(nsid)?;
+        let mut request = self.client.get(url).bearer_auth(&jwt);
+        if let Some(pairs) = query {
+            request = request.query(pairs);
+        }
+        let response = request
             .send()
             .await
             .map_err(OzoneBackend::map_reqwest_error)?;
@@ -1689,6 +1758,52 @@ impl PdsAdminBackend for RustBackend {
             },
         )
         .await
+    }
+
+    /// v1.8.10 ops visibility reads (v2 §4): gate-less dispatch —
+    /// the core admin ops block is capability-bare; availability
+    /// is 404-discovered (F19). Seven return the upstream's
+    /// ad-hoc JSON verbatim (Value pass-through, LB-3).
+    async fn get_system_health(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_SYSTEM_HEALTH_NSID, None)
+            .await
+    }
+
+    async fn get_sequencer_status(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_SEQUENCER_STATUS_NSID, None)
+            .await
+    }
+
+    async fn get_federation_status(
+        &self,
+    ) -> Result<ops_types::FederationStatusResponse, BackendError> {
+        self.dispatch_ops_read(OPS_GET_FEDERATION_STATUS_NSID, None)
+            .await
+    }
+
+    async fn get_blob_statistics(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_BLOB_STATISTICS_NSID, None)
+            .await
+    }
+
+    async fn get_database_status(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_DATABASE_STATUS_NSID, None)
+            .await
+    }
+
+    async fn get_resource_usage(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_RESOURCE_USAGE_NSID, None)
+            .await
+    }
+
+    async fn get_version_info(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_VERSION_INFO_NSID, None)
+            .await
+    }
+
+    async fn get_system_metrics(&self) -> Result<serde_json::Value, BackendError> {
+        self.dispatch_ops_read(OPS_GET_SYSTEM_METRICS_NSID, None)
+            .await
     }
 
     /// `describeCapabilities` probe — v1.8.1's only successful

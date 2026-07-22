@@ -261,3 +261,78 @@ mod tests {
         assert_eq!(o.audit_entry_id, "917");
     }
 }
+
+/// Mirror of Aurora's `FederationStatusResponse` — the one typed
+/// response in the v1.8.10 ops visibility subset
+/// (`admin.rs:9408-9428` at `2ffeb1a`; v1.8.10 v2 §3.3). The wire
+/// is **camelCase** (`#[serde(rename_all = "camelCase")]` on the
+/// upstream struct — R1 LB-1); Aurora derives Serialize only
+/// (server-side response type), this mirror derives both per
+/// module convention.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FederationStatusResponse {
+    /// Whether federation is enabled.
+    pub enabled: bool,
+    /// Service DID for this PDS.
+    pub service_did: String,
+    // u64 not usize: wire is width-agnostic; JSON numbers don't
+    // carry platform width (D-1).
+    /// Number of configured relay servers.
+    pub relay_count: u64,
+    /// Whether the relay client is connected.
+    pub relay_connected: bool,
+    /// Whether PDS discovery is enabled.
+    pub discovery_enabled: bool,
+    /// Whether federated search is enabled.
+    pub search_enabled: bool,
+    /// Number of known PDS instances.
+    pub known_instances: u64,
+    /// Status message.
+    pub status: String,
+}
+
+#[cfg(test)]
+mod federation_status_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn federation_status_parses_camel_case_wire() {
+        // LB-1 positive-path pin: this IS the wire form Aurora
+        // sends (rename_all = camelCase upstream).
+        let s: FederationStatusResponse = serde_json::from_value(json!({
+            "enabled": true,
+            "serviceDid": "did:web:pds.example.com",
+            "relayCount": 3,
+            "relayConnected": true,
+            "discoveryEnabled": false,
+            "searchEnabled": false,
+            "knownInstances": 7,
+            "status": "federating",
+            "someFutureField": 1
+        }))
+        .unwrap();
+        assert_eq!(s.service_did, "did:web:pds.example.com");
+        assert_eq!(s.relay_count, 3);
+        assert_eq!(s.known_instances, 7);
+    }
+
+    #[test]
+    fn federation_status_rejects_snake_case_body() {
+        // Pins the rename_all attribute: a snake_case body must
+        // fail field lookup (v1's backwards polarity inverted at
+        // R1).
+        let r: Result<FederationStatusResponse, _> = serde_json::from_value(json!({
+            "enabled": true,
+            "service_did": "did:web:x",
+            "relay_count": 1,
+            "relay_connected": false,
+            "discovery_enabled": false,
+            "search_enabled": false,
+            "known_instances": 0,
+            "status": "s"
+        }));
+        assert!(r.is_err());
+    }
+}

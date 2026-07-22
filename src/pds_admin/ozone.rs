@@ -985,6 +985,42 @@ impl PdsAdminBackend for OzoneBackend {
         Err(BackendError::Unsupported)
     }
 
+    /// v1.8.10 ops visibility reads: `Unsupported` on Ozone —
+    /// Aurora-specific surfaces.
+    async fn get_system_health(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_sequencer_status(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_federation_status(
+        &self,
+    ) -> Result<crate::pds_admin::rust::ops_types::FederationStatusResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_blob_statistics(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_database_status(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_resource_usage(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_version_info(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    async fn get_system_metrics(&self) -> Result<serde_json::Value, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
     /// v1.8.9 ops-and-runtime: `Unsupported` on Ozone across the
     /// board (Aurora-specific surfaces).
     async fn get_instance_metrics(
