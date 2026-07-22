@@ -1910,7 +1910,6 @@ mod tests {
             required_capabilities: Vec::new(),
             pinned_versions: BTreeMap::new(),
             verification_persist: true,
-            acknowledge_v1_8_1_audit_divergence: true,
             stream: crate::pds_admin::config::RustStreamConfig::default(),
         }
     }

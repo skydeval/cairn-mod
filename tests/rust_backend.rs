@@ -130,7 +130,6 @@ fn backend_config(addr: SocketAddr, required: Vec<String>) -> RustBackendConfig 
         required_capabilities: required,
         pinned_versions: BTreeMap::new(),
         verification_persist: true,
-        acknowledge_v1_8_1_audit_divergence: true,
         stream: cairn_mod::pds_admin::config::RustStreamConfig::default(),
     }
 }
@@ -302,7 +301,6 @@ fn rust_backend_config_json(key_env: &str, service_did: &str) -> serde_json::Val
                 "service_did": service_did,
                 "service_signing_key_env": key_env,
                 "target_service_did": "did:web:aurora.example.com",
-                "acknowledge_v1_8_1_audit_divergence": true,
             },
             "action_map": {
                 "warning": "skip",

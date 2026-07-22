@@ -219,14 +219,6 @@ pub struct RustBackendConfig {
     /// alongside audit-trail verification work (umbrella §5.2);
     /// accepted now so operators can pre-configure.
     pub verification_persist: bool,
-    /// Operator's explicit acknowledgment of the v1.8.1
-    /// inspector-only audit divergence. **Deprecated as of
-    /// v1.8.6** (advisory WARN when set; no longer required —
-    /// the divergence is closed by `cairn audit cross-verify`).
-    /// Removed at v1.8.11 series-wrap. Historical: self-removing
-    /// across the v1.8 series: required v1.8.1, deprecated
-    /// v1.8.2, removed v1.8.3.
-    pub acknowledge_v1_8_1_audit_divergence: bool,
     /// v1.8.8 realtime-stream consumer settings. Defaults when
     /// the `[pds_admin.rust.stream]` block is absent (stream
     /// dormant).
@@ -358,45 +350,28 @@ pub enum PdsAdminConfigError {
     /// inner strings carry the specific mismatch.
     #[error("config: [pds_admin.rust].pinned_versions / required_capabilities mismatch: {0}")]
     PinnedVersionMismatch(String),
-    /// `[pds_admin.rust].acknowledge_v1_8_1_audit_divergence`
-    /// is missing or `false` while the bridge is enabled with
-    /// the Rust backend selected.
-    #[error(
-        "config: [pds_admin].enabled = true with backend = \"rust\" requires \
-         [pds_admin.rust].acknowledge_v1_8_1_audit_divergence = true. \
-         The v1.8.1 RustBackend is inspector-only — every dispatch produces \
-         an audit-failure row until v1.8.2's protocol-parity work lands and \
-         lifts this restriction along with the \
-         acknowledge_v1_8_1_audit_divergence flag."
-    )]
-    AuditDivergenceAcknowledgmentRequired,
     /// `policy_automation` declares one or more rules in
     /// `mode = "auto"` while the bridge is enabled with the
     /// Rust backend. Auto-mode rules dispatch to the backend
-    /// without operator confirmation; in v1.8.1's inspector-only
-    /// posture this would silently produce audit-failure rows
-    /// at every auto-fire. The inner vector carries the names
-    /// of the offending rules.
+    /// without operator confirmation — a coexistence constraint
+    /// this gate has enforced since v1.8.1 (Part 2 of the
+    /// validator). The inner vector carries the names of the
+    /// offending rules.
     #[error(
         "config: [pds_admin].backend = \"rust\" is incompatible with \
-         policy_automation rules in mode = \"auto\" (rules: {0:?}). \
-         v1.8.2's protocol-parity work makes RustBackend functional and \
-         lifts this restriction along with the \
-         acknowledge_v1_8_1_audit_divergence flag."
+         policy_automation rules in mode = \"auto\" (rules: {0:?})."
     )]
-    PolicyAutoModeIncompatibleWithInspectorRustBackend(Vec<String>),
+    PolicyAutoModeIncompatibleWithRustBackend(Vec<String>),
     /// `[xrpc_gateway].enabled = true` while the bridge is
     /// enabled with the Rust backend. The inbound XRPC gateway
     /// dispatches into the recordAction path which would call
-    /// the Rust backend; v1.8.1 rejects this combination at
-    /// startup.
+    /// the Rust backend; this coexistence combination is
+    /// rejected at startup (Part 3 of the validator).
     #[error(
         "config: [pds_admin].backend = \"rust\" is incompatible with \
-         [xrpc_gateway].enabled = true. v1.8.2's protocol-parity work makes \
-         RustBackend functional and lifts this restriction along with the \
-         acknowledge_v1_8_1_audit_divergence flag."
+         [xrpc_gateway].enabled = true."
     )]
-    XrpcGatewayIncompatibleWithInspectorRustBackend,
+    XrpcGatewayIncompatibleWithRustBackend,
     /// `[pds_admin.locus]` is set — early-design name
     /// renamed to `[pds_admin.rust]` in v1.8.1.
     #[error(
@@ -1065,19 +1040,6 @@ where
     }
 
     let verification_persist = toml.verification_persist.unwrap_or(true);
-    // v1.8.6 (v2 §8.1): the acknowledgment flag is deprecated —
-    // setting it (either value) draws a WARN pointing at the
-    // v1.8.6 CHANGELOG; it is removed entirely at v1.8.11.
-    if toml.acknowledge_v1_8_1_audit_divergence.is_some() {
-        tracing::warn!(
-            "config: [pds_admin.rust].acknowledge_v1_8_1_audit_divergence is deprecated \
-             as of v1.8.6 (the v1.8.1 audit divergence is closed by `cairn audit \
-             cross-verify`; see the v1.8.6 CHANGELOG). The field is ignored and will be \
-             removed in v1.8.11 — drop it from your config."
-        );
-    }
-    let acknowledge_v1_8_1_audit_divergence =
-        toml.acknowledge_v1_8_1_audit_divergence.unwrap_or(false);
 
     // v1.8.8 stream sub-block (v2 §9.1). Defaults when absent;
     // silence_timeout must exceed Aurora's 30s heartbeat or every
@@ -1131,7 +1093,6 @@ where
         required_capabilities,
         pinned_versions,
         verification_persist,
-        acknowledge_v1_8_1_audit_divergence,
         stream,
     })
 }
@@ -1156,38 +1117,34 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
-/// Validate the audit-divergence acknowledgment per v1.8.1's
-/// inspector-only posture. **Canonical gate** for the
-/// `[pds_admin].enabled = true + backend = "rust"` configuration.
+/// Validate Rust-backend coexistence constraints. **Canonical
+/// gate** for the `[pds_admin].enabled = true + backend = "rust"`
+/// configuration.
 ///
-/// Three independent enforcement parts, all of which must pass:
+/// Two independent enforcement parts, both of which must pass:
 ///
-/// 1. The `acknowledge_v1_8_1_audit_divergence` flag on the
-///    selected `[pds_admin.rust]` block must be `true`.
-/// 2. No `policy_automation` rule may be in `mode = "auto"`
-///    (auto-mode rules dispatch without operator confirmation;
-///    in v1.8.1's inspector-only posture they would silently
-///    produce audit-failure rows on every fire).
-/// 3. `[xrpc_gateway].enabled` must not be `true` (the inbound
+/// 1. No `policy_automation` rule may be in `mode = "auto"`
+///    (auto-mode rules dispatch without operator confirmation).
+/// 2. `[xrpc_gateway].enabled` must not be `true` (the inbound
 ///    XRPC gateway would dispatch into the recordAction path
 ///    that calls the Rust backend).
 ///
 /// Each violation surfaces as a distinct
-/// [`PdsAdminConfigError`] variant; the v1.8.2-lifts footer in
-/// each error's display string points operators at the future
-/// release that drops the inspector-only posture.
+/// [`PdsAdminConfigError`] variant. (Historical: a Part 1 —
+/// the v1.8.1 audit-divergence acknowledgment-flag check —
+/// shipped at v1.8.1, was retired to an advisory WARN at v1.8.6
+/// once `cairn audit cross-verify` closed the divergence, and
+/// was removed with the field at v1.8.11. The function name is
+/// retained: 18 reference sites of cosmetic churn against a
+/// non-misleading name.)
 ///
-/// Short-circuits on `enabled = false`: returns `Ok(())` without
-/// inspecting any other field. Also short-circuits on
-/// `backend = ozone` (the inspector-only posture is
-/// rust-specific).
+/// Short-circuits on `enabled = false` and on `backend = ozone`
+/// (the constraints are rust-specific).
 ///
 /// **EVERY config-validation entry point** (startup;
 /// hypothetical hot-reload; hypothetical API-driven config
-/// edits) MUST call this gate. Bypassing it would let an
-/// operator stand up an inspector-only RustBackend that
-/// silently corrupts the audit-trail. The function is the
-/// canonical gate; do not duplicate its logic elsewhere.
+/// edits) MUST call this gate. The function is the canonical
+/// gate; do not duplicate its logic elsewhere.
 pub fn validate_audit_divergence_acknowledgment(
     policy: &PdsAdminPolicy,
     policy_automation: Option<&crate::policy::automation::PolicyAutomationPolicy>,
@@ -1196,23 +1153,13 @@ pub fn validate_audit_divergence_acknowledgment(
     if !policy.enabled {
         return Ok(());
     }
-    let rust = match &policy.backend {
-        Some(PdsAdminBackendConfig::Rust(r)) => r,
-        _ => return Ok(()),
-    };
-
-    // Part 1 (acknowledgment flag) — retired to an advisory WARN
-    // at v1.8.6 (v2 §8.1): the inspector-era audit divergence the
-    // flag acknowledged is closed by cross-chain verification
-    // (`cairn audit cross-verify`). The WARN fires at parse time
-    // in `validated_rust_from_toml` when the deprecated field is
-    // present; the reject-when-false behavior is gone. Field
-    // removal lands at v1.8.11 series-wrap. Parts 2 and 3 below
-    // are retained as-is — they enforce unrelated coexistence
-    // rules, and relaxing either is a design decision v1.8.6 does
-    // not take up (stale `InspectorRustBackend` naming also queued
-    // for v1.8.11).
-    let _ = &rust.acknowledge_v1_8_1_audit_divergence;
+    // matches!-guard (S-1): Parts 2/3 are rust-specific but take
+    // their inputs as function parameters — no binding needed
+    // since Part 1 (the acknowledgment-flag check) was removed
+    // with its field at v1.8.11.
+    if !matches!(&policy.backend, Some(PdsAdminBackendConfig::Rust(_))) {
+        return Ok(());
+    }
 
     // Part 2: no auto-mode policy-automation rules.
     if let Some(pa) = policy_automation {
@@ -1223,9 +1170,7 @@ pub fn validate_audit_divergence_acknowledgment(
             .map(|(name, _)| name.clone())
             .collect();
         if !auto_rules.is_empty() {
-            return Err(
-                PdsAdminConfigError::PolicyAutoModeIncompatibleWithInspectorRustBackend(auto_rules),
-            );
+            return Err(PdsAdminConfigError::PolicyAutoModeIncompatibleWithRustBackend(auto_rules));
         }
     }
 
@@ -1233,7 +1178,7 @@ pub fn validate_audit_divergence_acknowledgment(
     if let Some(gw) = xrpc_gateway
         && gw.enabled
     {
-        return Err(PdsAdminConfigError::XrpcGatewayIncompatibleWithInspectorRustBackend);
+        return Err(PdsAdminConfigError::XrpcGatewayIncompatibleWithRustBackend);
     }
 
     Ok(())
@@ -2118,7 +2063,6 @@ mod tests {
             required_capabilities: None,
             pinned_versions: None,
             verification_persist: None,
-            acknowledge_v1_8_1_audit_divergence: None,
         }
     }
 
@@ -2422,8 +2366,7 @@ mod tests {
 
     #[test]
     fn rust_request_timeout_default_is_thirty_seconds() {
-        let mut t = rust_toml();
-        t.acknowledge_v1_8_1_audit_divergence = Some(true);
+        let t = rust_toml();
         let cfg = config_with_rust(t);
         let p = from_config_rust_test(&cfg).expect("default loads");
         let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
@@ -2454,7 +2397,6 @@ mod tests {
         for (raw, secs) in [("1s", 1u64), ("5m", 300)] {
             let mut t = rust_toml();
             t.request_timeout = Some(raw.into());
-            t.acknowledge_v1_8_1_audit_divergence = Some(true);
             let cfg = config_with_rust(t);
             let p = from_config_rust_test(&cfg).expect("in-bounds loads");
             let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
@@ -2477,7 +2419,6 @@ mod tests {
     fn rust_capability_refresh_interval_lower_bound_accepted() {
         let mut t = rust_toml();
         t.capability_refresh_interval = Some("10s".into());
-        t.acknowledge_v1_8_1_audit_divergence = Some(true);
         let cfg = config_with_rust(t);
         let p = from_config_rust_test(&cfg).expect("10s loads");
         let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
@@ -2488,8 +2429,7 @@ mod tests {
 
     #[test]
     fn rust_capability_refresh_interval_default_is_one_hour() {
-        let mut t = rust_toml();
-        t.acknowledge_v1_8_1_audit_divergence = Some(true);
+        let t = rust_toml();
         let cfg = config_with_rust(t);
         let p = from_config_rust_test(&cfg).expect("default loads");
         let PdsAdminBackendConfig::Rust(rust) = p.backend.as_ref().unwrap() else {
@@ -2535,7 +2475,7 @@ mod tests {
     // directly so they don't have to round-trip every TOML field.
     // Each builds a minimal PdsAdminPolicy + optional sibling configs.
 
-    fn policy_rust(ack: bool) -> PdsAdminPolicy {
+    fn policy_rust() -> PdsAdminPolicy {
         PdsAdminPolicy {
             enabled: true,
             backend: Some(PdsAdminBackendConfig::Rust(Box::new(RustBackendConfig {
@@ -2550,7 +2490,6 @@ mod tests {
                 required_capabilities: Vec::new(),
                 pinned_versions: BTreeMap::new(),
                 verification_persist: true,
-                acknowledge_v1_8_1_audit_divergence: ack,
             }))),
             action_map: BTreeMap::new(),
         }
@@ -2612,21 +2551,11 @@ mod tests {
     }
 
     /// v1.8.6 (v2 §8.1): Part 1 retired to an advisory WARN — a
-    /// missing/false acknowledgment no longer rejects (the
-    /// divergence it acknowledged is closed by cross-verify).
-    /// Parts 2 and 3 keep their own coverage below.
     #[test]
-    fn divergence_rust_missing_ack_passes_since_v1_8_6() {
-        let policy = policy_rust(false);
+    fn divergence_rust_passes_without_parts_2_3_violations() {
+        let policy = policy_rust();
         validate_audit_divergence_acknowledgment(&policy, None, None)
-            .expect("Part 1 is advisory since v1.8.6; unset/false ack no longer rejects");
-    }
-
-    #[test]
-    fn divergence_rust_with_ack_passes_alone() {
-        let policy = policy_rust(true);
-        validate_audit_divergence_acknowledgment(&policy, None, None)
-            .expect("ack-only rust passes");
+            .expect("rust backend with no auto-mode rules and no gateway passes");
     }
 
     #[test]
@@ -2646,12 +2575,12 @@ mod tests {
 
     #[test]
     fn divergence_rust_with_auto_mode_rule_rejects() {
-        let policy = policy_rust(true);
+        let policy = policy_rust();
         let pa = policy_automation_with_rules(vec![("strike-warn", auto_mode_rule("x"))]);
         let err = validate_audit_divergence_acknowledgment(&policy, Some(&pa), None)
             .expect_err("auto mode rejects");
         match err {
-            PdsAdminConfigError::PolicyAutoModeIncompatibleWithInspectorRustBackend(rules) => {
+            PdsAdminConfigError::PolicyAutoModeIncompatibleWithRustBackend(rules) => {
                 assert_eq!(rules, vec!["strike-warn".to_string()]);
             }
             other => panic!("expected PolicyAutoModeIncompatible, got {other:?}"),
@@ -2663,7 +2592,7 @@ mod tests {
         // Flag-mode rules don't dispatch automatically; they
         // surface to the operator and pause for confirmation.
         // No conflict with inspector-only RustBackend.
-        let policy = policy_rust(true);
+        let policy = policy_rust();
         let pa = policy_automation_with_rules(vec![("strike-warn", flag_mode_rule("strike-warn"))]);
         validate_audit_divergence_acknowledgment(&policy, Some(&pa), None)
             .expect("flag-only passes");
@@ -2680,19 +2609,19 @@ mod tests {
 
     #[test]
     fn divergence_rust_with_xrpc_gateway_enabled_rejects() {
-        let policy = policy_rust(true);
+        let policy = policy_rust();
         let gw = enabled_xrpc_gateway();
         let err = validate_audit_divergence_acknowledgment(&policy, None, Some(&gw))
             .expect_err("xrpc_gateway enabled rejects");
         assert_eq!(
             err,
-            PdsAdminConfigError::XrpcGatewayIncompatibleWithInspectorRustBackend
+            PdsAdminConfigError::XrpcGatewayIncompatibleWithRustBackend
         );
     }
 
     #[test]
     fn divergence_rust_with_xrpc_gateway_absent_passes() {
-        let policy = policy_rust(true);
+        let policy = policy_rust();
         validate_audit_divergence_acknowledgment(&policy, None, None)
             .expect("xrpc_gateway absent passes");
     }
@@ -2741,8 +2670,8 @@ mod tests {
 
     #[test]
     fn warn_helper_returns_true_when_enabled_rust() {
-        assert!(should_warn_rust_backend_dispatch(&policy_rust(true)));
-        assert!(should_warn_rust_backend_dispatch(&policy_rust(false)));
+        assert!(should_warn_rust_backend_dispatch(&policy_rust()));
+        assert!(should_warn_rust_backend_dispatch(&policy_rust()));
     }
 
     #[test]

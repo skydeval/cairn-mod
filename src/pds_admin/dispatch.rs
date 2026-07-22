@@ -1212,9 +1212,9 @@ fn warn_rust_backend_capability_gap<T>(
         method = method.as_wire_str(),
         capability = %capability,
         "pds_admin: RustBackend dispatch skipped — the target PDS does not advertise \
-         capability \"{capability}\". v1.8.1's RustBackend is inspector-only; every \
-         dispatch records an audit-failure row until v1.8.2's protocol-parity work \
-         lands (see acknowledge_v1_8_1_audit_divergence)."
+         capability \"{capability}\" (or the operator has not pinned an opt-in \
+         family). The dispatch records an audit-failure row; check the upstream's \
+         describeCapabilities output and [pds_admin.rust.pinned_versions]."
     );
 }
 

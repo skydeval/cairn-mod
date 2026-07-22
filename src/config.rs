@@ -227,12 +227,11 @@ pub struct PdsAdminConfigToml {
     #[serde(default)]
     pub ozone: Option<PdsAdminOzoneToml>,
     /// `[pds_admin.rust]` subsection — Rust-PDS backend config
-    /// (Aurora-Locus and other ATProto Rust PDSes). The
-    /// inspector-only posture in v1.8.1 (per the
-    /// `acknowledge_v1_8_1_audit_divergence` flag) means the
-    /// backend is structurally valid but produces audit-failure
-    /// at dispatch time; v1.8.2's protocol-parity work lifts
-    /// that restriction.
+    /// (Aurora-Locus and other ATProto Rust PDSes). The v1.8.1
+    /// inspector-only posture ended with v1.8.2's protocol
+    /// parity; the historical acknowledgment flag was removed at
+    /// v1.8.11 (unknown keys are ignored, so stale configs
+    /// degrade gracefully).
     #[serde(default)]
     pub rust: Option<PdsAdminRustToml>,
     /// `[pds_admin.action_map]` subsection. Required when
@@ -315,10 +314,7 @@ pub struct PdsAdminOzoneToml {
 ///   and `capability_refresh_interval` (default `"1h"`,
 ///   lower-bound `"10s"`) as duration strings;
 /// - cross-validates `pinned_versions` against
-///   `required_capabilities` for family-name consistency;
-/// - enforces `acknowledge_v1_8_1_audit_divergence = true`
-///   when the bridge is enabled and this backend is selected
-///   (the v1.8.1 inspector-mode hard-stop).
+///   `required_capabilities` for family-name consistency.
 ///
 /// Fields use serde defaults where possible to keep the TOML
 /// surface ergonomic. The wire key for the URL field is `url`
@@ -402,18 +398,6 @@ pub struct PdsAdminRustToml {
     /// pre-configure.
     #[serde(default)]
     pub verification_persist: Option<bool>,
-    /// **Required when `enabled = true` and this backend is
-    /// selected.** Operators must explicitly acknowledge the
-    /// v1.8.1 inspector-only audit divergence: cairn-mod's
-    /// RustBackend produces a `BackendError` audit row at
-    /// dispatch time in v1.8.1 because protocol parity work
-    /// lands at v1.8.2. Setting this flag without reading the
-    /// release notes is a misconfiguration the operator owns.
-    /// The flag is self-removing across the v1.8 series: it is
-    /// required in v1.8.1, deprecated in v1.8.2, and removed
-    /// in v1.8.3.
-    #[serde(default)]
-    pub acknowledge_v1_8_1_audit_divergence: Option<bool>,
 }
 
 /// Raw `[pds_admin.rust.stream]` sub-block (v1.8.8, v2 §9.1).

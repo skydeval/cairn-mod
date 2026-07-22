@@ -224,7 +224,6 @@ async fn pinned_backend(addr: SocketAddr) -> Arc<RustBackend> {
             "v1".to_string(),
         )]),
         verification_persist: true,
-        acknowledge_v1_8_1_audit_divergence: true,
         stream: stream_config(),
     };
     let backend =
@@ -414,7 +413,6 @@ async fn unpinned_family_parks_dormant_without_wire_traffic() {
         required_capabilities: Vec::new(),
         pinned_versions: std::collections::BTreeMap::new(),
         verification_persist: true,
-        acknowledge_v1_8_1_audit_divergence: true,
         stream: stream_config(),
     };
     let backend = Arc::new(
