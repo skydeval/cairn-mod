@@ -225,6 +225,7 @@ async fn pinned_backend(addr: SocketAddr) -> Arc<RustBackend> {
         )]),
         verification_persist: true,
         stream: stream_config(),
+        kryphocron: cairn_mod::pds_admin::config::RustKryphocronConfig::default(),
     };
     let backend =
         RustBackend::new_with_key_source(&config, &|_| Ok(TEST_KEY_HEX.to_string())).unwrap();
@@ -414,6 +415,7 @@ async fn unpinned_family_parks_dormant_without_wire_traffic() {
         pinned_versions: std::collections::BTreeMap::new(),
         verification_persist: true,
         stream: stream_config(),
+        kryphocron: cairn_mod::pds_admin::config::RustKryphocronConfig::default(),
     };
     let backend = Arc::new(
         RustBackend::new_with_key_source(&config, &|_| Ok(TEST_KEY_HEX.to_string())).unwrap(),

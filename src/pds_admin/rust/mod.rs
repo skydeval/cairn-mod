@@ -43,6 +43,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use k256::ecdsa::SigningKey;
+// v1.8.12 substrate wiring (design §3.1): alias so the fully-
+// qualified vendored-module path appears once.
+use kryphocron::codec::laquna::Codec as KryphocronCodec;
 use url::Url;
 
 use super::backend::{
@@ -208,6 +211,13 @@ pub struct RustBackend {
     /// Per-request HTTP timeout (also baked into `client`); kept
     /// for operator-facing diagnostics.
     request_timeout: Duration,
+    /// Decode-only kryphocron codec (v1.8.12). Instantiated when
+    /// `[pds_admin.rust.kryphocron].enabled = true`; None otherwise.
+    /// Never invoked at v1.8.12 (wiring + detection only); consumed
+    /// from v1.8.13. Pure construction — no I/O.
+    // dead_code lifted in Phase 3 when probe() reads the field.
+    #[allow(dead_code)]
+    kryphocron_codec: Option<KryphocronCodec>,
 }
 
 impl RustBackend {
@@ -290,6 +300,18 @@ impl RustBackend {
             })
             .collect();
 
+        // v1.8.12 substrate wiring: `Codec::default()` is pure and
+        // infallible (no I/O), so building it here honors this
+        // constructor's no-network contract. `Option`-gated on the
+        // operator's explicit `[pds_admin.rust.kryphocron].enabled`
+        // opt-in so probe output can distinguish "operator declined"
+        // from "codec ready" (design §3.2/§5.2).
+        let kryphocron_codec = if config.kryphocron.enabled {
+            Some(KryphocronCodec::default())
+        } else {
+            None
+        };
+
         Ok(Self {
             client,
             pds_url: config.pds_url.clone(),
@@ -300,6 +322,7 @@ impl RustBackend {
             required_capabilities: config.required_capabilities.iter().cloned().collect(),
             pinned_versions,
             request_timeout: config.request_timeout,
+            kryphocron_codec,
         })
     }
 
@@ -1911,6 +1934,7 @@ mod tests {
             pinned_versions: BTreeMap::new(),
             verification_persist: true,
             stream: crate::pds_admin::config::RustStreamConfig::default(),
+            kryphocron: crate::pds_admin::config::RustKryphocronConfig::default(),
         }
     }
 

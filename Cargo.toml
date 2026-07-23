@@ -95,6 +95,14 @@ hex = "0.4"
 # WebSocket client for the v1.8.8 realtime consumer (subscribeModEvents).
 # TLS via rustls + webpki roots, matching reqwest's rustls-tls posture.
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# kryphocron substrate (v1.8.12, Workstream B entry). Wiring + detection
+# only at v1.8.12 — the codec is instantiated, never invoked (decode is
+# v1.8.13+). Versions track Aurora-Locus's pins (cairn-mod does not lead
+# the substrate). kryphocron's `zstd = "0.13"` is unconditional, so
+# zstd-sys (C libzstd) enters the build — accepted, matching Aurora's
+# footprint; building v1.8.12+ requires a C toolchain.
+kryphocron = "0.3.1"
+kryphocron-lexicons = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }

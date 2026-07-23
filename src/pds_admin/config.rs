@@ -161,6 +161,18 @@ impl Default for RustStreamConfig {
     }
 }
 
+/// Resolved `[pds_admin.rust.kryphocron]` block (v1.8.12, design
+/// §5.1). Minimal by design — one field; speculative knobs belong
+/// to the releases that consume them (v1.8.13+).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustKryphocronConfig {
+    /// Instantiate the decode-only kryphocron codec at boot.
+    /// Default false: Workstream-B consumption is opt-in — a
+    /// cairn-mod pointed at a kryphocron-enabled Aurora doesn't
+    /// build a codec until the operator declares intent (§5.2).
+    pub enabled: bool,
+}
+
 /// Resolved Rust-PDS backend config.
 ///
 /// Built from [`crate::config::PdsAdminRustToml`] by the
@@ -223,6 +235,10 @@ pub struct RustBackendConfig {
     /// the `[pds_admin.rust.stream]` block is absent (stream
     /// dormant).
     pub stream: RustStreamConfig,
+    /// v1.8.12 kryphocron substrate settings. Defaults when the
+    /// `[pds_admin.rust.kryphocron]` block is absent (no codec
+    /// instantiated).
+    pub kryphocron: RustKryphocronConfig,
 }
 
 /// Resolver discriminator for the active backend.
@@ -1082,6 +1098,11 @@ where
         }
     };
 
+    // v1.8.12 kryphocron sub-block resolution lands in Phase 2
+    // (raw-TOML surface); until then the resolved default (codec
+    // off) is the only reachable state.
+    let kryphocron = RustKryphocronConfig::default();
+
     Ok(RustBackendConfig {
         pds_url,
         service_did: toml.service_did.clone(),
@@ -1094,6 +1115,7 @@ where
         pinned_versions,
         verification_persist,
         stream,
+        kryphocron,
     })
 }
 
@@ -2480,6 +2502,7 @@ mod tests {
             enabled: true,
             backend: Some(PdsAdminBackendConfig::Rust(Box::new(RustBackendConfig {
                 stream: RustStreamConfig::default(),
+                kryphocron: RustKryphocronConfig::default(),
                 pds_url: url::Url::parse("https://rust-pds.example.test").unwrap(),
                 service_did: "did:web:cairn-mod.example.test".into(),
                 service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),

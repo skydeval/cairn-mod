@@ -135,6 +135,7 @@ fn backend_config(addr: SocketAddr, required: Vec<String>) -> RustBackendConfig 
         pinned_versions: BTreeMap::new(),
         verification_persist: true,
         stream: cairn_mod::pds_admin::config::RustStreamConfig::default(),
+        kryphocron: cairn_mod::pds_admin::config::RustKryphocronConfig::default(),
     }
 }
 
