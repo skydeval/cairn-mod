@@ -402,7 +402,10 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // carrier). The endpoints ARE SuperAdmin-gated per-account
     // policy mutations at Aurora, audit-chained upstream — but
     // cairn-mod consumes no ops-operator endpoints regardless.
-    ("kryphocron-overrides", CapabilityClassification::AutoAdvance),
+    (
+        "kryphocron-overrides",
+        CapabilityClassification::AutoAdvance,
+    ),
 ];
 
 /// Look up a family's classification in the registry.
@@ -823,7 +826,10 @@ mod cross_release_type_tests {
         );
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[12],
-            ("kryphocron-overrides", CapabilityClassification::AutoAdvance)
+            (
+                "kryphocron-overrides",
+                CapabilityClassification::AutoAdvance
+            )
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that

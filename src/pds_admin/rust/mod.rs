@@ -1965,6 +1965,28 @@ mod tests {
     }
 
     #[test]
+    fn kryphocron_codec_absent_when_disabled() {
+        // v1.8.12 §9.1: default config (enabled = false) builds no
+        // codec — the None state is what probe reports as
+        // "operator declined".
+        let backend = backend_with_test_key("https://pds.example.com");
+        assert!(backend.kryphocron_codec.is_none());
+    }
+
+    #[test]
+    fn kryphocron_codec_built_when_enabled_and_reports_laquna_0_2() {
+        // v1.8.12 §9.2: enabled = true -> Some(Codec) at boot
+        // (pure, infallible), and the instance reports the codec
+        // id v1.8.13's skew check will compare against.
+        use kryphocron::ContentCodec as _;
+        let mut config = fixture_config("https://pds.example.com", "CAIRN_SERVICE_SIGNING_KEY");
+        config.kryphocron.enabled = true;
+        let backend = RustBackend::new_with_key_source(&config, &key_env(TEST_KEY_HEX)).unwrap();
+        let codec = backend.kryphocron_codec.as_ref().expect("codec built");
+        assert_eq!(codec.codec_id().as_str(), "laquna/0.2");
+    }
+
+    #[test]
     fn construction_succeeds_from_valid_config() {
         let backend = backend_with_test_key("https://pds.example.com");
         assert_eq!(backend.service_did, "did:web:cairn-mod.example.com");

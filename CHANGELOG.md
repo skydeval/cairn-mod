@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.12 kryphocron substrate wiring
+- New dependencies: `kryphocron` 0.3.1 and `kryphocron-lexicons`
+  0.3, matching Aurora-Locus's pins. Note for operators building
+  from source: kryphocron unconditionally depends on `zstd`
+  (C libzstd via `zstd-sys`), so building cairn-mod now requires
+  a C toolchain — the same footprint as building Aurora itself.
+- The kryphocron codec is instantiated at boot when the new
+  `[pds_admin.rust.kryphocron]` block sets `enabled = true`
+  (default `false`). Wiring and detection only: the codec is
+  never invoked at this release — decode of private content
+  begins with the report-flow work in a later release, and
+  nothing is decoded without this explicit opt-in.
+- Three new capability registry entries for Aurora's kryphocron
+  surfaces: `kryphocron-read` (operator-opt-in — it gates decode
+  of private content), `kryphocron-rotation` and
+  `kryphocron-overrides` (auto-advance — neither returns encoded
+  content). No endpoints under any of the three are consumed yet.
+- `cairn pds-admin probe` now reports kryphocron substrate state
+  when enabled: codec id (`laquna/0.2`), seed policy
+  (`DidNsidRkey`), and decode readiness. When disabled, the probe
+  distinguishes "advertised by the PDS but operator declined"
+  from "codec ready"; `--json` carries the state under the new
+  `kryphocron` key (null when disabled).
+
 ## [1.8.0] - 2026-07-22
 
 The v1.8 series ships as one release: the Rust-PDS (Aurora-Locus)

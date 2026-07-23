@@ -3147,3 +3147,34 @@ async fn probe_match_report_all_families_match_against_consolidated_fixture() {
         vec!["queue-stats-v1".to_string()]
     );
 }
+
+#[tokio::test]
+async fn probe_kryphocron_state_reflects_operator_opt_in() {
+    // v1.8.12 §9.4: the ProbeReport.kryphocron Option tracks the
+    // operator's [pds_admin.rust.kryphocron].enabled choice — None
+    // means "operator declined" even though the canonical fixture
+    // advertises all three kryphocron families.
+    let (addr, _state) = spawn_mock_aurora(MockAuroraBehavior {
+        status: StatusCode::OK,
+        body: canonical_body(),
+    })
+    .await;
+
+    // Disabled (default config): no codec, no kryphocron section.
+    let backend = backend_against(addr, Vec::new());
+    let report = backend.probe().await.expect("probe succeeds");
+    assert!(report.kryphocron.is_none());
+
+    // Enabled: codec built at construction; probe reports its
+    // state alongside the unchanged existing fields.
+    let mut config = backend_config(addr, Vec::new());
+    config.kryphocron.enabled = true;
+    let backend = RustBackend::new_with_key_source(&config, &|_| Ok(TEST_KEY_HEX.to_string()))
+        .expect("backend constructs");
+    let report = backend.probe().await.expect("probe succeeds");
+    assert_eq!(report.backend_name, "rust");
+    let k = report.kryphocron.expect("kryphocron state present");
+    assert_eq!(k.codec_id, "laquna/0.2");
+    assert_eq!(k.seed_policy, "DidNsidRkey");
+    assert!(k.decode_ready);
+}

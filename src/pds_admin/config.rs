@@ -2341,6 +2341,45 @@ mod tests {
     }
 
     #[test]
+    fn rust_kryphocron_block_absent_resolves_disabled() {
+        // v1.8.12 §9.7: absent [pds_admin.rust.kryphocron] block
+        // -> enabled defaults false (no codec at boot).
+        let cfg = config_with_rust(rust_toml());
+        let policy = from_config_rust_test(&cfg).expect("valid config resolves");
+        let Some(PdsAdminBackendConfig::Rust(rust)) = policy.backend else {
+            panic!("expected rust backend");
+        };
+        assert!(!rust.kryphocron.enabled);
+    }
+
+    #[test]
+    fn rust_kryphocron_enabled_true_resolves_enabled() {
+        let mut t = rust_toml();
+        t.kryphocron = Some(crate::config::PdsAdminKryphocronToml {
+            enabled: Some(true),
+        });
+        let cfg = config_with_rust(t);
+        let policy = from_config_rust_test(&cfg).expect("valid config resolves");
+        let Some(PdsAdminBackendConfig::Rust(rust)) = policy.backend else {
+            panic!("expected rust backend");
+        };
+        assert!(rust.kryphocron.enabled);
+    }
+
+    #[test]
+    fn kryphocron_toml_unknown_key_rejected_at_deserialization() {
+        // deny_unknown_fields fires at the serde layer (figment,
+        // before the resolver runs) — same posture as the mirrored
+        // v1.8.8 stream sub-block. Speculative keys (decode scope,
+        // audit flags, ...) belong to v1.8.13+.
+        let err = serde_json::from_value::<crate::config::PdsAdminKryphocronToml>(
+            serde_json::json!({"enabled": true, "decode_scope": "all"}),
+        )
+        .expect_err("unknown key rejects");
+        assert!(format!("{err}").contains("decode_scope"), "{err}");
+    }
+
+    #[test]
     fn rust_removed_oauth_fields_reject_with_migration_error() {
         // Each removed key errors individually, naming the key and
         // the service-auth replacements (§4.5 migration path).
