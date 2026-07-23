@@ -1158,6 +1158,9 @@ impl PdsAdminBackend for OzoneBackend {
                 pds_url: self.base_url.as_str().to_string(),
                 detected_version: None,
                 capabilities: Vec::new(),
+                // kryphocron is a Rust-backend (Aurora) substrate;
+                // the bsky-PDS backend never instantiates a codec.
+                kryphocron: None,
             }),
             Ok(_) | Err(_) => Err(BackendError::Terminal(
                 "[sub_classification=RemoteError code=InvalidResponse] \

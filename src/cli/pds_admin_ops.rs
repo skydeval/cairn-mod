@@ -483,6 +483,14 @@ pub async fn probe(config: &Config, json: bool) -> Result<String, CliError> {
             "advertised": report.capabilities,
             "match": matches,
             "allShippedFamiliesMatch": matches.all_match(),
+            // null when [pds_admin.rust.kryphocron].enabled = false
+            // (or on the ozone backend) — the operator-declined
+            // state, distinct from codec-ready (v1.8.12 §7.2).
+            "kryphocron": report.kryphocron.as_ref().map(|k| serde_json::json!({
+                "codecId": k.codec_id,
+                "seedPolicy": k.seed_policy,
+                "decodeReady": k.decode_ready,
+            })),
         }))
         .unwrap_or_else(|e| format!("{{\"error\": \"render: {e}\"}}")));
     }
@@ -517,6 +525,17 @@ pub async fn probe(config: &Config, json: bool) -> Result<String, CliError> {
         for f in &matches.registered_not_advertised {
             out.push_str(&format!("  {f}\n"));
         }
+    }
+    // Rendered only when the operator enabled the kryphocron
+    // sub-block — absence means "operator declined", even when the
+    // upstream advertises kryphocron families (v1.8.12 §7.2).
+    if let Some(k) = &report.kryphocron {
+        out.push_str(&format!(
+            "kryphocron: codec {} / seed policy {} / decode {}\n",
+            k.codec_id,
+            k.seed_policy,
+            if k.decode_ready { "ready" } else { "not ready" },
+        ));
     }
     out.push_str(&if matches.all_match() {
         "verdict: all shipped families match".to_string()

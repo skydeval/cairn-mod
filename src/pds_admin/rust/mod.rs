@@ -49,8 +49,8 @@ use kryphocron::codec::laquna::Codec as KryphocronCodec;
 use url::Url;
 
 use super::backend::{
-    BackendActionId, BackendError, BackendInitError, LABEL_BRIDGE_INVARIANT_REASON,
-    PdsAdminBackend, ProbeReport,
+    BackendActionId, BackendError, BackendInitError, KryphocronProbeState,
+    LABEL_BRIDGE_INVARIANT_REASON, PdsAdminBackend, ProbeReport,
 };
 use super::config::RustBackendConfig;
 use super::ozone::{OzoneBackend, decode_xrpc_error_envelope, parse_retry_after_seconds};
@@ -214,9 +214,8 @@ pub struct RustBackend {
     /// Decode-only kryphocron codec (v1.8.12). Instantiated when
     /// `[pds_admin.rust.kryphocron].enabled = true`; None otherwise.
     /// Never invoked at v1.8.12 (wiring + detection only); consumed
-    /// from v1.8.13. Pure construction — no I/O.
-    // dead_code lifted in Phase 3 when probe() reads the field.
-    #[allow(dead_code)]
+    /// from v1.8.13. Pure construction — no I/O. `probe()` surfaces
+    /// its state through [`KryphocronProbeState`].
     kryphocron_codec: Option<KryphocronCodec>,
 }
 
@@ -1910,6 +1909,18 @@ impl PdsAdminBackend for RustBackend {
             pds_url: self.pds_url.as_str().to_string(),
             detected_version: Some(parsed.version),
             capabilities: fresh.advertised_strings().to_vec(),
+            kryphocron: self.kryphocron_codec.as_ref().map(|codec| {
+                // `codec_id()` is the `ContentCodec` trait method
+                // (returns `CodecId`; "laquna/0.2" at kryphocron
+                // 0.3.1). `seed_policy` is the by-construction
+                // default — the instance doesn't expose it back.
+                use kryphocron::ContentCodec as _;
+                KryphocronProbeState {
+                    codec_id: codec.codec_id().as_str().to_string(),
+                    seed_policy: "DidNsidRkey",
+                    decode_ready: true,
+                }
+            }),
         })
     }
 }

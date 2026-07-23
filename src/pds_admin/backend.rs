@@ -565,6 +565,39 @@ pub struct ProbeReport {
     /// `"label-emit"`, etc.; the runtime can then short-circuit
     /// dispatch entries the backend doesn't claim to support.
     pub capabilities: Vec<String>,
+
+    /// v1.8.12: present when kryphocron consumption is enabled.
+    /// `None` when `[pds_admin.rust.kryphocron].enabled = false`,
+    /// even if the upstream advertises kryphocron capabilities —
+    /// the `Option` state is how probe output distinguishes
+    /// "advertised but operator declined" from "advertised and
+    /// codec-ready" (design §7.1). Always `None` for
+    /// `OzoneBackend`.
+    pub kryphocron: Option<KryphocronProbeState>,
+}
+
+/// Kryphocron substrate state surfaced through [`ProbeReport`]
+/// (v1.8.12, design §7.1). Detection only — the codec this
+/// reports on is instantiated at boot but never invoked until
+/// v1.8.13's decode work.
+#[derive(Debug, Clone)]
+pub struct KryphocronProbeState {
+    /// Codec identifier from the instantiated codec —
+    /// `"laquna/0.2"` at kryphocron 0.3.1 (stable across
+    /// byte-compatible laquna-internals bumps; v1.8.13's skew
+    /// check compares stored `encodedContentCodec` against it).
+    pub codec_id: String,
+    /// Seed-derivation policy the codec was constructed with.
+    /// v1.8.12 always builds `Codec::default()`, whose policy is
+    /// `DidNsidRkey`; the policy is not readable back off the
+    /// codec instance, so this reports the by-construction value.
+    pub seed_policy: &'static str,
+    /// Codec built and ready for v1.8.13 decode. Always `true`
+    /// when this struct is present at v1.8.12 (`Codec::default()`
+    /// is infallible); carried explicitly so later releases can
+    /// report constructed-but-not-ready without changing the
+    /// output shape.
+    pub decode_ready: bool,
 }
 
 /// Errors from constructing a backend at startup.
