@@ -300,6 +300,8 @@ pub enum CapabilityClassification {
 // v1.8.8: tools.aurora.admin.* (subscribeModEvents)
 // v1.8.9: tools.aurora.admin.* (instance-metrics, runtime-settings)
 // v1.8.10: tools.aurora.ops.*
+// v1.8.12: tools.aurora.ops.kryphocron.* (three families registered;
+//          no consumer until v1.8.13+ — substrate wiring only)
 ///
 /// `tools.aurora.describeCapabilities` is intentionally NOT a
 /// capability — it's the probe NSID itself, not a feature gated by
@@ -373,6 +375,34 @@ pub static CAPABILITY_CLASSIFICATIONS: &[(&str, CapabilityClassification)] = &[
     // pin gates read AND write; the write mutates PDS-global
     // config under a SuperAdmin floor upstream).
     ("runtime-settings", CapabilityClassification::OperatorOptIn),
+    // Aurora advertises `kryphocron-read-v1` as the single cohort
+    // capability across its ten kryphocron read/control routes
+    // (admin.rs:717-767); registered at v1.8.12, first consumer
+    // v1.8.13+. **OperatorOptIn — the fourth such entry**: the
+    // family gates decode of private content
+    // (`tools.kryphocron.feed.postPrivate` is the sole NSID
+    // carrying `encodedContent`), and content access is consent
+    // territory — operators opt in via
+    // `[pds_admin.rust.pinned_versions]`.
+    ("kryphocron-read", CapabilityClassification::OperatorOptIn),
+    // Aurora advertises `kryphocron-rotation-v1` on
+    // `tools.aurora.ops.kryphocron.triggerRotation`
+    // (admin.rs:708-712); registered at v1.8.12, unconsumed.
+    // AutoAdvance: genuinely pure operational visibility —
+    // rotation state and batch identifiers, no per-account data,
+    // no `encodedContent`.
+    ("kryphocron-rotation", CapabilityClassification::AutoAdvance),
+    // Aurora advertises `kryphocron-overrides-v1` on the two
+    // per-account override routes (getAccountOverrides /
+    // setAccountOverride, admin.rs:769-782); registered at
+    // v1.8.12, unconsumed. AutoAdvance on the precise basis
+    // (design §4.2, R1 S-1): this family's OperatorOptIn axis is
+    // decode of private content, and neither overrides endpoint
+    // returns `encodedContent` (`postPrivate` is the sole
+    // carrier). The endpoints ARE SuperAdmin-gated per-account
+    // policy mutations at Aurora, audit-chained upstream — but
+    // cairn-mod consumes no ops-operator endpoints regardless.
+    ("kryphocron-overrides", CapabilityClassification::AutoAdvance),
 ];
 
 /// Look up a family's classification in the registry.
@@ -734,9 +764,15 @@ mod cross_release_type_tests {
         // entry AND the first runtime consumer of the
         // classification; v1.8.8 adds mod-events-stream (second
         // OperatorOptIn); v1.8.9 adds instance-metrics
-        // (AutoAdvance) + runtime-settings (third OperatorOptIn).
+        // (AutoAdvance) + runtime-settings (third OperatorOptIn);
+        // v1.8.12 adds the three kryphocron substrate families —
+        // kryphocron-read (fourth OperatorOptIn: gates decode of
+        // private content) + kryphocron-rotation and
+        // kryphocron-overrides (AutoAdvance: neither returns
+        // encodedContent) — registered ahead of their first
+        // consumer (v1.8.13+).
         // Entries are suffix-less family names.
-        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 10);
+        assert_eq!(CAPABILITY_CLASSIFICATIONS.len(), 13);
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[0],
             ("mod-events-emit", CapabilityClassification::AutoAdvance)
@@ -776,6 +812,18 @@ mod cross_release_type_tests {
         assert_eq!(
             CAPABILITY_CLASSIFICATIONS[9],
             ("runtime-settings", CapabilityClassification::OperatorOptIn)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[10],
+            ("kryphocron-read", CapabilityClassification::OperatorOptIn)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[11],
+            ("kryphocron-rotation", CapabilityClassification::AutoAdvance)
+        );
+        assert_eq!(
+            CAPABILITY_CLASSIFICATIONS[12],
+            ("kryphocron-overrides", CapabilityClassification::AutoAdvance)
         );
         // No entry may carry a version suffix — classification_for
         // exact-matches on the suffix-less family that

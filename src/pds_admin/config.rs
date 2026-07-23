@@ -1098,10 +1098,17 @@ where
         }
     };
 
-    // v1.8.12 kryphocron sub-block resolution lands in Phase 2
-    // (raw-TOML surface); until then the resolved default (codec
-    // off) is the only reachable state.
-    let kryphocron = RustKryphocronConfig::default();
+    // v1.8.12 kryphocron sub-block (design §5.1). Defaults when
+    // absent; an unknown key under the block fails serde's
+    // deny_unknown_fields at the figment layer before this
+    // resolver runs, surfaced as the standard config parse error.
+    let kryphocron = RustKryphocronConfig {
+        enabled: toml
+            .kryphocron
+            .as_ref()
+            .and_then(|k| k.enabled)
+            .unwrap_or(false),
+    };
 
     Ok(RustBackendConfig {
         pds_url,
@@ -2072,6 +2079,7 @@ mod tests {
     fn rust_toml() -> crate::config::PdsAdminRustToml {
         crate::config::PdsAdminRustToml {
             stream: None,
+            kryphocron: None,
             url: "https://rust-pds.example.test".into(),
             service_did: "did:web:cairn-mod.example.test".into(),
             service_signing_key_env: "RUST_SERVICE_SIGNING_KEY".into(),

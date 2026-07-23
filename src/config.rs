@@ -356,6 +356,11 @@ pub struct PdsAdminRustToml {
     /// (stream dormant).
     #[serde(default)]
     pub stream: Option<PdsAdminStreamToml>,
+    /// v1.8.12 kryphocron substrate sub-block
+    /// (`[pds_admin.rust.kryphocron]`). Absent = all defaults
+    /// (no codec instantiated).
+    #[serde(default)]
+    pub kryphocron: Option<PdsAdminKryphocronToml>,
     /// REMOVED in v1.8.1 (OAuth → service-auth rewrite).
     /// Accepted at the serde layer only so config load can
     /// reject it with a migration error naming the key.
@@ -425,6 +430,19 @@ pub struct PdsAdminStreamToml {
     /// (a bare 1000 is treated as intended shutdown).
     #[serde(default)]
     pub reconnect_on_normal_close: Option<bool>,
+}
+
+/// Raw `[pds_admin.rust.kryphocron]` sub-block (v1.8.12, design
+/// §5.1). One field by design — speculative knobs belong to the
+/// releases that consume them (v1.8.13+). Defaults resolve in
+/// `validated_rust_from_toml` (no codec unless `enabled = true`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdsAdminKryphocronToml {
+    /// Instantiate the decode-only kryphocron codec at boot.
+    /// Default false (Workstream-B consumption is opt-in).
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 /// One entry in [`PdsAdminConfigToml::action_map`]. v1.7's TOML

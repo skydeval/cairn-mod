@@ -535,7 +535,7 @@ mod probe_tests {
 
     #[test]
     fn match_report_full_registry_matches() {
-        // All 10 registered families advertised (+ one unknown).
+        // All 13 registered families advertised (+ one unknown).
         let advertised: Vec<String> = [
             "mod-events-emit-v1",
             "moderator-activity-v1",
@@ -547,13 +547,16 @@ mod probe_tests {
             "mod-events-stream-v1",
             "instance-metrics-v1",
             "runtime-settings-v1",
+            "kryphocron-read-v1",
+            "kryphocron-rotation-v1",
+            "kryphocron-overrides-v1",
             "queue-stats-v1",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         let r = CapabilityMatchReport::build(&advertised);
-        assert_eq!(r.advertised_and_registered.len(), 10);
+        assert_eq!(r.advertised_and_registered.len(), 13);
         assert_eq!(r.advertised_not_registered, vec!["queue-stats-v1"]);
         assert!(r.registered_not_advertised.is_empty());
         assert!(r.all_match());
@@ -565,6 +568,6 @@ mod probe_tests {
         let r = CapabilityMatchReport::build(&advertised);
         assert!(!r.all_match());
         assert_eq!(r.advertised_and_registered, vec!["mod-events-emit"]);
-        assert_eq!(r.registered_not_advertised.len(), 9);
+        assert_eq!(r.registered_not_advertised.len(), 12);
     }
 }

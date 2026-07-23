@@ -76,6 +76,9 @@ fn canonical_body() -> String {
             {"name": "mod-events-stream-v1"},
             {"name": "instance-metrics-v1"},
             {"name": "runtime-settings-v1"},
+            {"name": "kryphocron-read-v1"},
+            {"name": "kryphocron-rotation-v1"},
+            {"name": "kryphocron-overrides-v1"},
             {"name": "queue-stats-v1", "value": {"note": "placeholder"}}
         ],
         "implementation": "aurora-locus",
@@ -177,6 +180,9 @@ async fn probe_end_to_end_against_canonical_mock_aurora() {
             "mod-events-stream-v1".to_string(),
             "instance-metrics-v1".to_string(),
             "runtime-settings-v1".to_string(),
+            "kryphocron-read-v1".to_string(),
+            "kryphocron-rotation-v1".to_string(),
+            "kryphocron-overrides-v1".to_string(),
             "queue-stats-v1".to_string(),
         ]
     );
@@ -3123,9 +3129,9 @@ async fn ops_read_unshipped_endpoint_maps_terminal_404() {
 
 #[tokio::test]
 async fn probe_match_report_all_families_match_against_consolidated_fixture() {
-    // v1.8.11 item 5+8 coordinate: the consolidated canonical
-    // fixture advertises all 10 registered families, so the probe
-    // match report is all-match end-to-end.
+    // v1.8.11 item 5+8 coordinate (extended at v1.8.12): the
+    // consolidated canonical fixture advertises all 13 registered
+    // families, so the probe match report is all-match end-to-end.
     let (addr, _state) = spawn_mock_aurora(MockAuroraBehavior {
         status: StatusCode::OK,
         body: canonical_body(),
@@ -3135,7 +3141,7 @@ async fn probe_match_report_all_families_match_against_consolidated_fixture() {
     let report = backend.probe().await.expect("probe succeeds");
     let matches = cairn_mod::cli::pds_admin_ops::CapabilityMatchReport::build(&report.capabilities);
     assert!(matches.all_match(), "{matches:?}");
-    assert_eq!(matches.advertised_and_registered.len(), 10);
+    assert_eq!(matches.advertised_and_registered.len(), 13);
     assert_eq!(
         matches.advertised_not_registered,
         vec!["queue-stats-v1".to_string()]
