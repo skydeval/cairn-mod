@@ -2158,8 +2158,8 @@ mod tests {
         toml.kryphocron = Some(crate::config::PdsAdminKryphocronToml {
             enabled: Some(true),
         });
-        let resolved = validated_rust_from_toml(&toml, &rust_env_reader)
-            .expect("pin + enabled is coherent");
+        let resolved =
+            validated_rust_from_toml(&toml, &rust_env_reader).expect("pin + enabled is coherent");
         assert!(resolved.kryphocron.enabled);
     }
 

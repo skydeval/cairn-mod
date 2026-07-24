@@ -42,6 +42,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use k256::ecdsa::SigningKey;
 // v1.8.12 substrate wiring (design §3.1): alias so the fully-
 // qualified vendored-module path appears once.
@@ -49,8 +50,9 @@ use kryphocron::codec::laquna::Codec as KryphocronCodec;
 use url::Url;
 
 use super::backend::{
-    BackendActionId, BackendError, BackendInitError, GetRecordResponse, KryphocronProbeState,
-    LABEL_BRIDGE_INVARIANT_REASON, PdsAdminBackend, ProbeReport,
+    BackendActionId, BackendError, BackendInitError, DecodeSource, DecodedRecord,
+    GetRecordResponse, KryphocronDecodeError, KryphocronProbeState, LABEL_BRIDGE_INVARIANT_REASON,
+    PdsAdminBackend, ProbeReport,
 };
 use super::config::RustBackendConfig;
 use super::ozone::{OzoneBackend, decode_xrpc_error_envelope, parse_retry_after_seconds};
@@ -65,11 +67,6 @@ use service_auth::{mint_service_auth_jwt, validate_did_syntax};
 /// on [`super::types::CAPABILITY_CLASSIFICATIONS`]); it's the transport for
 /// capability negotiation.
 const DESCRIBE_CAPABILITIES_NSID: &str = "tools.aurora.describeCapabilities";
-
-/// The sole kryphocron record NSID that carries `encodedContent`
-/// (v1.8.13). `get_record` gates on the `kryphocron-read` opt-in
-/// when the requested collection matches this.
-const KRYPHOCRON_POST_PRIVATE_NSID: &str = "tools.kryphocron.feed.postPrivate";
 
 /// NSID of the unified moderation-action endpoint (v1.8.2, §4.3).
 const EMIT_EVENT_NSID: &str = "tools.aurora.admin.emitEvent";
@@ -700,6 +697,61 @@ impl RustBackend {
             .map_err(OzoneBackend::map_reqwest_error)?;
         serde_json::from_slice(&body_bytes)
             .map_err(|e| BackendError::Transient(format!("{nsid} response parse: {e}")))
+    }
+
+    /// Authenticated `com.atproto.repo.getRecord` fetch (v1.8.13). A
+    /// private RustBackend helper (demoted from a trait method after
+    /// the decode-home decision — see the decode-wiring addendum);
+    /// callable only from `get_and_decode_kryphocron_record`, which
+    /// owns the opt-in gate and the decode. A standard atproto repo
+    /// read, NOT a `tools.aurora.ops.kryphocron.*` endpoint. The NSID
+    /// is fixed; `repo`/`collection`/`rkey` ride the query string.
+    async fn get_record(
+        &self,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<GetRecordResponse, BackendError> {
+        const NSID: &str = "com.atproto.repo.getRecord";
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            NSID,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let url = self.xrpc_url(NSID)?;
+        let response = self
+            .client
+            .get(url)
+            .query(&[("repo", repo), ("collection", collection), ("rkey", rkey)])
+            .bearer_auth(&jwt)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(
+                status,
+                &body_bytes,
+                retry_after,
+            ));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("{NSID} response parse: {e}")))
     }
 
     /// Construct the full URL for an XRPC method. Same shape as
@@ -1929,57 +1981,154 @@ impl PdsAdminBackend for RustBackend {
         })
     }
 
-    async fn get_record(
+    async fn get_and_decode_kryphocron_record(
         &self,
         repo: &str,
         collection: &str,
         rkey: &str,
-    ) -> Result<GetRecordResponse, BackendError> {
-        // Gate on the kryphocron-read opt-in when reading a private
-        // kryphocron record. v1.8.13 only calls this for
-        // `tools.kryphocron.feed.postPrivate`, but the gate is scoped
-        // to kryphocron collections so a future non-kryphocron repo
-        // read wouldn't require the opt-in.
-        if collection == KRYPHOCRON_POST_PRIVATE_NSID {
-            self.require_opt_in("kryphocron-read", "kryphocron-read-v1")?;
+    ) -> Result<DecodedRecord, BackendError> {
+        // Opt-in gate: private-content decode is a deliberate operator
+        // choice (kryphocron-read is OperatorOptIn).
+        self.require_opt_in("kryphocron-read", "kryphocron-read-v1")?;
+
+        let response = self.get_record(repo, collection, rkey).await?;
+        let value = &response.value;
+
+        // Authorized read: Aurora already server-side-decoded to `text`.
+        if let Some(text) = value.get("text").and_then(|t| t.as_str()) {
+            return Ok(DecodedRecord {
+                plaintext: text.to_string(),
+                decode_source: DecodeSource::AuroraServer,
+            });
         }
 
-        const NSID: &str = "com.atproto.repo.getRecord";
-        let jwt = mint_service_auth_jwt(
-            &self.signing_key,
-            &self.service_did,
-            &self.target_service_did,
-            NSID,
-            3600,
-        )
-        .map_err(|e| BackendError::Auth(e.to_string()))?;
+        // Unauthorized read (the normal case): decode `encodedContent`
+        // client-side.
+        let encoded_b64 = value
+            .get("encodedContent")
+            .and_then(|e| e.get("$bytes"))
+            .and_then(|b| b.as_str())
+            .ok_or_else(|| {
+                BackendError::Terminal(
+                    "getRecord returned neither `text` nor `encodedContent.$bytes`; \
+                     not a decodable kryphocron record"
+                        .to_string(),
+                )
+            })?;
+        let stored_codec = value
+            .get("encodedContentCodec")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| {
+                BackendError::Terminal(
+                    "getRecord `encodedContent` present but `encodedContentCodec` missing"
+                        .to_string(),
+                )
+            })?;
+        let generation = value
+            .get("encodedContentGeneration")
+            .and_then(|g| g.as_str());
 
-        let url = self.xrpc_url(NSID)?;
-        let response = self
-            .client
-            .get(url)
-            .query(&[("repo", repo), ("collection", collection), ("rkey", rkey)])
-            .bearer_auth(&jwt)
-            .send()
-            .await
-            .map_err(OzoneBackend::map_reqwest_error)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(parse_retry_after_seconds);
-            let body_bytes = response.bytes().await.unwrap_or_default();
-            return Err(map_rust_backend_http_error(status, &body_bytes, retry_after));
+        // Codec-id skew pre-check (LB-3): Aurora never surfaces a 410 to
+        // an unauthorized reader, and laquna's `decode` does not verify
+        // the codec id, so the comparison is cairn-mod's own. The codec
+        // is present by the config-coherence invariant (§9): the decode
+        // path only runs when kryphocron-read is pinned, and pinning
+        // without `enabled = true` fails config validation.
+        let codec = self.kryphocron_codec.as_ref().expect(
+            "config validation guarantees the kryphocron codec is present when \
+             kryphocron-read is pinned (v1.8.13 §9)",
+        );
+        let installed = {
+            use kryphocron::ContentCodec as _;
+            codec.codec_id().as_str().to_string()
+        };
+        if stored_codec != installed {
+            return Err(BackendError::KryphocronDecodeFailed(
+                KryphocronDecodeError::CodecIdUnknown {
+                    stored: stored_codec.to_string(),
+                    installed,
+                },
+            ));
         }
 
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(OzoneBackend::map_reqwest_error)?;
-        serde_json::from_slice(&body_bytes)
-            .map_err(|e| BackendError::Transient(format!("{NSID} response parse: {e}")))
+        // Build the decode inputs. `CodecId::new` /
+        // `RotationGenerationMark::new` are fallible; a malformed value
+        // is a structural decode error.
+        let content = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(encoded_b64)
+            .map_err(|e| {
+                BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                    "encodedContent base64: {e}"
+                )))
+            })?;
+        let codec_id = kryphocron::CodecId::new(stored_codec).map_err(|e| {
+            BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                "codec id: {e}"
+            )))
+        })?;
+        let gen_mark = match generation {
+            Some(g) => Some(kryphocron::RotationGenerationMark::new(g).map_err(|e| {
+                BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                    "generation mark: {e}"
+                )))
+            })?),
+            None => None,
+        };
+        let encoded_record = kryphocron::EncodedRecord::new(codec_id, content, gen_mark);
+
+        // DecodeContext: coordinates from the record's AT-URI (repo is
+        // the originator DID; collection is the NSID; rkey the record
+        // key). Seed derivation is internal to laquna — we supply only
+        // coordinates. audience_list is not needed for decode.
+        let originator = kryphocron::Did::new(repo).map_err(|e| {
+            BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                "originator did: {e}"
+            )))
+        })?;
+        let nsid = kryphocron::Nsid::new(collection).map_err(|e| {
+            BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                "nsid: {e}"
+            )))
+        })?;
+        let record_key = kryphocron::RecordKey::new(rkey).map_err(|e| {
+            BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                "rkey: {e}"
+            )))
+        })?;
+        // `operator_context` is an empty `SmallVec` — built via
+        // `Default` so cairn-mod needs no direct `smallvec` dependency
+        // (the type is inferred from `DecodeContext::new`'s parameter).
+        let decode_ctx = kryphocron::DecodeContext::new(
+            nsid,
+            record_key,
+            originator,
+            None,
+            kryphocron::TraceId::from_bytes([0; 16]),
+            Default::default(),
+        );
+
+        let deadline = std::time::Instant::now() + self.request_timeout;
+        let plaintext_bytes = {
+            use kryphocron::ContentCodec as _;
+            codec
+                .decode(&encoded_record, &decode_ctx, deadline)
+                .await
+                .map_err(|e| {
+                    BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(
+                        e.to_string(),
+                    ))
+                })?
+        };
+        let plaintext = String::from_utf8(plaintext_bytes).map_err(|e| {
+            BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(format!(
+                "decoded content is not valid UTF-8: {e}"
+            )))
+        })?;
+
+        Ok(DecodedRecord {
+            plaintext,
+            decode_source: DecodeSource::CairnClient,
+        })
     }
 }
 

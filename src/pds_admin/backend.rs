@@ -1345,23 +1345,62 @@ pub trait PdsAdminBackend: Send + Sync {
     /// describe endpoint.
     async fn probe(&self) -> Result<ProbeReport, BackendError>;
 
-    /// Fetch a record via authenticated `com.atproto.repo.getRecord`
-    /// (v1.8.13). A standard atproto repo read — NOT one of the
-    /// `tools.aurora.ops.kryphocron.*` endpoints. Used by the
-    /// report-open flow to retrieve a private kryphocron record
-    /// (`tools.kryphocron.feed.postPrivate`) for client-side decode.
+    /// Fetch a private kryphocron record and return its plaintext
+    /// (v1.8.13). Called at report-ingest when a report's subject is a
+    /// `tools.kryphocron.feed.postPrivate` record; the decoded
+    /// plaintext is persisted on the report row so report-open is a
+    /// pure read (no backend reach).
     ///
-    /// The Rust backend gates entry on the `kryphocron-read` opt-in
-    /// **when the collection is a kryphocron NSID** (a standard
-    /// non-kryphocron read would not be gated, though v1.8.13 only
-    /// calls this for kryphocron records). `OzoneBackend` returns
+    /// The Rust backend: gates on the `kryphocron-read` opt-in, issues
+    /// authenticated `com.atproto.repo.getRecord`, then branches — an
+    /// authorized read returns server-side-decoded `text`
+    /// ([`DecodeSource::AuroraServer`]); the normal unauthorized read
+    /// returns `encodedContent`, which cairn-mod client-side-decodes
+    /// with its installed `laquna/0.2` codec after a codec-id skew
+    /// pre-check ([`DecodeSource::CairnClient`]). The combined
+    /// fetch+decode lives in one method because the codec is private
+    /// to the Rust backend. `OzoneBackend` returns
     /// [`BackendError::Unsupported`].
-    async fn get_record(
+    async fn get_and_decode_kryphocron_record(
         &self,
         repo: &str,
         collection: &str,
         rkey: &str,
-    ) -> Result<GetRecordResponse, BackendError>;
+    ) -> Result<DecodedRecord, BackendError>;
+}
+
+/// Which decode path produced a [`DecodedRecord`] (v1.8.13).
+/// Persisted to `reports.decode_source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeSource {
+    /// Aurora returned server-side-decoded `text` (the requester was
+    /// authorized on the record's audience — rare for cairn-mod).
+    AuroraServer,
+    /// cairn-mod client-side-decoded `encodedContent` with its
+    /// installed codec (the normal unauthorized-read path).
+    CairnClient,
+}
+
+impl DecodeSource {
+    /// Wire string persisted to `reports.decode_source` (matches the
+    /// migration 0014 CHECK constraint values).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AuroraServer => "aurora_server",
+            Self::CairnClient => "cairn_client",
+        }
+    }
+}
+
+/// A decoded private kryphocron record (v1.8.13). The plaintext is
+/// persisted to `reports.decoded_plaintext`, the source to
+/// `reports.decode_source`.
+#[derive(Debug, Clone)]
+pub struct DecodedRecord {
+    /// Decoded record plaintext.
+    pub plaintext: String,
+    /// Which path produced [`Self::plaintext`].
+    pub decode_source: DecodeSource,
 }
 
 #[cfg(test)]
@@ -1576,9 +1615,7 @@ mod tests {
                 "ArchitecturallyForbidden",
             ),
             (
-                BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(
-                    "x".into(),
-                )),
+                BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError("x".into())),
                 "KryphocronDecodeFailed",
             ),
         ];

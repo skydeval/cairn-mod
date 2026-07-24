@@ -178,7 +178,7 @@ async fn spawn_full() -> FullHarness {
         db_path: path.clone(),
         ..CreateReportConfig::default()
     };
-    let cr_router = create_report_router(pool.clone(), auth_ctx(), create_cfg);
+    let cr_router = create_report_router(pool.clone(), auth_ctx(), create_cfg, None);
     let adm_router = admin_router(
         pool.clone(),
         writer.clone(),

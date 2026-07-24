@@ -3178,3 +3178,237 @@ async fn probe_kryphocron_state_reflects_operator_opt_in() {
     assert_eq!(k.seed_policy, "DidNsidRkey");
     assert!(k.decode_ready);
 }
+
+// =========================================================================
+// v1.8.13 report-flow: get_and_decode_kryphocron_record round-trip
+// =========================================================================
+
+/// Build a kryphocron-enabled backend config that pins `kryphocron-read`
+/// (so `require_opt_in` passes) and turns the codec on.
+fn kryphocron_backend_config(addr: SocketAddr) -> RustBackendConfig {
+    let mut cfg = backend_config(addr, vec!["kryphocron-read-v1".into()]);
+    cfg.pinned_versions
+        .insert("kryphocron-read".into(), "v1".into());
+    cfg.kryphocron = cairn_mod::pds_admin::config::RustKryphocronConfig { enabled: true };
+    cfg
+}
+
+/// A `getRecord` body carrying `encodedContent` under the installed
+/// `laquna/0.2` codec. The bytes here are arbitrary (not a valid laquna
+/// artifact) — used to drive the decode *construction + invocation + error
+/// mapping* path: laquna returns `Malformed` for non-artifact bytes, which
+/// cairn-mod maps to `KryphocronDecodeError::CodecError`.
+///
+/// A true encode→decode round-trip over *valid* laquna bytes is not
+/// constructible from cairn-mod's test crate: `EncodeContext` is
+/// `#[non_exhaustive]` with no public constructor, so only kryphocron/host
+/// code can produce encoded content. That round-trip is covered by
+/// kryphocron's own `default_codec_round_trips`; a golden-vector test here
+/// is tracked as a follow-up (see the impl chainlink note).
+fn encoded_get_record_body(did: &str, collection: &str, rkey: &str, encoded_b64: &str) -> String {
+    json!({
+        "uri": format!("at://{did}/{collection}/{rkey}"),
+        "cid": "bafyreiexamplecid",
+        "value": {
+            "$type": collection,
+            "audienceList": "at://did:plc:audience/tools.kryphocron.policy.audience/self",
+            "createdAt": "2026-07-24T00:00:00.000Z",
+            "encodedContent": { "$bytes": encoded_b64 },
+            "encodedContentCodec": "laquna/0.2",
+            "encodedContentGeneration": "laquna/00000000001700000000/5a5a",
+        }
+    })
+    .to_string()
+}
+
+#[derive(Clone)]
+struct GetRecordMock {
+    body: String,
+}
+
+async fn get_record_handler(State(state): State<Arc<GetRecordMock>>) -> Response {
+    (StatusCode::OK, state.body.clone()).into_response()
+}
+
+async fn spawn_get_record_mock(body: String) -> SocketAddr {
+    let state = Arc::new(GetRecordMock { body });
+    let desc_state = Arc::new(MockAuroraState {
+        behavior: MockAuroraBehavior {
+            status: StatusCode::OK,
+            body: json!({
+                "families": {},
+                "extensions": [{"name": "kryphocron-read-v1"}],
+                "implementation": "aurora-locus",
+                "version": "0.10.0"
+            })
+            .to_string(),
+        },
+        last_authorization: Mutex::new(None),
+    });
+    let router = Router::new()
+        .route(
+            "/xrpc/tools.aurora.describeCapabilities",
+            get(describe_capabilities).with_state(desc_state),
+        )
+        .route(
+            "/xrpc/com.atproto.repo.getRecord",
+            get(get_record_handler).with_state(state),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router.into_make_service()).await.ok();
+    });
+    addr
+}
+
+/// The unauthorized path with a matching codec id: cairn-mod passes the
+/// skew pre-check, constructs `EncodedRecord`/`DecodeContext` from the wire
+/// fields, and invokes laquna's `decode`. Non-artifact bytes make laquna
+/// return `Malformed`, which cairn-mod maps to
+/// `KryphocronDecodeError::CodecError` (Terminal-class). This exercises the
+/// full construction + decode-call + error-mapping path. (A round-trip over
+/// *valid* laquna bytes needs a golden vector — see
+/// `encoded_get_record_body`'s note.)
+#[tokio::test]
+async fn get_and_decode_kryphocron_record_decode_error_maps_to_codec_error() {
+    let did = "did:plc:exampleexampleexample";
+    let collection = "tools.kryphocron.feed.postPrivate";
+    let rkey = "3kabcdefghij2";
+
+    // Arbitrary non-artifact bytes under the installed codec id.
+    let body = encoded_get_record_body(did, collection, rkey, "AAAAAAAAAAAAAAAA");
+    let addr = spawn_get_record_mock(body).await;
+
+    let backend = RustBackend::new_with_key_source(&kryphocron_backend_config(addr), &|_| {
+        Ok(TEST_KEY_HEX.to_string())
+    })
+    .unwrap();
+    // Probe so the capability set advertises kryphocron-read (require_opt_in
+    // checks both advertisement and pin).
+    backend.probe().await.expect("probe succeeds");
+
+    let err = backend
+        .get_and_decode_kryphocron_record(did, collection, rkey)
+        .await
+        .expect_err("non-artifact bytes fail to decode");
+    assert_eq!(err.variant_name(), "KryphocronDecodeFailed");
+    assert!(
+        matches!(
+            err,
+            BackendError::KryphocronDecodeFailed(
+                cairn_mod::pds_admin::backend::KryphocronDecodeError::CodecError(_)
+            )
+        ),
+        "decode failure maps to CodecError, not CodecIdUnknown"
+    );
+}
+
+/// The authorized path: Aurora returns server-side-decoded `text`, so
+/// cairn-mod uses it directly with `decode_source = aurora_server`.
+#[tokio::test]
+async fn get_and_decode_kryphocron_record_authorized_text_path() {
+    let did = "did:plc:exampleexampleexample";
+    let collection = "tools.kryphocron.feed.postPrivate";
+    let rkey = "3kabcdefghij2";
+    let body = json!({
+        "uri": format!("at://{did}/{collection}/{rkey}"),
+        "cid": "bafyreiexamplecid",
+        "value": {
+            "$type": collection,
+            "audienceList": "at://did:plc:audience/tools.kryphocron.policy.audience/self",
+            "createdAt": "2026-07-24T00:00:00.000Z",
+            "text": "authorized plaintext",
+        }
+    })
+    .to_string();
+    let addr = spawn_get_record_mock(body).await;
+
+    let backend = RustBackend::new_with_key_source(&kryphocron_backend_config(addr), &|_| {
+        Ok(TEST_KEY_HEX.to_string())
+    })
+    .unwrap();
+    backend.probe().await.expect("probe succeeds");
+
+    let decoded = backend
+        .get_and_decode_kryphocron_record(did, collection, rkey)
+        .await
+        .expect("text path succeeds");
+    assert_eq!(decoded.plaintext, "authorized plaintext");
+    assert_eq!(
+        decoded.decode_source,
+        cairn_mod::pds_admin::backend::DecodeSource::AuroraServer
+    );
+}
+
+/// Codec-id skew: a record stored under a different codec id fails the
+/// cairn-mod-side pre-check with CodecIdUnknown (Terminal-class), and decode
+/// is never attempted.
+#[tokio::test]
+async fn get_and_decode_kryphocron_record_codec_skew_is_terminal() {
+    let did = "did:plc:exampleexampleexample";
+    let collection = "tools.kryphocron.feed.postPrivate";
+    let rkey = "3kabcdefghij2";
+    let body = json!({
+        "uri": format!("at://{did}/{collection}/{rkey}"),
+        "cid": "bafyreiexamplecid",
+        "value": {
+            "$type": collection,
+            "audienceList": "at://did:plc:audience/tools.kryphocron.policy.audience/self",
+            "createdAt": "2026-07-24T00:00:00.000Z",
+            "encodedContent": { "$bytes": "AAAA" },
+            "encodedContentCodec": "laquna/9.9",
+            "encodedContentGeneration": "laquna/00000000001700000000/5a5a",
+        }
+    })
+    .to_string();
+    let addr = spawn_get_record_mock(body).await;
+
+    let backend = RustBackend::new_with_key_source(&kryphocron_backend_config(addr), &|_| {
+        Ok(TEST_KEY_HEX.to_string())
+    })
+    .unwrap();
+    backend.probe().await.expect("probe succeeds");
+
+    let err = backend
+        .get_and_decode_kryphocron_record(did, collection, rkey)
+        .await
+        .expect_err("codec skew must fail");
+    assert_eq!(err.variant_name(), "KryphocronDecodeFailed");
+    match err {
+        BackendError::KryphocronDecodeFailed(
+            cairn_mod::pds_admin::backend::KryphocronDecodeError::CodecIdUnknown {
+                stored,
+                installed,
+            },
+        ) => {
+            assert_eq!(stored, "laquna/9.9");
+            assert_eq!(installed, "laquna/0.2");
+        }
+        other => panic!("expected CodecIdUnknown, got {other:?}"),
+    }
+}
+
+/// The opt-in gate: without the `kryphocron-read` pin, the decode path
+/// refuses with CapabilityNotAdvertised (opt-in not taken).
+#[tokio::test]
+async fn get_and_decode_kryphocron_record_requires_opt_in() {
+    let did = "did:plc:exampleexampleexample";
+    let collection = "tools.kryphocron.feed.postPrivate";
+    let rkey = "3kabcdefghij2";
+    let body = encoded_get_record_body(did, collection, rkey, "AAAA");
+    let addr = spawn_get_record_mock(body).await;
+
+    // enabled codec, but NO pin → require_opt_in refuses.
+    let mut cfg = backend_config(addr, vec!["kryphocron-read-v1".into()]);
+    cfg.kryphocron = cairn_mod::pds_admin::config::RustKryphocronConfig { enabled: true };
+    let backend =
+        RustBackend::new_with_key_source(&cfg, &|_| Ok(TEST_KEY_HEX.to_string())).unwrap();
+    backend.probe().await.expect("probe succeeds");
+
+    let err = backend
+        .get_and_decode_kryphocron_record(did, collection, rkey)
+        .await
+        .expect_err("opt-in not taken");
+    assert!(matches!(err, BackendError::CapabilityNotAdvertised(_)));
+}

@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.13 report-flow private-record retrieval
+- First live decode. When a report's subject is a private kryphocron
+  record (`tools.kryphocron.feed.postPrivate`), cairn-mod fetches it at
+  **report-ingest time** via authenticated `com.atproto.repo.getRecord`
+  and decodes it with the installed `laquna/0.2` codec, persisting the
+  plaintext on the report row so report-open stays a pure read. An
+  authorized read (cairn-mod's DID in the record's audience) returns
+  server-side-decoded `text` directly; the normal unauthorized read
+  returns `encodedContent`, which cairn-mod decodes client-side after a
+  codec-id skew pre-check. Consuming this surface requires the operator
+  to opt in by pinning the `kryphocron-read` capability.
+- New backend method `get_and_decode_kryphocron_record` (trait 48 → 49),
+  gated on the `kryphocron-read` opt-in; `OzoneBackend` returns
+  `Unsupported`. The codec-id skew check is cairn-mod's own
+  responsibility — Aurora never surfaces its HTTP-410 codec-unavailable
+  error to an unauthorized reader, and the codec does not self-check —
+  so a stored codec id differing from the installed `laquna/0.2` yields a
+  terminal `KryphocronDecodeFailed { CodecIdUnknown }` without attempting
+  a decode.
+- New `BackendError::KryphocronDecodeFailed` variant (error taxonomy 7 →
+  8) with a two-case inner discriminator: `CodecIdUnknown` (skew) and
+  `CodecError` (any structural decode failure). Terminal-class exit code.
+- New `KryphocronRecord` report subject across every report-subject
+  surface (gateway, CLI, server ingest, server render). Migration 0014
+  rebuilds the `reports` table to extend the `subject_type` CHECK with
+  `kryphocron_record` and add `decode_source` (`aurora_server` /
+  `cairn_client`) and `decoded_plaintext` columns.
+- Boot-time config coherence: pinning `kryphocron-read` without
+  `[pds_admin.rust.kryphocron].enabled = true` now fails config
+  validation, since the pin is meaningless without the codec.
+- Decoded private-tier plaintext is stored at rest on the report row.
+  This is deliberate — laquna is a friction encoding, not
+  confidentiality, so the decoded form crosses no boundary the encoded
+  form didn't; the same moderator-only access and retention as `reason`
+  apply.
+
 ### Added — v1.8.12 kryphocron substrate wiring
 - New dependencies: `kryphocron` 0.3.1 and `kryphocron-lexicons`
   0.3, matching Aurora-Locus's pins. Note for operators building

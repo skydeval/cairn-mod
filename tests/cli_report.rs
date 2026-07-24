@@ -90,6 +90,7 @@ async fn spawn_cairn() -> CairnHarness {
             db_path: db_path.clone(),
             ..CreateReportConfig::default()
         },
+        None,
     );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

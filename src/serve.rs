@@ -151,6 +151,10 @@ where
         );
     }
 
+    // v1.8.13: capture the backend for the create-report router before
+    // `pds_admin_bridge` is moved into the writer spawn below.
+    let create_report_backend = pds_admin_bridge.as_ref().map(|b| b.backend.clone());
+
     let writer = crate::writer::spawn_with_pds_admin(
         pool.clone(),
         key,
@@ -238,6 +242,9 @@ where
             db_path: config.db_path.clone(),
             ..crate::CreateReportConfig::default()
         },
+        // v1.8.13: the Rust-PDS backend (if configured) so a private
+        // kryphocron report can be decoded at ingest.
+        create_report_backend,
     ))
     .merge(subscribe_router(
         pool.clone(),

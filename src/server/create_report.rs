@@ -194,6 +194,11 @@ pub(super) struct AppState {
     pub pool: Pool<Sqlite>,
     pub auth: Arc<AuthContext>,
     pub config: Arc<CreateReportConfig>,
+    /// v1.8.13: optional Rust-PDS backend for decoding private
+    /// kryphocron records at ingest. `None` when no Rust backend is
+    /// configured — kryphocron reports are still filed, without
+    /// decoded plaintext.
+    pub backend: Option<Arc<dyn crate::pds_admin::PdsAdminBackend>>,
 }
 
 /// Build a Router exposing only `/xrpc/com.atproto.moderation.createReport`.
@@ -202,11 +207,13 @@ pub fn create_report_router(
     pool: Pool<Sqlite>,
     auth: Arc<AuthContext>,
     config: CreateReportConfig,
+    backend: Option<Arc<dyn crate::pds_admin::PdsAdminBackend>>,
 ) -> Router {
     let state = AppState {
         pool,
         auth,
         config: Arc::new(config),
+        backend,
     };
     Router::new()
         .route(
@@ -274,6 +281,7 @@ async fn post_handler(
     if trusted {
         return crate::xrpc_gateway::handlers::create_report::dispatch_pds_forwarded_report(
             &state.pool,
+            state.backend.as_ref(),
             &body,
         )
         .await;
@@ -357,7 +365,12 @@ async fn post_handler(
                     );
                 }
             };
-            ("kryphocron_record", did, Some(uri.clone()), Some(cid.clone()))
+            (
+                "kryphocron_record",
+                did,
+                Some(uri.clone()),
+                Some(cid.clone()),
+            )
         }
     };
 
@@ -428,12 +441,21 @@ async fn post_handler(
             );
         }
     };
+    // v1.8.13: decode a private kryphocron subject at ingest, if any.
+    let (decoded_plaintext, decode_source) =
+        crate::xrpc_gateway::handlers::create_report::decode_kryphocron_subject(
+            state.backend.as_ref(),
+            subject_type,
+            subject_uri.as_deref(),
+        )
+        .await;
     let insert_result = sqlx::query_scalar!(
         "INSERT INTO reports (
              created_at, reported_by, reason_type, reason,
-             subject_type, subject_did, subject_uri, subject_cid, status
+             subject_type, subject_did, subject_uri, subject_cid, status,
+             decoded_plaintext, decode_source
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)
          RETURNING id",
         created_at,
         caller.iss,
@@ -443,6 +465,8 @@ async fn post_handler(
         subject_did,
         subject_uri,
         subject_cid,
+        decoded_plaintext,
+        decode_source,
     )
     .fetch_one(&state.pool)
     .await;

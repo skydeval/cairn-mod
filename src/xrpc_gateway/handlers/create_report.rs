@@ -48,6 +48,8 @@
 //! gates, they can keep their PDS off `xrpc_trusted_pdses` and
 //! point clients at the user-direct route instead.
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -57,6 +59,9 @@ use sqlx::{Pool, Sqlite};
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
+
+use crate::pds_admin::PdsAdminBackend;
+use crate::pds_admin::backend::DecodedRecord;
 
 /// `reasonType` allowlist — identical to the user-direct path's
 /// `crate::server::create_report` (the user-direct intake module) allowlist (§F11). Widening
@@ -224,7 +229,11 @@ pub struct ReportView {
 /// caller already verified the JWT and confirmed `iss` membership
 /// in `xrpc_trusted_pdses`; this function trusts that gate fired
 /// upstream.
-pub async fn dispatch_pds_forwarded_report(pool: &Pool<Sqlite>, body: &[u8]) -> Response {
+pub async fn dispatch_pds_forwarded_report(
+    pool: &Pool<Sqlite>,
+    backend: Option<&Arc<dyn PdsAdminBackend>>,
+    body: &[u8],
+) -> Response {
     let req: CreateReportRequest = match serde_json::from_slice(body) {
         Ok(r) => r,
         Err(e) => return invalid_request(format!("malformed request body: {e}")),
@@ -257,7 +266,24 @@ pub async fn dispatch_pds_forwarded_report(pool: &Pool<Sqlite>, body: &[u8]) -> 
         }
     };
 
-    let id = match insert_report(pool, &req, &translated, &created_at).await {
+    // v1.8.13: decode a private kryphocron subject at ingest, if any.
+    let (decoded_plaintext, decode_source) = decode_kryphocron_subject(
+        backend,
+        translated.subject_type,
+        translated.subject_uri.as_deref(),
+    )
+    .await;
+
+    let id = match insert_report(
+        pool,
+        &req,
+        &translated,
+        &created_at,
+        decoded_plaintext.as_deref(),
+        decode_source,
+    )
+    .await
+    {
         Ok(id) => id,
         Err(e) => {
             tracing::error!(
@@ -353,14 +379,17 @@ async fn insert_report(
     req: &CreateReportRequest,
     translated: &TranslatedSubject,
     created_at: &str,
+    decoded_plaintext: Option<&str>,
+    decode_source: Option<&str>,
 ) -> sqlx::Result<i64> {
     let subject_type = translated.subject_type;
     sqlx::query_scalar!(
         r#"INSERT INTO reports (
              created_at, reported_by, reason_type, reason,
-             subject_type, subject_did, subject_uri, subject_cid, status
+             subject_type, subject_did, subject_uri, subject_cid, status,
+             decoded_plaintext, decode_source
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending')
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9, ?10)
          RETURNING id as "id!: i64""#,
         created_at,
         req.reported_by,
@@ -370,6 +399,8 @@ async fn insert_report(
         translated.subject_did,
         translated.subject_uri,
         translated.subject_cid,
+        decoded_plaintext,
+        decode_source,
     )
     .fetch_one(pool)
     .await
@@ -385,6 +416,78 @@ fn rfc3339_now() -> Result<String, ()> {
     let dt = OffsetDateTime::now_utc();
     let formatted = dt.format(&CTS_FORMAT).map_err(|_| ())?;
     Ok(format!("{formatted}Z"))
+}
+
+/// Parse an `at://<did>/<collection>/<rkey>` URI into its three
+/// components. Returns `None` unless all three are present and the
+/// authority is a DID.
+pub(crate) fn parse_at_uri_components(uri: &str) -> Option<(&str, &str, &str)> {
+    let rest = uri.strip_prefix("at://")?;
+    let mut parts = rest.splitn(3, '/');
+    let did = parts.next()?;
+    let collection = parts.next()?;
+    let rkey = parts.next()?;
+    if !did.starts_with("did:") || collection.is_empty() || rkey.is_empty() {
+        return None;
+    }
+    Some((did, collection, rkey))
+}
+
+/// Decode a private kryphocron record at report-ingest time
+/// (v1.8.13, decode-wiring addendum decision #2). Called by both
+/// ingest paths (user-direct and PDS-forwarded) just before the
+/// reports INSERT.
+///
+/// Returns `(decoded_plaintext, decode_source)` to persist on the
+/// row. `(None, None)` for non-kryphocron subjects, or when no Rust
+/// backend is configured (decode is a Rust-PDS capability — the
+/// report is still filed; the moderator sees the encoded metadata
+/// via the subject, just no plaintext). A decode *failure* (skew,
+/// codec error, unsupported backend) is logged and yields
+/// `(None, None)` — the report is filed regardless; the operator
+/// investigates via the logged `KryphocronDecodeFailed`.
+pub(crate) async fn decode_kryphocron_subject(
+    backend: Option<&Arc<dyn PdsAdminBackend>>,
+    subject_type: &str,
+    subject_uri: Option<&str>,
+) -> (Option<String>, Option<&'static str>) {
+    if subject_type != "kryphocron_record" {
+        return (None, None);
+    }
+    let Some(backend) = backend else {
+        tracing::warn!(
+            "kryphocron report filed but no Rust backend configured; \
+             storing without decoded plaintext"
+        );
+        return (None, None);
+    };
+    let Some((repo, collection, rkey)) = subject_uri.and_then(parse_at_uri_components) else {
+        tracing::warn!(
+            subject_uri = ?subject_uri,
+            "kryphocron report subject URI not parseable into repo/collection/rkey; \
+             storing without decoded plaintext"
+        );
+        return (None, None);
+    };
+    match backend
+        .get_and_decode_kryphocron_record(repo, collection, rkey)
+        .await
+    {
+        Ok(DecodedRecord {
+            plaintext,
+            decode_source,
+        }) => (Some(plaintext), Some(decode_source.as_str())),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                error_category = e.variant_name(),
+                repo,
+                collection,
+                "kryphocron report decode failed at ingest; storing without plaintext"
+            );
+            (None, None)
+        }
+    }
 }
 
 fn subject_to_json(s: &ReportSubject) -> Value {
@@ -583,5 +686,46 @@ mod tests {
         );
         assert_eq!(extract_did_from_at_uri("https://x"), None);
         assert_eq!(extract_did_from_at_uri("at://example.com/c/r"), None);
+    }
+
+    #[test]
+    fn parse_at_uri_components_splits_did_collection_rkey() {
+        assert_eq!(
+            parse_at_uri_components("at://did:plc:abc/tools.kryphocron.feed.postPrivate/3krkey"),
+            Some(("did:plc:abc", "tools.kryphocron.feed.postPrivate", "3krkey"))
+        );
+        // rkeys may contain further slashes — only the first two separators
+        // split (splitn(3)); the remainder is the rkey.
+        assert_eq!(
+            parse_at_uri_components("at://did:plc:abc/c/r/e/s/t"),
+            Some(("did:plc:abc", "c", "r/e/s/t"))
+        );
+        // Missing components / non-DID authority / not an at-URI.
+        assert_eq!(parse_at_uri_components("at://did:plc:abc/c"), None);
+        assert_eq!(parse_at_uri_components("at://did:plc:abc/c/"), None);
+        assert_eq!(parse_at_uri_components("at://example.com/c/r"), None);
+        assert_eq!(parse_at_uri_components("https://x/c/r"), None);
+    }
+
+    #[tokio::test]
+    async fn decode_kryphocron_subject_non_kryphocron_is_noop() {
+        // Non-kryphocron subject_type: no decode, no backend needed.
+        let (pt, src) = decode_kryphocron_subject(None, "record", Some("at://did:plc:a/c/r")).await;
+        assert_eq!(pt, None);
+        assert_eq!(src, None);
+    }
+
+    #[tokio::test]
+    async fn decode_kryphocron_subject_no_backend_files_without_plaintext() {
+        // kryphocron subject but no Rust backend configured: the report is
+        // still filed (returns None/None), just without decoded plaintext.
+        let (pt, src) = decode_kryphocron_subject(
+            None,
+            "kryphocron_record",
+            Some("at://did:plc:a/tools.kryphocron.feed.postPrivate/r"),
+        )
+        .await;
+        assert_eq!(pt, None);
+        assert_eq!(src, None);
     }
 }

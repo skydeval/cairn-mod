@@ -1955,14 +1955,15 @@ mod tests {
                 })
         }
 
-        async fn get_record(
+        async fn get_and_decode_kryphocron_record(
             &self,
             _repo: &str,
             _collection: &str,
             _rkey: &str,
-        ) -> std::result::Result<crate::pds_admin::backend::GetRecordResponse, BackendError>
-        {
-            unimplemented!("RecordingBackend test stub: get_record not exercised by dispatch tests")
+        ) -> std::result::Result<crate::pds_admin::backend::DecodedRecord, BackendError> {
+            unimplemented!(
+                "RecordingBackend test stub: get_and_decode_kryphocron_record not exercised"
+            )
         }
     }
 
@@ -3458,14 +3459,15 @@ mod tests {
             unreachable!("test backend does not stub takedown_record")
         }
 
-        async fn get_record(
+        async fn get_and_decode_kryphocron_record(
             &self,
             _repo: &str,
             _collection: &str,
             _rkey: &str,
-        ) -> std::result::Result<crate::pds_admin::backend::GetRecordResponse, BackendError>
-        {
-            unreachable!("SuspensionRecordingBackend test stub: get_record not exercised")
+        ) -> std::result::Result<crate::pds_admin::backend::DecodedRecord, BackendError> {
+            unreachable!(
+                "SuspensionRecordingBackend test stub: get_and_decode_kryphocron_record not exercised"
+            )
         }
     }
 

@@ -206,7 +206,10 @@ mod tests {
         let r = sample(None, "kryphocron_record");
         let detail = project_for_fetch(r);
         let json = serde_json::to_value(&detail).unwrap();
-        assert_eq!(json["subject"]["$type"], "tools.kryphocron.feed.postPrivate");
+        assert_eq!(
+            json["subject"]["$type"],
+            "tools.kryphocron.feed.postPrivate"
+        );
         assert_eq!(json["subject"]["uri"], "at://did:plc:target/col/r");
         assert_eq!(json["subject"]["cid"], "bafy");
     }

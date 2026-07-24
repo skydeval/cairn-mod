@@ -118,7 +118,7 @@ async fn spawn(config: CreateReportConfig) -> Harness {
     let mut config = config;
     config.db_path = path;
 
-    let router = create_report_router(pool.clone(), mock_auth(), config);
+    let router = create_report_router(pool.clone(), mock_auth(), config, None);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {

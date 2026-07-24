@@ -157,7 +157,7 @@ async fn spawn(seed: SeedAs) -> Harness {
         ..CreateReportConfig::default()
     };
 
-    let router = create_report_router(pool.clone(), mock_auth(), config);
+    let router = create_report_router(pool.clone(), mock_auth(), config, None);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
