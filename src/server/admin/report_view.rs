@@ -78,11 +78,22 @@ pub(super) enum SubjectView {
     Repo { did: String },
     #[serde(rename = "com.atproto.repo.strongRef")]
     Strong { uri: String, cid: String },
+    /// Private kryphocron record subject (v1.8.13).
+    #[serde(rename = "tools.kryphocron.feed.postPrivate")]
+    Kryphocron { uri: String, cid: String },
 }
 
 fn build_subject(report: &Report) -> SubjectView {
     match report.subject_type.as_str() {
         "record" => SubjectView::Strong {
+            uri: report.subject_uri.clone().unwrap_or_default(),
+            cid: report.subject_cid.clone().unwrap_or_default(),
+        },
+        // v1.8.13: explicit arm — without it, a kryphocron_record row
+        // would fall through to the repoRef default below and render
+        // as an account subject (silent misrender; the string match is
+        // not compiler-checked).
+        "kryphocron_record" => SubjectView::Kryphocron {
             uri: report.subject_uri.clone().unwrap_or_default(),
             cid: report.subject_cid.clone().unwrap_or_default(),
         },
@@ -182,6 +193,20 @@ mod tests {
         let detail = project_for_fetch(r);
         let json = serde_json::to_value(&detail).unwrap();
         assert_eq!(json["subject"]["$type"], "com.atproto.repo.strongRef");
+        assert_eq!(json["subject"]["uri"], "at://did:plc:target/col/r");
+        assert_eq!(json["subject"]["cid"], "bafy");
+    }
+
+    #[test]
+    fn kryphocron_record_subject_type_serializes_as_kryphocron() {
+        // v1.8.13 silent-misrender trap (R1 M-1): before the explicit
+        // "kryphocron_record" arm, build_subject's `_ => Repo` fallback
+        // rendered a kryphocron row as an account repoRef. This pins the
+        // explicit arm so a regression can't silently misrender.
+        let r = sample(None, "kryphocron_record");
+        let detail = project_for_fetch(r);
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["subject"]["$type"], "tools.kryphocron.feed.postPrivate");
         assert_eq!(json["subject"]["uri"], "at://did:plc:target/col/r");
         assert_eq!(json["subject"]["cid"], "bafy");
     }

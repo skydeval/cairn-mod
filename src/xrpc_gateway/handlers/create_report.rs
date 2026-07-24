@@ -147,6 +147,22 @@ pub enum ReportSubject {
         /// CID of the reported record's content.
         cid: String,
     },
+
+    /// Private kryphocron record subject (v1.8.13). Maps to
+    /// `reports.subject_type='kryphocron_record'`; shaped like
+    /// `StrongRef` (parent DID from the AT-URI authority, URI + CID
+    /// preserved). The kryphocron NSID is the `$type` discriminant
+    /// itself (`tools.kryphocron.feed.postPrivate`) and is consumed
+    /// by serde during variant selection — no `nsid` field is needed
+    /// (nothing downstream reads the literal NSID; the report-open
+    /// decode branch keys on the stored `subject_type` discriminator).
+    #[serde(rename = "tools.kryphocron.feed.postPrivate")]
+    KryphocronRecord {
+        /// AT-URI of the reported private record.
+        uri: String,
+        /// CID of the reported record's content.
+        cid: String,
+    },
 }
 
 // ==========================================================================
@@ -308,6 +324,27 @@ fn translate_subject(subject: &ReportSubject) -> Result<TranslatedSubject, Strin
                 subject_cid: Some(cid.clone()),
             })
         }
+        ReportSubject::KryphocronRecord { uri, cid } => {
+            // Same shape as StrongRef (DID from the AT-URI authority),
+            // but tagged with the kryphocron subject_type so the
+            // report-open path knows to attempt a private-record decode
+            // (v1.8.13).
+            if !uri.starts_with("at://") {
+                return Err(format!("subject.uri {uri:?} is not an AT-URI"));
+            }
+            if cid.is_empty() {
+                return Err("subject.cid must be non-empty".to_string());
+            }
+            let did = extract_did_from_at_uri(uri)
+                .ok_or_else(|| format!("subject.uri {uri:?} missing DID authority"))?
+                .to_string();
+            Ok(TranslatedSubject {
+                subject_type: "kryphocron_record",
+                subject_did: did,
+                subject_uri: Some(uri.clone()),
+                subject_cid: Some(cid.clone()),
+            })
+        }
     }
 }
 
@@ -358,6 +395,11 @@ fn subject_to_json(s: &ReportSubject) -> Value {
         }),
         ReportSubject::StrongRef { uri, cid } => serde_json::json!({
             "$type": "com.atproto.repo.strongRef",
+            "uri": uri,
+            "cid": cid,
+        }),
+        ReportSubject::KryphocronRecord { uri, cid } => serde_json::json!({
+            "$type": "tools.kryphocron.feed.postPrivate",
             "uri": uri,
             "cid": cid,
         }),

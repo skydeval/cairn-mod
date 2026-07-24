@@ -143,6 +143,9 @@ pub(super) enum Subject {
     Repo { did: String },
     #[serde(rename = "com.atproto.repo.strongRef")]
     Strong { uri: String, cid: String },
+    /// Private kryphocron record subject (v1.8.13); report-open decodes it.
+    #[serde(rename = "tools.kryphocron.feed.postPrivate")]
+    Kryphocron { uri: String, cid: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -333,6 +336,28 @@ async fn post_handler(
                 }
             };
             ("record", did, Some(uri.clone()), Some(cid.clone()))
+        }
+        Subject::Kryphocron { uri, cid } => {
+            // Same validation as Strong; tagged kryphocron_record so
+            // report-open attempts a private-record decode (v1.8.13).
+            if !uri.starts_with("at://") || cid.is_empty() {
+                return xrpc_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequest",
+                    "subject malformed",
+                );
+            }
+            let did = match extract_did_from_at_uri(uri) {
+                Some(d) => d.to_owned(),
+                None => {
+                    return xrpc_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidRequest",
+                        "subject.uri missing DID authority",
+                    );
+                }
+            };
+            ("kryphocron_record", did, Some(uri.clone()), Some(cid.clone()))
         }
     };
 
@@ -549,6 +574,11 @@ fn subject_to_json(s: &Subject) -> serde_json::Value {
         }),
         Subject::Strong { uri, cid } => serde_json::json!({
             "$type": "com.atproto.repo.strongRef",
+            "uri": uri,
+            "cid": cid,
+        }),
+        Subject::Kryphocron { uri, cid } => serde_json::json!({
+            "$type": "tools.kryphocron.feed.postPrivate",
             "uri": uri,
             "cid": cid,
         }),

@@ -1110,6 +1110,30 @@ where
             .unwrap_or(false),
     };
 
+    // v1.8.13 (design §9 / LB-2): config-coherence between the
+    // `kryphocron-read` opt-in pin and the codec's `enabled` flag.
+    // These are two independent switches — pinning the family (so
+    // require_opt_in passes at dispatch) does NOT construct the codec
+    // (that is gated solely by `[pds_admin.rust.kryphocron].enabled`).
+    // If an operator pins `kryphocron-read` but leaves the codec
+    // disabled, the report-flow decode path would reach a `None` codec
+    // at runtime. Surface it here, at the layer where all config is
+    // visible, so the decode site can rely on the codec's presence as
+    // an invariant rather than a runtime error path. (Sibling to the
+    // PinnedVersionMismatch coherence check above.) The complementary
+    // direction — enabled without a pin — is intentionally NOT an
+    // error: an operator may want the codec ready for a future pin or
+    // for v1.8.14+ features that need it without the report-flow pin.
+    if pinned_versions.contains_key("kryphocron-read") && !kryphocron.enabled {
+        return Err(PdsAdminConfigError::RustBlockInvalid(
+            "kryphocron-read pinned in pinned_versions but \
+             [pds_admin.rust.kryphocron].enabled = false; set enabled = true \
+             to construct the codec"
+                .to_string(),
+        )
+        .into());
+    }
+
     Ok(RustBackendConfig {
         pds_url,
         service_did: toml.service_did.clone(),
@@ -2094,6 +2118,63 @@ mod tests {
             pinned_versions: None,
             verification_persist: None,
         }
+    }
+
+    // ----- v1.8.13 kryphocron pin/enabled coherence (LB-2) -----
+    // These exercise the check THROUGH validated_rust_from_toml (not a
+    // RustBackendConfig struct literal) so the boot-validation guarantee
+    // is regression-protected — the decode-site `.expect()` relies on it.
+
+    #[test]
+    fn kryphocron_read_pinned_without_enabled_fails() {
+        let mut toml = rust_toml();
+        toml.pinned_versions = Some(
+            [("kryphocron-read".to_string(), "v1".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        toml.required_capabilities = Some(vec!["kryphocron-read-v1".to_string()]);
+        toml.kryphocron = Some(crate::config::PdsAdminKryphocronToml {
+            enabled: Some(false),
+        });
+        let err = validated_rust_from_toml(&toml, &rust_env_reader)
+            .expect_err("pin without enabled must fail config validation");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("kryphocron-read pinned") && msg.contains("enabled = false"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn kryphocron_read_pinned_with_enabled_succeeds() {
+        let mut toml = rust_toml();
+        toml.pinned_versions = Some(
+            [("kryphocron-read".to_string(), "v1".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        toml.required_capabilities = Some(vec!["kryphocron-read-v1".to_string()]);
+        toml.kryphocron = Some(crate::config::PdsAdminKryphocronToml {
+            enabled: Some(true),
+        });
+        let resolved = validated_rust_from_toml(&toml, &rust_env_reader)
+            .expect("pin + enabled is coherent");
+        assert!(resolved.kryphocron.enabled);
+    }
+
+    #[test]
+    fn kryphocron_enabled_without_pin_succeeds() {
+        // The complementary direction is intentionally NOT an error:
+        // the codec may be wanted ahead of a future pin or for
+        // v1.8.14+ features that need it without the report-flow pin.
+        let mut toml = rust_toml();
+        toml.kryphocron = Some(crate::config::PdsAdminKryphocronToml {
+            enabled: Some(true),
+        });
+        let resolved = validated_rust_from_toml(&toml, &rust_env_reader)
+            .expect("enabled without a pin is coherent");
+        assert!(resolved.kryphocron.enabled);
     }
 
     /// Env reader that knows the rust block's signing-key env var

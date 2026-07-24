@@ -214,6 +214,15 @@ pub enum ReportSubject {
         /// Content-address hash at report time.
         cid: String,
     },
+    /// `tools.kryphocron.feed.postPrivate` — private kryphocron
+    /// record subject (v1.8.13), CID-pinned. Report-open decodes it.
+    #[serde(rename = "tools.kryphocron.feed.postPrivate")]
+    Kryphocron {
+        /// Subject AT-URI.
+        uri: String,
+        /// Content-address hash at report time.
+        cid: String,
+    },
 }
 
 /// One row in a `listReports` response. Deliberately omits the
@@ -844,6 +853,7 @@ fn subject_summary(s: &ReportSubject) -> String {
     match s {
         ReportSubject::Repo { did } => did.clone(),
         ReportSubject::Strong { uri, cid } => format!("{uri}@{cid}"),
+        ReportSubject::Kryphocron { uri, cid } => format!("{uri}@{cid} (kryphocron)"),
     }
 }
 
