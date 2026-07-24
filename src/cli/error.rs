@@ -312,7 +312,11 @@ impl CliError {
                 }
                 crate::pds_admin::BackendError::Unsupported => code::BACKEND_UNSUPPORTED,
                 crate::pds_admin::BackendError::Terminal(_)
-                | crate::pds_admin::BackendError::ArchitecturallyForbidden(_) => {
+                | crate::pds_admin::BackendError::ArchitecturallyForbidden(_)
+                // v1.8.13: a failed kryphocron decode (skew or structural)
+                // means the record is unreadable by this deployment — a
+                // terminal outcome, no retry affordance.
+                | crate::pds_admin::BackendError::KryphocronDecodeFailed(_) => {
                     code::BACKEND_TERMINAL
                 }
             },

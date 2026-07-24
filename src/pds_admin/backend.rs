@@ -187,15 +187,52 @@ impl<'de> Deserialize<'de> for BackendActionId {
 pub const LABEL_BRIDGE_INVARIANT_REASON: &str = "cairn-mod's subscribeLabels (§F4) is the canonical label-distribution surface to the network; \
      emitting labels via the upstream PDS would create a duplicate emission path with audit-trail divergence";
 
+/// Inner discriminator for [`BackendError::KryphocronDecodeFailed`]
+/// (v1.8.13).
+///
+/// Kept as a single `BackendError` variant with a two-case inner
+/// enum so the `error_category` telemetry tag stays one
+/// low-cardinality value (`"KryphocronDecodeFailed"`) rather than
+/// fanning the taxonomy out with per-failure-mode variants.
+///
+/// - [`Self::CodecIdUnknown`]: cairn-mod's own pre-check found the
+///   record's stored `encodedContentCodec` differs from the
+///   installed codec's id (`laquna/0.2`). Aurora never surfaces
+///   this to an unauthorized reader (its HTTP-410 skew path is
+///   authorized-only), and laquna's `decode` does not verify the
+///   codec id, so the comparison is cairn-mod's responsibility.
+/// - [`Self::CodecError`]: laquna's `decode` (or the fallible
+///   `EncodedRecord` input construction) returned a structural
+///   error. laquna collapses every internal decode failure to a
+///   single `Malformed`, so no finer caller-visible taxonomy
+///   exists to mirror.
+#[derive(Debug, thiserror::Error)]
+pub enum KryphocronDecodeError {
+    /// Stored codec id differs from the installed codec id; the
+    /// record is unreadable by this deployment (skew).
+    #[error("codec id unknown: stored={stored}, installed={installed}")]
+    CodecIdUnknown {
+        /// The `encodedContentCodec` the record was stored under.
+        stored: String,
+        /// The codec id cairn-mod has installed (`laquna/0.2`).
+        installed: String,
+    },
+    /// laquna's decode call (or `EncodedRecord`/`DecodeContext`
+    /// input construction) failed structurally.
+    #[error("codec decode error: {0}")]
+    CodecError(String),
+}
+
 /// Errors that can occur when calling a [`PdsAdminBackend`]
 /// method.
 ///
-/// The variant set is **closed at seven** for the v1.8 series:
-/// dashboards, structured-log queries, and operator filters
-/// pivot on [`Self::variant_name`] (which is also the
+/// The variant set is **closed at eight** for the v1.8 series
+/// (seven through v1.8.12; `KryphocronDecodeFailed` added at
+/// v1.8.13): dashboards, structured-log queries, and operator
+/// filters pivot on [`Self::variant_name`] (which is also the
 /// `error_category` value written to `pds_admin_audit`), so
 /// adding a variant is a coordinated cross-release change. New
-/// failure modes that don't obviously fit one of the seven map
+/// failure modes that don't obviously fit one of the eight map
 /// to the closest variant with a `[sub_classification=Name ...]`
 /// marker prepended to the inner string; the
 /// [`Self::retry_after_seconds`] / [`Self::error_code`]
@@ -326,12 +363,22 @@ pub enum BackendError {
     /// it".
     #[error("method architecturally forbidden: {0}")]
     ArchitecturallyForbidden(String),
+
+    /// Client-side decode of a private kryphocron record failed
+    /// (v1.8.13). Carries a [`KryphocronDecodeError`] discriminating
+    /// codec-id skew from a structural decode error. Terminal-class:
+    /// the record is unreadable by this deployment, so there is no
+    /// retry affordance. Only the Rust PDS backend produces this
+    /// variant, and only on the report-flow decode path gated by the
+    /// `kryphocron-read` opt-in.
+    #[error("kryphocron decode failed: {0}")]
+    KryphocronDecodeFailed(#[from] KryphocronDecodeError),
 }
 
 impl BackendError {
     /// Stable variant tag, used as the `error_category` value in
     /// `pds_admin_audit` and as a low-cardinality dashboard
-    /// pivot. Returns one of exactly seven `&'static str`
+    /// pivot. Returns one of exactly eight `&'static str`
     /// values — variant cardinality is the contract.
     pub fn variant_name(&self) -> &'static str {
         match self {
@@ -342,6 +389,7 @@ impl BackendError {
             Self::CapabilityNotAdvertised(_) => "CapabilityNotAdvertised",
             Self::Unsupported => "Unsupported",
             Self::ArchitecturallyForbidden(_) => "ArchitecturallyForbidden",
+            Self::KryphocronDecodeFailed(_) => "KryphocronDecodeFailed",
         }
     }
 
@@ -358,6 +406,15 @@ impl BackendError {
             | Self::CapabilityNotAdvertised(s)
             | Self::ArchitecturallyForbidden(s) => s.as_str(),
             Self::Unsupported => "",
+            // The inner discriminator carries the detail; `message()`
+            // returns a borrowable `&str`, so hand back the codec
+            // error string directly, or a stable marker for the skew
+            // case (whose structured stored/installed pair is already
+            // in the `#[error]` Display and audit context).
+            Self::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(s)) => s.as_str(),
+            Self::KryphocronDecodeFailed(KryphocronDecodeError::CodecIdUnknown { .. }) => {
+                "codec id unknown"
+            }
         }
     }
 
@@ -448,7 +505,7 @@ pub struct BackendFailureLog<'a> {
     /// here, not in the variant payload.
     pub method: &'static str,
     /// Variant-tag string per [`BackendError::variant_name`].
-    /// One of seven values; locked across the v1.8 series.
+    /// One of eight values; locked across the v1.8 series.
     pub error_category: &'static str,
     /// Inner message per [`BackendError::message`]. Empty
     /// string for [`BackendError::Unsupported`].
@@ -1457,7 +1514,7 @@ mod tests {
     // ===== variant_name + message accessors =====
 
     #[test]
-    fn variant_name_returns_seven_stable_strings() {
+    fn variant_name_returns_eight_stable_strings() {
         let cases: Vec<(BackendError, &'static str)> = vec![
             (BackendError::Transient("x".into()), "Transient"),
             (BackendError::Validation("x".into()), "Validation"),
@@ -1472,10 +1529,35 @@ mod tests {
                 BackendError::ArchitecturallyForbidden("x".into()),
                 "ArchitecturallyForbidden",
             ),
+            (
+                BackendError::KryphocronDecodeFailed(KryphocronDecodeError::CodecError(
+                    "x".into(),
+                )),
+                "KryphocronDecodeFailed",
+            ),
         ];
-        for (err, expected) in cases {
-            assert_eq!(err.variant_name(), expected);
+        for (err, expected) in &cases {
+            assert_eq!(err.variant_name(), *expected);
         }
+
+        // Compiler backstop (S-2 fold): this exhaustive destructure
+        // has no wildcard, so adding a ninth `BackendError` variant
+        // fails to compile here until the case list above is also
+        // extended. Keeps the `cases` vec — which enumerates by
+        // construction and would otherwise pass silently at the wrong
+        // cardinality — honest about the true variant count.
+        let sample = BackendError::Unsupported;
+        match sample {
+            BackendError::Transient(_)
+            | BackendError::Validation(_)
+            | BackendError::Terminal(_)
+            | BackendError::Auth(_)
+            | BackendError::CapabilityNotAdvertised(_)
+            | BackendError::Unsupported
+            | BackendError::ArchitecturallyForbidden(_)
+            | BackendError::KryphocronDecodeFailed(_) => {}
+        }
+        assert_eq!(cases.len(), 8, "BackendError cardinality is eight");
     }
 
     #[test]

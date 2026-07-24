@@ -199,6 +199,12 @@ impl AuditOutcome {
             // semantic per the v1.8.1 mapping table.
             BackendError::CapabilityNotAdvertised(_) => Self::Validation,
             BackendError::Validation(_) => Self::Validation,
+            // v1.8.13: a failed kryphocron decode is terminal (the
+            // record is unreadable by this deployment). Same
+            // v1.7-compat coalescence as the plain-Terminal else-branch
+            // above: the 'terminal' value doesn't pass the v1.7 CHECK
+            // yet, so project to 'remote_error' until Step 7 relaxes it.
+            BackendError::KryphocronDecodeFailed(_) => Self::RemoteError,
         }
     }
 
@@ -298,6 +304,12 @@ pub fn outcome_for_backend_error(e: &BackendError) -> AuditOutcome {
         BackendError::Unsupported | BackendError::ArchitecturallyForbidden(_) => {
             AuditOutcome::Unsupported
         }
+        // v1.8.13: a failed kryphocron decode (codec skew or structural
+        // decode error) is terminal — the record is unreadable by this
+        // deployment. This modern (post-Step-7) writer uses the true
+        // 'terminal' outcome; the v1.7-compat writer coalesces it to
+        // 'remote_error' (see from_backend_error_v17_compat).
+        BackendError::KryphocronDecodeFailed(_) => AuditOutcome::Terminal,
     }
 }
 

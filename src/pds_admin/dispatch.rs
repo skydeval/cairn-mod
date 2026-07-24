@@ -1241,8 +1241,13 @@ fn log_call_outcome<T>(
             // - Transient → WARN (transient; not retried in v1.7)
             // - Auth, Validation, Unsupported, ArchitecturallyForbidden,
             //   CapabilityNotAdvertised → ERROR (operator-actionable)
-            // - Terminal → WARN (upstream-state; investigate but not
-            //   a cairn-mod-side bug)
+            // - Terminal, KryphocronDecodeFailed → WARN (upstream-state /
+            //   unreadable record; investigate but not a cairn-mod bug)
+            //
+            // Note: KryphocronDecodeFailed arises on the v1.8.13
+            // get_record decode path, not this recordAction dispatch
+            // path, so this arm is effectively unreachable here — it
+            // exists to keep the match exhaustive.
             let category = e.variant_name();
             let message = e.message();
             let retry_after_seconds = e.retry_after_seconds();
@@ -1306,6 +1311,14 @@ fn log_call_outcome<T>(
                     error_category = category,
                     error = %message,
                     "pds_admin backend method architecturally forbidden by cairn-mod (configuration bug — should be rejected at action_map validation)"
+                ),
+                BackendError::KryphocronDecodeFailed(_) => tracing::warn!(
+                    action_id,
+                    subject_did,
+                    method = method.as_wire_str(),
+                    error_category = category,
+                    error = %message,
+                    "pds_admin backend could not decode a private kryphocron record (unreadable by this deployment; operator should investigate codec skew)"
                 ),
             }
         }
