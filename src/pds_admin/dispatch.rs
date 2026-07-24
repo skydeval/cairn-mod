@@ -1954,6 +1954,16 @@ mod tests {
                     )))
                 })
         }
+
+        async fn get_record(
+            &self,
+            _repo: &str,
+            _collection: &str,
+            _rkey: &str,
+        ) -> std::result::Result<crate::pds_admin::backend::GetRecordResponse, BackendError>
+        {
+            unimplemented!("RecordingBackend test stub: get_record not exercised by dispatch tests")
+        }
     }
 
     fn policy_with_action_map(
@@ -3446,6 +3456,16 @@ mod tests {
             _precipitating_action_id: i64,
         ) -> std::result::Result<BackendActionId, BackendError> {
             unreachable!("test backend does not stub takedown_record")
+        }
+
+        async fn get_record(
+            &self,
+            _repo: &str,
+            _collection: &str,
+            _rkey: &str,
+        ) -> std::result::Result<crate::pds_admin::backend::GetRecordResponse, BackendError>
+        {
+            unreachable!("SuspensionRecordingBackend test stub: get_record not exercised")
         }
     }
 

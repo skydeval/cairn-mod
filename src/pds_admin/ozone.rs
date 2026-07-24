@@ -1170,6 +1170,18 @@ impl PdsAdminBackend for OzoneBackend {
             )),
         }
     }
+
+    /// v1.8.13: `get_record` is a Rust-PDS (Aurora) surface for the
+    /// kryphocron report-flow decode path; the bsky-PDS backend does
+    /// not participate.
+    async fn get_record(
+        &self,
+        _repo: &str,
+        _collection: &str,
+        _rkey: &str,
+    ) -> Result<crate::pds_admin::backend::GetRecordResponse, BackendError> {
+        Err(BackendError::Unsupported)
+    }
 }
 
 #[cfg(test)]

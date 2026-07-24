@@ -657,6 +657,34 @@ pub struct KryphocronProbeState {
     pub decode_ready: bool,
 }
 
+/// Response shape of `com.atproto.repo.getRecord` (v1.8.13).
+///
+/// The generic atproto record-read shape: an AT-URI, an optional
+/// CID (some PDS implementations omit it for legacy records), and
+/// the opaque record `value`. The `value` is a `serde_json::Value`
+/// pass-through — getRecord returns per-collection record JSON with
+/// no single upstream contract struct to mirror, so callers read
+/// the fields they need out of `value` by key (v1.8.10 LB-3
+/// pass-through posture). For a private kryphocron record the
+/// report-flow decode path reads `value["encodedContent"]`,
+/// `value["encodedContentCodec"]`, `value["encodedContentGeneration"]`,
+/// and `value["text"]`.
+///
+/// Defined in the backend layer (not reusing the CLI's identically
+/// shaped `cli::pds::GetRecordResponse`) because `cli` depends on
+/// `pds_admin`, so importing that type into the trait would invert
+/// the layering. The shape is the reuse; the home is the honest one.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct GetRecordResponse {
+    /// AT-URI of the record (`at://<did>/<collection>/<rkey>`).
+    pub uri: String,
+    /// Content-address id at fetch time; optional per the lexicon.
+    #[serde(default)]
+    pub cid: Option<String>,
+    /// The opaque record body. Callers deserialize / read by key.
+    pub value: serde_json::Value,
+}
+
 /// Errors from constructing a backend at startup.
 ///
 /// Distinct from [`BackendError`] (which is per-call): these
@@ -1316,6 +1344,24 @@ pub trait PdsAdminBackend: Send + Sync {
     /// v1.8's `LocusBackend` will use Aurora-Locus's equivalent
     /// describe endpoint.
     async fn probe(&self) -> Result<ProbeReport, BackendError>;
+
+    /// Fetch a record via authenticated `com.atproto.repo.getRecord`
+    /// (v1.8.13). A standard atproto repo read — NOT one of the
+    /// `tools.aurora.ops.kryphocron.*` endpoints. Used by the
+    /// report-open flow to retrieve a private kryphocron record
+    /// (`tools.kryphocron.feed.postPrivate`) for client-side decode.
+    ///
+    /// The Rust backend gates entry on the `kryphocron-read` opt-in
+    /// **when the collection is a kryphocron NSID** (a standard
+    /// non-kryphocron read would not be gated, though v1.8.13 only
+    /// calls this for kryphocron records). `OzoneBackend` returns
+    /// [`BackendError::Unsupported`].
+    async fn get_record(
+        &self,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<GetRecordResponse, BackendError>;
 }
 
 #[cfg(test)]

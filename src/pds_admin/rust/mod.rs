@@ -49,7 +49,7 @@ use kryphocron::codec::laquna::Codec as KryphocronCodec;
 use url::Url;
 
 use super::backend::{
-    BackendActionId, BackendError, BackendInitError, KryphocronProbeState,
+    BackendActionId, BackendError, BackendInitError, GetRecordResponse, KryphocronProbeState,
     LABEL_BRIDGE_INVARIANT_REASON, PdsAdminBackend, ProbeReport,
 };
 use super::config::RustBackendConfig;
@@ -65,6 +65,11 @@ use service_auth::{mint_service_auth_jwt, validate_did_syntax};
 /// on [`super::types::CAPABILITY_CLASSIFICATIONS`]); it's the transport for
 /// capability negotiation.
 const DESCRIBE_CAPABILITIES_NSID: &str = "tools.aurora.describeCapabilities";
+
+/// The sole kryphocron record NSID that carries `encodedContent`
+/// (v1.8.13). `get_record` gates on the `kryphocron-read` opt-in
+/// when the requested collection matches this.
+const KRYPHOCRON_POST_PRIVATE_NSID: &str = "tools.kryphocron.feed.postPrivate";
 
 /// NSID of the unified moderation-action endpoint (v1.8.2, §4.3).
 const EMIT_EVENT_NSID: &str = "tools.aurora.admin.emitEvent";
@@ -1922,6 +1927,59 @@ impl PdsAdminBackend for RustBackend {
                 }
             }),
         })
+    }
+
+    async fn get_record(
+        &self,
+        repo: &str,
+        collection: &str,
+        rkey: &str,
+    ) -> Result<GetRecordResponse, BackendError> {
+        // Gate on the kryphocron-read opt-in when reading a private
+        // kryphocron record. v1.8.13 only calls this for
+        // `tools.kryphocron.feed.postPrivate`, but the gate is scoped
+        // to kryphocron collections so a future non-kryphocron repo
+        // read wouldn't require the opt-in.
+        if collection == KRYPHOCRON_POST_PRIVATE_NSID {
+            self.require_opt_in("kryphocron-read", "kryphocron-read-v1")?;
+        }
+
+        const NSID: &str = "com.atproto.repo.getRecord";
+        let jwt = mint_service_auth_jwt(
+            &self.signing_key,
+            &self.service_did,
+            &self.target_service_did,
+            NSID,
+            3600,
+        )
+        .map_err(|e| BackendError::Auth(e.to_string()))?;
+
+        let url = self.xrpc_url(NSID)?;
+        let response = self
+            .client
+            .get(url)
+            .query(&[("repo", repo), ("collection", collection), ("rkey", rkey)])
+            .bearer_auth(&jwt)
+            .send()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(parse_retry_after_seconds);
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            return Err(map_rust_backend_http_error(status, &body_bytes, retry_after));
+        }
+
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(OzoneBackend::map_reqwest_error)?;
+        serde_json::from_slice(&body_bytes)
+            .map_err(|e| BackendError::Transient(format!("{NSID} response parse: {e}")))
     }
 }
 
