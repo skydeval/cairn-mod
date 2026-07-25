@@ -1,10 +1,7 @@
 # Contributing to cairn-mod
 
 Thanks for considering a contribution. This file covers the practical
-mechanics; for architectural questions, read
-[`cairn-design.md`](cairn-design.md) at repo root first — it is the
-authoritative design reference and most "how does X work" questions
-are answered there.
+mechanics of building, testing, and submitting changes.
 
 ## Prerequisites
 
@@ -52,8 +49,7 @@ the cache is stale.
 
 ### Security scanning tools
 
-CI runs `cargo-audit` and `cargo-deny` on every push and PR (see
-[§F15](cairn-design.md#f15-dependency-security-scanning-in-ci)),
+CI runs `cargo-audit` and `cargo-deny` on every push and PR,
 and a daily scheduled `cargo audit` opens a tracking issue when
 new advisories land. Contributors rarely need to run these
 locally, but when investigating an advisory the pinned versions

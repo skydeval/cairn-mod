@@ -22,12 +22,6 @@ go through an issue first").
 
 Other approaches you looked at and why they didn't fit.
 
-## Design-doc impact
-
-If the proposal would change anything in [`cairn-design.md`](../../cairn-design.md)
-— a new feature, a modified §F*, a threat-model update — note the
-specific sections involved. Proposals that cross the design doc
-usually need a §29-style drift issue filed alongside.
 
 ## Scope
 

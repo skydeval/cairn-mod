@@ -15,8 +15,8 @@
 
 ## Related
 
-<!-- Tracker issue, design-doc section, or related PRs. "N/A" if
-     this is a trivial fix. -->
+<!-- Tracker issue or related PRs. "N/A" if this is a trivial
+     fix. -->
 
 ---
 

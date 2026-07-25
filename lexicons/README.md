@@ -73,9 +73,9 @@ Partial-failure states are not allowed.
 
 ## Adding a new lexicon
 
-1. Pick an NSID under `tools.cairn.*`. Sub-namespaces (`admin`,
-   `public`, etc.) are per the design doc — don't invent new ones
-   without updating §8.
+1. Pick an NSID under `tools.cairn.*`. Use the established
+   sub-namespaces (`admin`, `public`, etc.) — don't invent new
+   ones.
 2. Create the file at the path matching the NSID.
 3. Set `lexicon: 1`, `id: "tools.cairn.admin.<name>"`, and one or more
    defs. The primary method goes under `defs.main`.

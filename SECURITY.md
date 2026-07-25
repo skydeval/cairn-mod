@@ -20,12 +20,10 @@ up — mail forwarding is best-effort and delivery glitches happen.
 
 ## What's in scope
 
-The design doc's threat model ([`cairn-design.md`](cairn-design.md) §4)
-and security considerations (§12) are the authoritative source. In
-practice the categories we especially want to hear about:
+The categories we especially want to hear about:
 
 - **Signing-key handling** — anything that exposes the labeler's
-  private key material, bypasses the §5.1 file-only load path, or
+  private key material, bypasses the file-only key-load path, or
   would allow an unauthorized process to sign labels.
 - **Auth verification paths** — JWT algorithm confusion, replay
   beyond the documented window, DID-resolution cache poisoning,
@@ -53,10 +51,10 @@ practice the categories we especially want to hear about:
   cairn-mod, include that in your report and we'll coordinate.
 - **Issues reachable only via operator negligence** — host
   compromise, a leaked config file, an operator running cairn-mod as a
-  privileged user on a public host with no firewall. The threat
-  model in §4 makes the operator-trust boundary explicit.
-- **Known v1 limitations** documented in the design doc. The
-  honest-scope statements in §4.1 and §4.2 are not security bugs.
+  privileged user on a public host with no firewall. The
+  operator-trust boundary is explicit and documented.
+- **Known v1 limitations.** The project's honest-scope
+  statements about v1 properties are not security bugs.
 
 ## No bug bounty
 

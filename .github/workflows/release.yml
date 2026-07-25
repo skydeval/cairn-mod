@@ -1,9 +1,8 @@
 # DEPRECATED — DO NOT INVOKE.
 #
 # This workflow is no longer the canonical release path for cairn-mod.
-# See cairn-design.md §19.2 for the actual release procedure: a manual
-# flow (cargo publish + git tag + gh release create) run from the
-# maintainer's host.
+# The actual release procedure is a manual flow (cargo publish +
+# git tag + gh release create) run from the maintainer's host.
 #
 # History: three workflow_dispatch attempts on 2026-04-24 (v1.0 release
 # day) all failed; v1.1, v1.2, and v1.3 all shipped via the manual path.
@@ -40,8 +39,8 @@ name: Release
 #    is enabled, add a bypass for the Actions bot or temporarily
 #    lift protection for the release run.
 #
-# 4. Production Checklist dry-run per §14.1 of cairn-design.md is
-#    a soft human gate — confirmed mentally before triggering.
+# 4. Production Checklist dry-run is a soft human gate —
+#    confirmed mentally before triggering.
 #
 # ─── Failure-mode recovery ───
 #

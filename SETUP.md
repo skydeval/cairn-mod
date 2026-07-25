@@ -12,8 +12,7 @@ service record, responding to `GET /.well-known/did.json`.
 
 - **Rust 1.88+** — install via [rustup](https://rustup.rs).
 - **A DID for the labeler** — either `did:web:your.host` or
-  `did:plc:...`. How to obtain one is out of scope; the design doc
-  §5.1 has the context.
+  `did:plc:...`. How to obtain one is out of scope.
 - **A PDS account for the labeler** — the labeler DID must have a
   live repo on a PDS (self-hosted or bsky.social). Publishing the
   service record writes to that repo.
@@ -147,7 +146,7 @@ curl -sSL https://labeler.example/.well-known/did.json | jq '.verificationMethod
 Should return `"did:web:labeler.example#atproto_label"` (or the
 suffixed forms during v1.1 key rotation).
 
-## Service record verify on startup ([§F19](cairn-design.md#f19-service-record-verify-on-startup-v11))
+## Service record verify on startup
 
 `cairn serve` performs a **verify-only** check at startup before
 binding the HTTP listener: the local `[labeler]` config is
@@ -185,8 +184,7 @@ as the drift surface to inspect.
 
 **Reconciliation flow.** When verify fails with drift or
 absent, the operator runs `cairn publish-service-record` on the
-host that has operator credentials configured (see
-[§5.3](cairn-design.md#53-cli-ergonomics)). After successful
+host that has operator credentials configured. After successful
 publish, restart `cairn serve`; verify passes on the next
 startup.
 

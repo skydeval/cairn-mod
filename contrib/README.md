@@ -108,5 +108,3 @@ the `cairn` user has the right ownership for the check to pass.
   live in the root [`../README.md`](../README.md). See tracker
   issues #20 / #21.
 - Security disclosure: [`../SECURITY.md`](../SECURITY.md).
-- Upstream threat model: [`../cairn-design.md`](../cairn-design.md)
-  §4 and §12.

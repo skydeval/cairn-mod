@@ -7,9 +7,8 @@ security hygiene. For initial deployment, see [SETUP.md](SETUP.md).
 ## Production checklist
 
 Walk through this before pointing real subscribers at the instance.
-Each item links the relevant design-doc section for deeper context.
 
-### Transport ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment))
+### Transport
 
 - [ ] **TLS terminates at the reverse proxy**, not cairn-mod. `cairn
   serve` binds HTTP only (default `127.0.0.1:3000`) and assumes a
@@ -19,15 +18,15 @@ Each item links the relevant design-doc section for deeper context.
   max-age=31536000; includeSubDomains`). Set at the proxy; the
   contrib templates ship it.
 
-### Rate limits ([§F13](cairn-design.md#f13-single-binary--sqlite-deployment) numbers, enforced at reverse proxy)
+### Rate limits (enforced at reverse proxy)
 
 - [ ] **`createReport`** per-IP: example rate-limit
   configurations ship as commented operator-add stanzas in
   [`contrib/nginx/cairn.conf`](contrib/nginx/cairn.conf) and
   [`contrib/caddy/Caddyfile`](contrib/caddy/Caddyfile). Operators
   uncomment and tune rate values based on expected traffic and
-  abuse posture. The §F13 reference values (burst 3, rate
-  10/hour) are the design-doc baseline; the contrib examples
+  abuse posture. The reference values (burst 3, rate 10/hour)
+  are the recommended baseline; the contrib examples
   mirror those numbers but ship commented by default to avoid
   version-specific syntax in shipped templates (the `r/h` rate
   unit landed in nginx 1.27, post-Ubuntu-LTS).
@@ -39,7 +38,7 @@ Each item links the relevant design-doc section for deeper context.
   (Caddy core lacks connection-cap primitives;
   `caddy-ratelimit` provides them but is a third-party module).
 
-### Secrets ([§5.1](cairn-design.md#51-labeler-service-identity), [§5.3](cairn-design.md#53-cli-ergonomics))
+### Secrets
 
 - [ ] **Signing key file** at mode `0600`, owned by the running
   user. cairn-mod's `credential_file::check_mode_and_owner` refuses
@@ -56,7 +55,7 @@ Each item links the relevant design-doc section for deeper context.
   your PDS app password — anyone with read access can push records
   to the labeler's PDS repo until the session expires.
 
-### Key lifecycle ([§4.1.6](cairn-design.md#41-out-of-scope-threats), [§12](cairn-design.md#12-security-considerations))
+### Key lifecycle
 
 - [ ] **Signing key is permanent for v1.** Rotation is v1.1
   scope. Plan the host, permissions, and backup accordingly — a
@@ -76,7 +75,7 @@ Each item links the relevant design-doc section for deeper context.
   moderator sessions are re-created by running `cairn
   operator-login` / `cairn login`.
 
-### Single instance per DID ([§F5](cairn-design.md#f5-label-persistence-with-monotonic-sequence))
+### Single instance per DID
 
 - [ ] **Only one `cairn serve` against a given DID at a time.**
   cairn-mod enforces this with a SQLite-backed lease; the loser of a
@@ -96,7 +95,7 @@ Each item links the relevant design-doc section for deeper context.
 - [ ] **TLS certificate expiry at the reverse proxy** — Caddy
   auto-renews via ACME; nginx + certbot needs its own cron check.
 
-### Health probes ([§F14](cairn-design.md#f14-health-and-readiness-probe-endpoints-v11))
+### Health probes
 
 cairn-mod exposes two unauthenticated endpoints for orchestrators:
 
@@ -115,7 +114,7 @@ cairn-mod exposes two unauthenticated endpoints for orchestrators:
   intentionally failed (e.g., stop the writer, or point at an
   unreachable DB).
 
-### Dependency security scanning ([§F15](cairn-design.md#f15-dependency-security-scanning-in-ci-v11))
+### Dependency security scanning
 
 - [ ] **Most recent CI security scan on `main` is green.** `cargo-audit`
   and `cargo-deny` both run on push to `main` and every PR; a scheduled

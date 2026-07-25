@@ -8,7 +8,7 @@ assignees: ""
 
 ## Before filing
 
-- Have you checked [`cairn-design.md`](../../cairn-design.md)? Most
+- Have you checked the README and the docs in `docs/`? Most
   "how does X work" and "why is X this way" questions are answered
   there.
 - Have you searched existing issues (open and closed)?

@@ -78,8 +78,7 @@ read NULL as "added via CLI / direct DB write," not "unknown."
 **For emergencies when the CLI isn't available** (e.g., bootstrapping
 the first admin before any binary is installed, or recovering from
 a corrupted invocation), the `moderators` table can be manipulated
-directly — the schema is in [the initial migration](../migrations/0001_init.sql)
-and the design contract is [§F12](../cairn-design.md#f12-tools-cairn-admin-xrpc-endpoints):
+directly — the schema is in [the initial migration](../migrations/0001_init.sql):
 
 ```sql
 INSERT INTO moderators (did, role, added_at)
@@ -113,7 +112,7 @@ above for adding rows.
 
 To revoke: `cairn logout`.
 
-## Recording moderation events ([§F20](../cairn-design.md#f20-account-moderation-state-model-v14))
+## Recording moderation events
 
 Record graduated-action moderation events via `cairn moderator
 action`, with `warn` and `note` shorthands for the two most common
@@ -266,7 +265,7 @@ good standing in N days" trajectory hint. Operators who want
 just the active labels should reach for `cairn moderator
 labels` instead.
 
-## Audit-events view ([§F23.7](../cairn-design.md#f237-operator-tier-cli-surface))
+## Audit-events view
 
 Operator-tier audit-events view via `cairn moderator events`.
 Direct-DB scan of `audit_log` (joined with `subject_actions` for
@@ -276,7 +275,7 @@ verify`. The default surfaces ALL audit_log rows including
 cairn-mod-internal events (`pending_*`, `retention_sweep`,
 `xrpc_*` collaboration changes, `service_record_*`, etc.);
 `--ozone-only` applies the same filter-out policy as
-`tools.ozone.moderation.queryEvents` ([§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy))
+`tools.ozone.moderation.queryEvents`
 and surfaces only the Ozone-eligible subset.
 
 ```
@@ -345,25 +344,15 @@ $ cairn moderator events --subject did:plc:offender --ozone-only --config /etc/c
 ozone     42  2026-04-29T12:00:00.000Z  ...modEventLabel  did:plc:offender  by=did:plc:mod
 ```
 
-Cross-references:
-[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
-(projection policy and the filter-out list);
-[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
-(operator-tier vs Ozone-tier split);
-[§F23.10](../cairn-design.md#f2310-patterns-established-for-v18)
-(the projection-submodule pattern v1.8+ inherits).
-
-## PDS-admin bridge ([§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge))
+## PDS-admin bridge
 
 Manual escape hatch for the PDS-admin bridge via `cairn pds-admin
 {takedown, suspend, restore}`. The **production path** is policy
 automation + label emission firing the bridge automatically —
 operators rarely need this surface in steady-state. The CLI
-exists for two cases: (a) testing the bridge during Phase B
-verification (per [§19.5](../cairn-design.md#195-operator-deployment-runbook-for-v17-pds-bridge--xrpc-gateway)),
-and (b) operator one-off escalations that bypass the policy
-engine for a specific subject. v1.7's vocabulary; v1.8's
-LocusBackend documentation reuses it.
+exists for two cases: (a) testing the bridge during deployment
+verification, and (b) operator one-off escalations that bypass
+the policy engine for a specific subject.
 
 The CLI wraps `tools.cairn.admin.{recordAction, revokeAction}`
 HTTP-routed through the running `cairn serve`, so it requires a
@@ -374,10 +363,9 @@ configured backend's `takedown_account` / `suspend_account` /
 resulting `pds_admin_audit` row and surfaces the bridge outcome
 in the same response.
 
-**Manual takedowns do NOT bypass strike accounting.** Per
-[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
-(and the §A14 invariant: one canonical action-recording path),
-the action lands in `subject_actions` like any other and updates
+**Manual takedowns do NOT bypass strike accounting.** There is
+one canonical action-recording path, so the action lands in
+`subject_actions` like any other and updates
 strike state per `[strike_policy]`. Operators wanting a
 no-strike test path should use a dedicated test subject DID
 rather than reaching for the bridge against a real moderator
@@ -386,8 +374,7 @@ target.
 ```
 # Manual takedown. --reason defaults to the reserved
 # `pds-admin-cli` reason code if unset; operators must declare
-# that code in [moderation_reasons] for the default to work
-# (per §F23.8).
+# that code in [moderation_reasons] for the default to work.
 cairn pds-admin takedown did:plc:offender \
   --reason hate-speech \
   --config /etc/cairn/cairn.toml
@@ -435,8 +422,7 @@ otherwise the pre-flight check is meaningless. v1.7 doesn't
 enforce this — operator responsibility.
 
 **Reserved reason code.** Manual escalations default to the
-reserved `pds-admin-cli` reason code (per
-[§F23.8](../cairn-design.md#f238-reserved-reason-codes)).
+reserved `pds-admin-cli` reason code.
 Operators must declare it in `[moderation_reasons]` (or pass
 `--reason <other-code>` explicitly) for `cairn pds-admin` to
 succeed; otherwise the writer surfaces `ReasonNotFound` and
@@ -478,8 +464,7 @@ error: invalid app password
 ```
 
 The cairn-mod-side action is still committed — the recordAction
-landed; the bridge call is what failed. Per
-[§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge)'s
+landed; the bridge call is what failed. Per the bridge's
 fail-loud-and-audit posture, the operator reconciles manually
 (typically: fix the underlying issue and re-run the appropriate
 `cairn pds-admin` call, or revoke the action).
@@ -494,20 +479,7 @@ of a specific action_id (rather than "most recent"), use `cairn
 moderator revoke <action_id>` directly — `pds-admin restore` is
 the convenience case for the common pattern.
 
-Cross-references:
-[§F23.1](../cairn-design.md#f231-outbound-pds_admin-bridge)
-(the bridge's design + the `PdsAdminBackend` trait);
-[§F23.7](../cairn-design.md#f237-operator-tier-cli-surface)
-(operator-tier CLI surface);
-[§F23.8](../cairn-design.md#f238-reserved-reason-codes)
-(the `pds-admin-cli` reserved reason code);
-§A13 (audit-chain integration — `pds_admin_audit` rows
-hash-chain into the unified chain alongside `audit_log`);
-§A14 (one canonical action-recording path — manual bridge
-calls land in the same pipeline as policy-driven and
-moderator-direct actions).
-
-## Pending policy actions ([§F22](../cairn-design.md#f22-policy-automation-v16))
+## Pending policy actions
 
 When operator config declares `[policy_automation]` rules in
 mode=flag, threshold-crossing events queue
@@ -574,7 +546,7 @@ pendings remain reachable via the admin XRPC
 (`tools.cairn.admin.listPendingActions?resolution=confirmed`)
 when needed.
 
-## Report management ([§F17](../cairn-design.md#f17-report-management-cli-v11))
+## Report management
 
 Admin-side report workflow via `cairn report {list, view, resolve,
 flag, unflag}`. All five subcommands wrap the
@@ -623,7 +595,7 @@ JSON output includes a top-level `cursor` field when more results
 are available; human output appends a trailing `next cursor: ...`
 line.
 
-## Audit log queries ([§F18](../cairn-design.md#f18-audit-log-cli-v11))
+## Audit log queries
 
 Read-only audit log inspection via `cairn audit list` and
 `cairn audit show <id>`.
@@ -704,12 +676,9 @@ diverges at the formatter layer), so it requires a logged-in
 session via `cairn login` and a moderator-or-admin role row in
 the `moderators` table on the target cairn-mod instance.
 
-The label emission system this subcommand surfaces is documented
-in [cairn-design.md §F21](../cairn-design.md#f21-label-emission-against-moderation-state-v15).
-
 <a id="manage-known-xrpc-callers-f234"></a>
 
-## Manage known XRPC callers ([§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses))
+## Manage known XRPC callers
 
 Manage the inbound gateway's `xrpc_known_callers` table —
 moderator DIDs whose **proxied `tools.ozone.moderation.*` calls
@@ -778,15 +747,7 @@ $ cairn xrpc-callers list --include-revoked --config /etc/cairn/cairn.toml
 did:plc:moderator revoked@1714438800000 added@1714435200000 by did:plc:operator note=-
 ```
 
-Cross-references:
-[§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses)
-(the two-table trust model: known callers vs trusted PDSes);
-§A12 (CLI-only management for v1.7; XRPC management deferred);
-[§F23.8](../cairn-design.md#f238-reserved-reason-codes)
-(the membership table substitutes for pre-INSERT gates per
-#102's createReport dispatch).
-
-## Manage trusted PDSes ([§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses))
+## Manage trusted PDSes
 
 Manage the inbound gateway's `xrpc_trusted_pdses` table —
 **PDS DIDs** whose **forwarded `com.atproto.moderation.createReport`
@@ -842,19 +803,10 @@ trusts. Removing a PDS from this table immediately stops
 accepting forwarded reports from it (the membership check runs
 per request) — there is no cache or grace period. Reports from
 issuers outside `xrpc_trusted_pdses` continue through the
-user-direct path (per
-[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
-/ #102: there is only one route registration for createReport
-across the router stack, and the trusted-PDS branch is dispatched
-*within* that handler based on `is_trusted_pds(claims.iss)`).
-
-Cross-references:
-[§F23.4](../cairn-design.md#f234-trust-tables-known-callers-vs-trusted-pdses)
-(the two-table trust model);
-§A12 (CLI-only management for v1.7);
-[§F23.5](../cairn-design.md#f235-inbound-action-integration--projection-policy)
-(the membership-dispatch shape per #102; trust-table membership
-substitutes for the user-direct path's pre-INSERT gates).
+user-direct path: there is only one route registration for
+createReport across the router stack, and the trusted-PDS branch
+is dispatched *within* that handler based on
+`is_trusted_pds(claims.iss)`.
 
 ## Trust-chain inspection
 
@@ -889,8 +841,8 @@ Remove the published `app.bsky.labeler.service` record from
 the operator's PDS. Idempotent — running when nothing is
 published is a no-op success, not an error. Clears the local
 `labeler_config` state on a real delete; the next
-`cairn serve` startup verify ([§F19](../cairn-design.md#f19-startup-verify-v12))
-will then exit 13 SERVICE_RECORD_ABSENT until a fresh
+`cairn serve` startup verify will then exit 13
+SERVICE_RECORD_ABSENT until a fresh
 `cairn publish-service-record` runs.
 
 ```
@@ -917,8 +869,6 @@ cairn audit-rebuild --config /etc/cairn/cairn.toml
 cairn audit-rebuild --config /etc/cairn/cairn.toml --json
 ```
 
-The hash-chain walk is documented in
-[cairn-design.md §F10](../cairn-design.md#f10-audit-log).
 Rebuild is needed only on instances that ran cairn-mod ≤ v1.2
 before upgrading; v1.3+ always writes the chain alongside
 audit rows in the same transaction.
