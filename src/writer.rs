@@ -114,12 +114,20 @@ pub const AUDIT_REASON_SCHEMA: &str =
 /// ```json
 /// {
 ///   "applied_label_val": "<val>" | null,
-///   "resolution_reason": "<free text>" | null
+///   "resolution_reason": "<free text>" | null,
+///   "content_tier": "public" | "private",   // v1.8.14, kryphocron_record only
+///   "decode_source": "aurora_server" | "cairn_client"  // v1.8.14, kryphocron_record only
 /// }
 /// ```
+///
+/// The `content_tier` / `decode_source` keys are present only when the
+/// resolved subject is a `kryphocron_record` (v1.8.14 §3.4); for every
+/// other subject the payload is exactly the two-key shape above. Keys are
+/// omitted (never `null`) when absent, and each is independently
+/// conditional — `decode_source` is skipped if the row's column is NULL.
 #[doc(alias = "audit_log.reason.report_resolved")]
 pub const AUDIT_REASON_RESOLVE_REPORT: &str =
-    "report_resolved: { applied_label_val, resolution_reason }";
+    "report_resolved: { applied_label_val, resolution_reason, content_tier?, decode_source? }";
 
 /// Audit-log `reason` JSON schema for `reporter_flagged` /
 /// `reporter_unflagged` (§F12 flagReporter).
@@ -1998,10 +2006,37 @@ impl Writer {
         .await?;
 
         // 4. Audit: report_resolved.
-        let audit_reason = build_resolve_audit_reason(
+        let mut reason_value = build_resolve_audit_reason(
             req.action.as_apply().map(|a| a.val.as_str()),
             req.resolution_reason.as_deref(),
         );
+        // v1.8.14 (§3.4): for a kryphocron_record subject, tag the
+        // reason JSON with the derived content_tier + the decode
+        // provenance (both v1.8.13-persisted / NSID-derived). Absent
+        // (not null) for every other subject_type, so non-kryphocron
+        // report_resolved rows are byte-identical to the v1.8.13 shape.
+        if report.subject_type == "kryphocron_record" {
+            use crate::report::ContentTier;
+            use crate::xrpc_gateway::handlers::create_report::parse_at_uri_components;
+
+            // Doubly fallible + None for account subjects (no subject_uri):
+            // parse the at:// URI -> parse the collection NSID -> resolve
+            // its substrate tier -> map into the wire vocabulary.
+            let content_tier: Option<ContentTier> = report
+                .subject_uri
+                .as_deref()
+                .and_then(parse_at_uri_components)
+                .and_then(|(_repo, collection, _rkey)| kryphocron::Nsid::new(collection).ok())
+                .and_then(|nsid| kryphocron::Tier::from_nsid(&nsid).ok())
+                .map(ContentTier::from);
+            if let Some(tier) = content_tier {
+                reason_value["content_tier"] = serde_json::json!(tier.as_str());
+            }
+            if let Some(source) = report.decode_source.as_deref() {
+                reason_value["decode_source"] = serde_json::json!(source);
+            }
+        }
+        let audit_reason = reason_value.to_string();
         crate::audit::append::append_in_tx(
             &mut tx,
             &crate::audit::append::AuditRowForAppend {
@@ -3547,15 +3582,21 @@ fn build_audit_reason(val: &str, neg: bool, moderator_reason: Option<&str>) -> S
 
 /// `report_resolved` audit reason JSON — see [`AUDIT_REASON_RESOLVE_REPORT`]
 /// for the schema.
+///
+/// Returns a [`serde_json::Value`] (not a `String`) so the caller can
+/// compose additional keys onto the base payload before serializing —
+/// v1.8.14 tags `content_tier` + `decode_source` for `kryphocron_record`
+/// subjects (§3.4). The single caller stringifies at the emission point;
+/// if a second caller is ever added, propagate the `.to_string()` there
+/// (or centralize it) so no path emits an un-serialized `Value`.
 fn build_resolve_audit_reason(
     applied_label_val: Option<&str>,
     resolution_reason: Option<&str>,
-) -> String {
+) -> serde_json::Value {
     serde_json::json!({
         "applied_label_val": applied_label_val,
         "resolution_reason": resolution_reason,
     })
-    .to_string()
 }
 
 /// `retention_sweep` audit reason JSON — see
@@ -4331,6 +4372,25 @@ mod tests {
     fn clamp_cts_uses_wall_clock_when_no_prior() {
         let out = clamp_cts(1_715_000_000_000, None).expect("clamp");
         assert_eq!(out, "2024-05-06T12:53:20.000Z");
+    }
+
+    // v1.8.14 §3.4: build_resolve_audit_reason returns a serde_json::Value
+    // (not a String) so the caller can compose kryphocron tags before
+    // serializing. The base (non-kryphocron) payload is exactly the two
+    // shipped keys — no content_tier / decode_source unless the caller
+    // adds them.
+    #[test]
+    fn build_resolve_audit_reason_returns_value_with_base_shape() {
+        let v = build_resolve_audit_reason(Some("spam"), Some("confirmed"));
+        assert!(v.is_object());
+        assert_eq!(v["applied_label_val"], "spam");
+        assert_eq!(v["resolution_reason"], "confirmed");
+        assert!(v.get("content_tier").is_none());
+        assert!(v.get("decode_source").is_none());
+        // Nulls preserved for the None case (unchanged from v1.8.13).
+        let v = build_resolve_audit_reason(None, None);
+        assert!(v["applied_label_val"].is_null());
+        assert!(v["resolution_reason"].is_null());
     }
 
     #[test]

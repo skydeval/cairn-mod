@@ -72,7 +72,8 @@ pub(super) async fn handler(
     let mut qb = QueryBuilder::<Sqlite>::new(
         "SELECT id, created_at, reported_by, reason_type, reason,
                 subject_type, subject_did, subject_uri, subject_cid,
-                status, resolved_at, resolved_by, resolution_label, resolution_reason
+                status, resolved_at, resolved_by, resolution_label, resolution_reason,
+                decode_source
          FROM reports
          WHERE id < ",
     );

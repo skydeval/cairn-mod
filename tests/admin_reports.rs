@@ -238,6 +238,44 @@ async fn seed_report(pool: &Pool<Sqlite>, reported_by: &str, reason: Option<&str
     .unwrap()
 }
 
+/// Seed a `kryphocron_record` report (v1.8.14) with an `at://` subject
+/// URI in the given collection and an optional `decode_source`. The
+/// collection drives `content_tier` derivation at resolve
+/// (`tools.kryphocron.feed.postPrivate` → private,
+/// `tools.kryphocron.feed.postPublic` → public).
+async fn seed_kryphocron_report(
+    pool: &Pool<Sqlite>,
+    collection: &str,
+    decode_source: Option<&str>,
+) -> i64 {
+    let created_at = "2026-04-23T00:00:00.000Z";
+    let reason_type = "com.atproto.moderation.defs#reasonViolation";
+    let subject_type = "kryphocron_record";
+    let subject_did = "did:plc:target0000000000000000000";
+    let subject_uri = format!("at://{subject_did}/{collection}/3krecordkey000");
+    let subject_cid = "bafyreieqkryphocronrecordcidplaceholder00000000000000000";
+    sqlx::query_scalar!(
+        "INSERT INTO reports
+             (created_at, reported_by, reason_type, reason,
+              subject_type, subject_did, subject_uri, subject_cid,
+              status, decode_source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)
+         RETURNING id",
+        created_at,
+        "did:plc:reporter",
+        reason_type,
+        "kryphocron subject body",
+        subject_type,
+        subject_did,
+        subject_uri,
+        subject_cid,
+        decode_source,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
 // ---------- HTTP helpers ----------
 
 async fn post_json(
@@ -539,6 +577,136 @@ async fn resolve_report_without_apply_label_marks_resolved() {
             .await
             .unwrap();
     assert_eq!(audit_actions, vec!["report_resolved"]);
+
+    h.writer.shutdown().await.unwrap();
+}
+
+/// v1.8.14 §3.4: resolving a `kryphocron_record` (postPrivate) subject
+/// tags the `report_resolved` reason JSON with `content_tier: "private"`
+/// + the row's `decode_source`. Action set is unchanged (still
+/// `report_resolved` — no new AUDIT_ACTION_VALUES entry).
+#[tokio::test]
+async fn resolve_kryphocron_record_tags_content_tier_and_decode_source() {
+    let h = spawn(AdminConfig::default()).await;
+    grant_role(&h.pool, MODERATOR_DID, "mod").await;
+
+    let id = seed_kryphocron_report(
+        &h.pool,
+        "tools.kryphocron.feed.postPrivate",
+        Some("aurora_server"),
+    )
+    .await;
+
+    let jwt = build_jwt(MODERATOR_DID, "tools.cairn.admin.resolveReport");
+    let (status, _body) = post_json(
+        h.addr,
+        "/xrpc/tools.cairn.admin.resolveReport",
+        Some(&jwt),
+        &[],
+        &serde_json::json!({"id": id, "reason": "private content actioned"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // The report_resolved reason JSON carries the two kryphocron tags.
+    let reason: String = sqlx::query_scalar!(
+        "SELECT reason AS \"reason!: String\" FROM audit_log \
+         WHERE action = 'report_resolved' ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let reason: Value = serde_json::from_str(&reason).unwrap();
+    assert_eq!(reason["content_tier"], "private");
+    assert_eq!(reason["decode_source"], "aurora_server");
+    // Base fields preserved.
+    assert_eq!(reason["resolution_reason"], "private content actioned");
+
+    // No new action value — closed set unchanged.
+    let actions: Vec<String> = sqlx::query_scalar!("SELECT action FROM audit_log ORDER BY id")
+        .fetch_all(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(actions, vec!["report_resolved"]);
+
+    h.writer.shutdown().await.unwrap();
+}
+
+/// v1.8.14 §3.4: a `kryphocron_record` (postPublic) subject derives
+/// `content_tier: "public"`; a NULL `decode_source` column leaves the
+/// `decode_source` key absent (independent Some/None gating).
+#[tokio::test]
+async fn resolve_kryphocron_public_no_decode_source_omits_key() {
+    let h = spawn(AdminConfig::default()).await;
+    grant_role(&h.pool, MODERATOR_DID, "mod").await;
+
+    let id = seed_kryphocron_report(&h.pool, "tools.kryphocron.feed.postPublic", None).await;
+
+    let jwt = build_jwt(MODERATOR_DID, "tools.cairn.admin.resolveReport");
+    let (status, _body) = post_json(
+        h.addr,
+        "/xrpc/tools.cairn.admin.resolveReport",
+        Some(&jwt),
+        &[],
+        &serde_json::json!({"id": id, "reason": "public"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let reason: String = sqlx::query_scalar!(
+        "SELECT reason AS \"reason!: String\" FROM audit_log \
+         WHERE action = 'report_resolved' ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let reason: Value = serde_json::from_str(&reason).unwrap();
+    assert_eq!(reason["content_tier"], "public");
+    // decode_source column was NULL → key omitted (not null).
+    assert!(
+        reason.get("decode_source").is_none(),
+        "decode_source key must be absent when column is NULL: {reason}"
+    );
+
+    h.writer.shutdown().await.unwrap();
+}
+
+/// v1.8.14 §3.4: a non-kryphocron (account) subject produces the
+/// unchanged v1.8.13 two-key reason — neither kryphocron tag present.
+#[tokio::test]
+async fn resolve_account_subject_reason_unchanged_no_kryphocron_tags() {
+    let h = spawn(AdminConfig::default()).await;
+    grant_role(&h.pool, MODERATOR_DID, "mod").await;
+
+    let id = seed_report(&h.pool, "did:plc:r", Some("body")).await;
+
+    let jwt = build_jwt(MODERATOR_DID, "tools.cairn.admin.resolveReport");
+    let (status, _body) = post_json(
+        h.addr,
+        "/xrpc/tools.cairn.admin.resolveReport",
+        Some(&jwt),
+        &[],
+        &serde_json::json!({"id": id, "reason": "account actioned"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let reason: String = sqlx::query_scalar!(
+        "SELECT reason AS \"reason!: String\" FROM audit_log \
+         WHERE action = 'report_resolved' ORDER BY id DESC LIMIT 1"
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    let reason: Value = serde_json::from_str(&reason).unwrap();
+    assert!(
+        reason.get("content_tier").is_none(),
+        "account subject must not carry content_tier: {reason}"
+    );
+    assert!(
+        reason.get("decode_source").is_none(),
+        "account subject must not carry decode_source: {reason}"
+    );
 
     h.writer.shutdown().await.unwrap();
 }

@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT reason AS \"reason!: String\" FROM audit_log WHERE action = 'report_resolved' ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "reason!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "011995b78d6b63143f8520dc42669c1a9172ab054994b7f63659220ab092579e"
+}
