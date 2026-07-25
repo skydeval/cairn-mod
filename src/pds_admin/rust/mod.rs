@@ -1,4 +1,4 @@
-//! Rust-PDS backend (Aurora-Locus and other ATProto Rust PDSes) —
+//! Rust-PDS backend (Rust-based ATProto PDSes) —
 //! v1.8.1 foundation skeleton (§4.1).
 //!
 //! v1.8.1 posture: **inspector-only**. The only successful

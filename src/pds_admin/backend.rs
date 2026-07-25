@@ -585,10 +585,10 @@ pub fn log_backend_failure(
 ///
 /// v1.7's surface is intentionally minimal — just enough for
 /// operator-facing startup logs ("your `[pds_admin.ozone]` is
-/// reachable and accepts the configured admin credentials"). v1.8
-/// may grow this into capability negotiation when LocusBackend
-/// lands and the `Locus`/`Ozone` runtime selector needs to know
-/// what each backend supports.
+/// reachable and accepts the configured admin credentials"). v1.8.1
+/// grew this into capability negotiation once `RustBackend` landed
+/// and the `Rust`/`Ozone` runtime selector needed to know what each
+/// backend supports.
 ///
 /// The probe runs once at startup. Failure does not block startup
 /// (per A15); the backend's first real call from the recordAction
@@ -598,10 +598,9 @@ pub fn log_backend_failure(
 /// actual moderation action.
 #[derive(Debug, Clone)]
 pub struct ProbeReport {
-    /// Stable backend identifier. v1.7 only emits `"ozone"`
-    /// (bsky-PDS); v1.8 will add `"locus"` (Aurora-Locus). Used
-    /// in operator-facing log lines and future v1.8 capability
-    /// dispatch.
+    /// Stable backend identifier. `OzoneBackend` emits `"ozone"`
+    /// (bsky-PDS); `RustBackend` emits `"rust"`. Used in
+    /// operator-facing log lines and capability dispatch.
     pub backend_name: &'static str,
 
     /// PDS endpoint that was probed. The full URL operators see
@@ -613,7 +612,8 @@ pub struct ProbeReport {
     /// `OzoneBackend` in v1.7** — bsky-PDS's
     /// `com.atproto.server.describeServer` doesn't expose a
     /// version field as of the responses cairn-mod has been
-    /// validated against. v1.8's LocusBackend may populate it.
+    /// validated against. `RustBackend` populates it from the
+    /// Rust PDS's `describeCapabilities` response.
     pub detected_version: Option<String>,
 
     /// Free-form capability strings the backend reported.
@@ -1333,16 +1333,14 @@ pub trait PdsAdminBackend: Send + Sync {
     ///   probe-specific quirk operators have to debug separately);
     /// - return [`ProbeReport`] with whatever metadata the
     ///   backend exposes on success — version, capabilities, etc.
-    ///   v1.7 leaves both `Some(version)` and a non-empty
-    ///   capabilities list to v1.8 LocusBackend; v1.7's
     ///   `OzoneBackend` returns the minimal report ("we reached
     ///   bsky-PDS at the configured URL with the configured
-    ///   credentials").
+    ///   credentials"); `RustBackend` fills in both `Some(version)`
+    ///   and a non-empty capabilities list.
     ///
-    /// v1.7's `OzoneBackend` uses
-    /// `com.atproto.server.describeServer` (per bsky-PDS findings).
-    /// v1.8's `LocusBackend` will use Aurora-Locus's equivalent
-    /// describe endpoint.
+    /// `OzoneBackend` uses `com.atproto.server.describeServer` (per
+    /// bsky-PDS findings); `RustBackend` uses the Rust PDS's
+    /// `describeCapabilities` endpoint.
     async fn probe(&self) -> Result<ProbeReport, BackendError>;
 
     /// Fetch a private kryphocron record and return its plaintext

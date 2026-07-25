@@ -10,7 +10,8 @@
 //!
 //! - When `[pds_admin].enabled = true`, exactly one backend
 //!   subsection must be present. v1.7 supports `[pds_admin.ozone]`
-//!   only; `[pds_admin.locus]` is reserved for v1.8 and rejected
+//!   only; the early-design `[pds_admin.locus]` name (renamed to
+//!   `[pds_admin.rust]` in v1.8.1) is rejected
 //!   here with a v1.8-pointer message. Any other subsection name
 //!   (including typos) is rejected with `"backend not supported in
 //!   v1.7: <name>"`.
@@ -101,8 +102,8 @@ pub struct PdsAdminPolicy {
 }
 
 /// Backend selector. v1.7 has only [`Self::Ozone`]; v1.8.1
-/// adds [`Self::Rust`] for Aurora-Locus and other ATProto
-/// Rust PDSes. The resolver enforces the truth table over
+/// adds [`Self::Rust`] for Rust-based ATProto PDSes. The
+/// resolver enforces the truth table over
 /// `(backend selector, ozone block, rust block)`; downstream
 /// consumers match on this enum to dispatch.
 #[derive(Debug, Clone)]

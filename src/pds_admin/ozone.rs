@@ -216,8 +216,8 @@ impl fmt::Debug for OzoneBackend {
 ///
 /// Format: `ozone:{did}:{precipitating_action_id}`
 /// - `ozone:` prefix identifies the backend that issued the id
-///   (forward-compat for v1.8's `LocusBackend` which will use its
-///   own native ids prefixed `locus:`).
+///   (forward-compat: another backend can use its own id scheme
+///   under a distinct prefix).
 /// - `{did}` carries the subject for forensic readability.
 /// - `{precipitating_action_id}` is the cairn-mod-side
 ///   `subject_actions(id)` — guaranteed unique by SQLite, gives a

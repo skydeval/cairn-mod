@@ -103,8 +103,8 @@ where
         .map_err(|e| CliError::Startup(format!("policy automation: {e}")))?;
 
     // §F23 / #87. Resolve the [pds_admin] policy and, if
-    // enabled, instantiate the configured backend. v1.7 ships
-    // only OzoneBackend (bsky-PDS); v1.8 will add LocusBackend
+    // enabled, instantiate the configured backend. v1.7 shipped
+    // only OzoneBackend (bsky-PDS); v1.8.1 added RustBackend
     // selection here. When disabled (or [pds_admin] omitted
     // entirely), the bridge is None and the writer's
     // post-recordAction dispatch is a no-op.
@@ -410,8 +410,9 @@ fn map_spawn_writer_error(e: Error) -> CliError {
 /// reqwest TLS-config issue; treated as a startup failure since
 /// the operator declared the bridge enabled).
 ///
-/// v1.7 has only the [`Ozone`](crate::pds_admin::PdsAdminBackendConfig::Ozone)
-/// variant; v1.8 will add `Locus` selection here.
+/// v1.7 had only the [`Ozone`](crate::pds_admin::PdsAdminBackendConfig::Ozone)
+/// variant; v1.8.1 added the [`Rust`](crate::pds_admin::PdsAdminBackendConfig::Rust)
+/// selection here.
 fn build_pds_admin_bridge(
     policy: &crate::pds_admin::PdsAdminPolicy,
 ) -> Result<Option<crate::pds_admin::PdsAdminBridge>, CliError> {

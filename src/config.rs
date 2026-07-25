@@ -193,9 +193,10 @@ pub struct Config {
 
 /// TOML projection of [`crate::pds_admin::PdsAdminPolicy`] (§F23,
 /// #83, v1.7). Tops the `[pds_admin]` block. v1.7 ships
-/// bsky-PDS-only (`[pds_admin.ozone]`); `[pds_admin.locus]` is
-/// reserved for v1.8 and rejected at config-load with a clear
-/// "deferred to v1.8" message rather than silently ignored.
+/// bsky-PDS-only (`[pds_admin.ozone]`); the early-design
+/// `[pds_admin.locus]` name (renamed to `[pds_admin.rust]` in
+/// v1.8.1) is rejected at config-load with a clear rename
+/// message rather than silently ignored.
 ///
 /// Unknown sibling subsections (anything other than the named
 /// fields and `locus`) are captured into [`Self::other_backends`]
@@ -227,7 +228,7 @@ pub struct PdsAdminConfigToml {
     #[serde(default)]
     pub ozone: Option<PdsAdminOzoneToml>,
     /// `[pds_admin.rust]` subsection — Rust-PDS backend config
-    /// (Aurora-Locus and other ATProto Rust PDSes). The v1.8.1
+    /// (Rust-based ATProto PDSes). The v1.8.1
     /// inspector-only posture ended with v1.8.2's protocol
     /// parity; the historical acknowledgment flag was removed at
     /// v1.8.11 (unknown keys are ignored, so stale configs
@@ -243,7 +244,7 @@ pub struct PdsAdminConfigToml {
     #[serde(default)]
     pub action_map: Option<BTreeMap<String, PdsAdminActionMapValueToml>>,
     /// `[pds_admin.locus]` subsection — early-design name for
-    /// the Aurora-Locus backend. Renamed to `[pds_admin.rust]`
+    /// the Rust-PDS backend. Renamed to `[pds_admin.rust]`
     /// in v1.8.1 to reflect the polymorphic-Rust-PDS stance.
     /// Operators with v1.7-staged `[pds_admin.locus]` configs
     /// get a clear migration error pointing at the new key
@@ -300,8 +301,8 @@ pub struct PdsAdminOzoneToml {
 /// [`crate::pds_admin::PdsAdminPolicy::from_config`], which:
 /// - parses `url` via [`url::Url::parse`] (https or http; no
 ///   scheme constraint at this layer — protocol parity with
-///   `pds_url` will tighten in v1.8.2 once Aurora-Locus
-///   advertises a stable scheme posture);
+///   `pds_url` tightened in v1.8.2 once the Rust-PDS backend
+///   settled a stable scheme posture);
 /// - rejects the removed v1.7-era OAuth keys (`client_id_env`,
 ///   `client_secret_env`, `scopes`) with an error naming the
 ///   offending key and the service-auth replacements;

@@ -71,8 +71,8 @@ pub struct PdsAdminBridge {
     /// every call (defensive — could become stale relative to a
     /// future hot-reload feature).
     pub policy: PdsAdminPolicy,
-    /// Trait-object backend. v1.7 wires `OzoneBackend`; v1.8
-    /// will add `LocusBackend` selectable per
+    /// Trait-object backend. v1.7 wires `OzoneBackend`; v1.8.1
+    /// added `RustBackend`, selectable per
     /// [`PdsAdminPolicy::backend`].
     pub backend: Arc<dyn PdsAdminBackend>,
 }

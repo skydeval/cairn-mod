@@ -7,118 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — v1.8.15 Laquna handling (Workstream B close)
-- Operator guide for Laquna-encoded private-record handling
-  (`docs/laquna-operator-guide.md`): codec-skew diagnosis (probe
-  codec-id + ingest decode-failure logs), codec-version forward
-  compatibility, the decode-failure moderator flow (the report
-  references the encoded record by AT-URI + CID; codec id and generation
-  are inspected by dereferencing the record via the PDS), rotation-cadence
-  observability (inferred from `encodedContentGeneration` timestamps), and
-  slug self-containment.
-- No new decode behavior. v1.8.15 documents that umbrella §4.B.4
-  (Laquna-specific handling) is satisfied by the surfaces shipped across
-  v1.8.12 (probe codec-id reporting), v1.8.13 (decode-path codec-skew
-  pre-check, generation-mark handling), and v1.8.14 (decode-provenance
-  audit tagging). No new trait method, capability, migration,
-  `BackendError` variant, or `Cargo.toml` change. Closes Workstream B
-  (kryphocron consumption).
-
-### Added — v1.8.14 audit-events kryphocron-context tagging
-- When a moderator resolves a report whose subject is a decoded
-  kryphocron record, the shipped `report_resolved` audit-log entry's
-  `reason` JSON now carries two extra keys: `content_tier`
-  (`"public"` / `"private"`, the subject's visibility class) and
-  `decode_source` (`"aurora_server"` / `"cairn_client"`, the provenance
-  of the decoded plaintext). For every other subject the entry is
-  byte-identical to before — the keys are omitted, never null. No new
-  audit action value: the closed `AUDIT_ACTION_VALUES` set stays at 10,
-  and `cairn audit verify` covers the tagged rows unchanged (the `reason`
-  payload is hashed verbatim). Report **ingest** stays audit-free.
-- `content_tier` is derived cairn-mod-side from the subject NSID via
-  `kryphocron::Tier::from_nsid` (Aurora exposes no tier field), through
-  a new `ContentTier { Public, Private }` vocabulary type with a
-  snake_case `Display` and `From<kryphocron::Tier>`.
-- The `Report` row type and its read SELECTs (resolve, getReport,
-  listReports) are extended to plumb v1.8.13's `reports.decode_source`
-  column into the resolve path. No migration (0014 stays highest).
-- `build_resolve_audit_reason` now returns a `serde_json::Value` (was a
-  `String`) so the resolve site can compose the kryphocron tags before
-  serializing; the single caller stringifies at the emission point.
-- New `cairn pds-admin events query --kryphocron-only` flag: a
-  client-side filter that keeps only Aurora's 12 `kryphocron_*`
-  moderation events on the fetched page (Aurora's `event_type` filter
-  matches one exact value, not a prefix). Existing pretty-JSON rendering
-  is unchanged; the 12 event-type values are pinned in a test.
-
-### Added — v1.8.13 report-flow private-record retrieval
-- First live decode. When a report's subject is a private kryphocron
-  record (`tools.kryphocron.feed.postPrivate`), cairn-mod fetches it at
-  **report-ingest time** via authenticated `com.atproto.repo.getRecord`
-  and decodes it with the installed `laquna/0.2` codec, persisting the
-  plaintext on the report row so report-open stays a pure read. An
-  authorized read (cairn-mod's DID in the record's audience) returns
-  server-side-decoded `text` directly; the normal unauthorized read
-  returns `encodedContent`, which cairn-mod decodes client-side after a
-  codec-id skew pre-check. Consuming this surface requires the operator
-  to opt in by pinning the `kryphocron-read` capability.
-- New backend method `get_and_decode_kryphocron_record` (trait 48 → 49),
-  gated on the `kryphocron-read` opt-in; `OzoneBackend` returns
-  `Unsupported`. The codec-id skew check is cairn-mod's own
-  responsibility — Aurora never surfaces its HTTP-410 codec-unavailable
-  error to an unauthorized reader, and the codec does not self-check —
-  so a stored codec id differing from the installed `laquna/0.2` yields a
-  terminal `KryphocronDecodeFailed { CodecIdUnknown }` without attempting
-  a decode.
-- New `BackendError::KryphocronDecodeFailed` variant (error taxonomy 7 →
-  8) with a two-case inner discriminator: `CodecIdUnknown` (skew) and
-  `CodecError` (any structural decode failure). Terminal-class exit code.
-- New `KryphocronRecord` report subject across every report-subject
-  surface (gateway, CLI, server ingest, server render). Migration 0014
-  rebuilds the `reports` table to extend the `subject_type` CHECK with
-  `kryphocron_record` and add `decode_source` (`aurora_server` /
-  `cairn_client`) and `decoded_plaintext` columns.
-- Boot-time config coherence: pinning `kryphocron-read` without
-  `[pds_admin.rust.kryphocron].enabled = true` now fails config
-  validation, since the pin is meaningless without the codec.
-- Decoded private-tier plaintext is stored at rest on the report row.
-  This is deliberate — laquna is a friction encoding, not
-  confidentiality, so the decoded form crosses no boundary the encoded
-  form didn't; the same moderator-only access and retention as `reason`
-  apply.
-
-### Added — v1.8.12 kryphocron substrate wiring
-- New dependencies: `kryphocron` 0.3.1 and `kryphocron-lexicons`
-  0.3, matching Aurora-Locus's pins. Note for operators building
-  from source: kryphocron unconditionally depends on `zstd`
-  (C libzstd via `zstd-sys`), so building cairn-mod now requires
-  a C toolchain — the same footprint as building Aurora itself.
-- The kryphocron codec is instantiated at boot when the new
-  `[pds_admin.rust.kryphocron]` block sets `enabled = true`
-  (default `false`). Wiring and detection only: the codec is
-  never invoked at this release — decode of private content
-  begins with the report-flow work in a later release, and
-  nothing is decoded without this explicit opt-in.
-- Three new capability registry entries for Aurora's kryphocron
-  surfaces: `kryphocron-read` (operator-opt-in — it gates decode
-  of private content), `kryphocron-rotation` and
-  `kryphocron-overrides` (auto-advance — neither returns encoded
-  content). No endpoints under any of the three are consumed yet.
-- `cairn pds-admin probe` now reports kryphocron substrate state
-  when enabled: codec id (`laquna/0.2`), seed policy
-  (`DidNsidRkey`), and decode readiness. When disabled, the probe
-  distinguishes "advertised by the PDS but operator declined"
-  from "codec ready"; `--json` carries the state under the new
-  `kryphocron` key (null when disabled).
-
 ## [1.8.0] - 2026-07-22
 
-The v1.8 series ships as one release: the Rust-PDS (Aurora-Locus)
-backend, from the service-auth foundation (v1.8.1) through
-protocol parity, reads, writes, audit verification, batch,
-realtime, ops-and-runtime, operator extensions, and this series
-wrap (v1.8.11). Per-release subsections below preserve the
-development attribution.
+The v1.8 series ships as one release: the Rust-PDS backend, from
+the service-auth foundation (v1.8.1) through protocol parity,
+reads, writes, audit verification, batch, realtime,
+ops-and-runtime, operator extensions, series wrap (v1.8.11), and
+kryphocron consumption (v1.8.12–v1.8.15). Per-release subsections
+below preserve the development attribution.
+
+### Added — v1.8.15 kryphocron handling guide
+- New operator guide (`docs/laquna-operator-guide.md`) for working
+  with kryphocron-encoded private records: how to diagnose a codec
+  the deployment can't read, how a moderator inspects an
+  un-decodable record through the report's record reference, how to
+  read rotation cadence off the records the PDS already returns, and
+  how forward-compatible the decode path is across codec versions.
+  Documentation only — no behavior change. Closes the kryphocron
+  consumption workstream.
+
+### Added — v1.8.14 kryphocron context on resolved reports
+- Resolving a report whose subject is a decoded private record now
+  records the content tier (public / private) and the decode source
+  (`aurora_server` / `cairn_client`) on the resolution's audit entry,
+  so the audit trail shows which moderation decisions touched
+  decoded private content and where the plaintext came from. Other
+  reports are unaffected, and `cairn audit verify` covers the tagged
+  entries unchanged.
+- New `cairn pds-admin events query --kryphocron-only` flag filters a
+  page of moderation events down to kryphocron events.
+
+### Added — v1.8.13 private-record retrieval on report intake
+- When a report's subject is a private record cairn-mod can decode,
+  the plaintext is now retrieved and decoded at report-intake time and
+  stored on the report, so opening the report stays a plain read. This
+  is opt-in: the operator pins the `kryphocron-read` capability, and
+  nothing is decoded otherwise. A record stored under a codec the
+  deployment doesn't have installed is left un-decoded and the report
+  is still filed, with the mismatch reported in the logs.
+- Decoded private-tier plaintext is stored on the report row under the
+  same moderator-only access and retention as the report reason —
+  deliberate, since the encoding is friction, not confidentiality, so
+  the decoded form crosses no boundary the encoded form didn't.
+
+### Added — v1.8.12 kryphocron capability wiring
+- cairn-mod can now consume kryphocron, the private-record capability
+  a Rust PDS may advertise. This release wires and detects it only —
+  no records are decoded yet, and nothing happens unless the operator
+  enables the new `[pds_admin.rust.kryphocron]` block (default off).
+- Three kryphocron capabilities join the registry: `kryphocron-read`
+  (operator opt-in — it gates decode of private content),
+  `kryphocron-rotation`, and `kryphocron-overrides`.
+- `cairn pds-admin probe` now reports kryphocron state when enabled —
+  the installed codec, its seed policy, and decode readiness — and
+  distinguishes "the PDS advertises it but the operator declined" from
+  "ready".
+- Building from source now needs a C toolchain: the kryphocron
+  dependency pulls in `zstd` (C libzstd).
 
 ### Added — v1.8.11 series wrap
 - New `cairn pds-admin probe` compatibility check: runs
