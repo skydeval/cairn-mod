@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT\n                 id                 AS \"id!: i64\",\n                 created_at         AS \"created_at!: String\",\n                 reported_by        AS \"reported_by!: String\",\n                 reason_type        AS \"reason_type!: String\",\n                 reason,\n                 subject_type       AS \"subject_type!: String\",\n                 subject_did        AS \"subject_did!: String\",\n                 subject_uri,\n                 subject_cid,\n                 status             AS \"status!: ReportStatus\",\n                 resolved_at,\n                 resolved_by,\n                 resolution_label,\n                 resolution_reason\n               FROM reports WHERE id = ?1",
+  "query": "SELECT\n                 id                 AS \"id!: i64\",\n                 created_at         AS \"created_at!: String\",\n                 reported_by        AS \"reported_by!: String\",\n                 reason_type        AS \"reason_type!: String\",\n                 reason,\n                 subject_type       AS \"subject_type!: String\",\n                 subject_did        AS \"subject_did!: String\",\n                 subject_uri,\n                 subject_cid,\n                 status             AS \"status!: ReportStatus\",\n                 resolved_at,\n                 resolved_by,\n                 resolution_label,\n                 resolution_reason,\n                 decode_source\n               FROM reports WHERE id = ?1",
   "describe": {
     "columns": [
       {
@@ -72,6 +72,11 @@
         "name": "resolution_reason",
         "ordinal": 13,
         "type_info": "Text"
+      },
+      {
+        "name": "decode_source",
+        "ordinal": 14,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -91,8 +96,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "361f18a7a4657cf2d36a589717dddcbabfc9dc4e0b9420caf010156e6e7310bd"
+  "hash": "ebc38e24e7ace58fb8de2f44ec917b8b3de04ce3b12a71460478f3ed3cb3ff77"
 }

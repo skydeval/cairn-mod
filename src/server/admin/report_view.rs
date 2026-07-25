@@ -162,6 +162,7 @@ mod tests {
             resolved_by: None,
             resolution_label: None,
             resolution_reason: None,
+            decode_source: None,
         }
     }
 

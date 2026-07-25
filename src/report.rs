@@ -102,6 +102,59 @@ impl<'q> sqlx::Encode<'q, Sqlite> for ReportStatus {
     }
 }
 
+/// Content-visibility tier of a reported subject (v1.8.14, §5 of the
+/// audit-events design). Derived cairn-mod-side from the subject's
+/// NSID via [`kryphocron::Tier::from_nsid`] (Aurora exposes no tier
+/// field); carried as the `content_tier` key on the `report_resolved`
+/// audit row's `reason` JSON for `kryphocron_record` subjects (§3.4).
+///
+/// This is a *vocabulary* type, not a stored column — snake_case
+/// wire strings (`"public"` / `"private"`) match the `audit_log`
+/// `reason` JSON conventions. There is no serde/sqlx impl: the value
+/// only ever reaches the wire as a plain string inside an opaque,
+/// hash-verbatim `reason` payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTier {
+    /// Public-tier content (`kryphocron::Tier::Public`).
+    Public,
+    /// Private-tier content (`kryphocron::Tier::Private`) — the only
+    /// tier that reaches the v1.8.14 audit path (the sole
+    /// `kryphocron_record` subject is `tools.kryphocron.feed.postPrivate`).
+    Private,
+}
+
+impl ContentTier {
+    /// snake_case wire string carried in the audit `reason` JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContentTier::Public => "public",
+            ContentTier::Private => "private",
+        }
+    }
+}
+
+impl std::fmt::Display for ContentTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<kryphocron::Tier> for ContentTier {
+    fn from(tier: kryphocron::Tier) -> Self {
+        match tier {
+            kryphocron::Tier::Public => ContentTier::Public,
+            kryphocron::Tier::Private => ContentTier::Private,
+            // `kryphocron::Tier` is `#[non_exhaustive]`. A future
+            // substrate tier would fail to compile here until this
+            // match is extended — a deliberate compile-time tripwire.
+            // Until then, any unmodelled tier maps to the conservative
+            // `Private` (treat unknown visibility as needing the
+            // consent gate). Revisit when kryphocron ships a new tier.
+            _ => ContentTier::Private,
+        }
+    }
+}
+
 /// A row from the `reports` table. Field names / types match the
 /// schema 1:1; see `lexicons/tools/cairn/admin/defs.json#reportView`
 /// for the wire projection that admin handlers build from this.
@@ -153,6 +206,13 @@ pub struct Report {
     /// `reason` — this is the MODERATOR's rationale, recorded at
     /// resolve time).
     pub resolution_reason: Option<String>,
+    /// Which decode path produced `decoded_plaintext` for a
+    /// `kryphocron_record` subject (v1.8.13 migration 0014):
+    /// `"aurora_server"` or `"cairn_client"`. `None` for non-
+    /// kryphocron subjects. v1.8.14 reads this at `resolve_report`
+    /// to tag the `report_resolved` audit row's `reason` JSON with
+    /// decode provenance (§3.3/§3.4 of the v1.8.14 design).
+    pub decode_source: Option<String>,
 }
 
 #[cfg(test)]
@@ -188,5 +248,31 @@ mod tests {
         assert_eq!(p, ReportStatus::Pending);
         let r: ReportStatus = serde_json::from_str("\"resolved\"").unwrap();
         assert_eq!(r, ReportStatus::Resolved);
+    }
+
+    // --- ContentTier (v1.8.14 §5) ---
+
+    #[test]
+    fn content_tier_from_kryphocron_tier_maps_both_variants() {
+        assert_eq!(
+            ContentTier::from(kryphocron::Tier::Public),
+            ContentTier::Public
+        );
+        assert_eq!(
+            ContentTier::from(kryphocron::Tier::Private),
+            ContentTier::Private
+        );
+    }
+
+    #[test]
+    fn content_tier_as_str_is_snake_case() {
+        assert_eq!(ContentTier::Public.as_str(), "public");
+        assert_eq!(ContentTier::Private.as_str(), "private");
+    }
+
+    #[test]
+    fn content_tier_display_matches_as_str() {
+        assert_eq!(ContentTier::Public.to_string(), "public");
+        assert_eq!(ContentTier::Private.to_string(), "private");
     }
 }

@@ -49,7 +49,8 @@ pub(super) async fn handler(
              resolved_at,
              resolved_by,
              resolution_label,
-             resolution_reason
+             resolution_reason,
+             decode_source
            FROM reports WHERE id = ?1"#,
         id,
     )

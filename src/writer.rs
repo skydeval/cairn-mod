@@ -1937,7 +1937,8 @@ impl Writer {
                  resolved_at,
                  resolved_by,
                  resolution_label,
-                 resolution_reason
+                 resolution_reason,
+                 decode_source
                FROM reports WHERE id = ?1"#,
             req.report_id,
         )
