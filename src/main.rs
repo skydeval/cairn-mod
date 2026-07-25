@@ -564,6 +564,12 @@ struct PdsAdminEventsQueryArgs {
     /// Page size (upstream default 50, capped at 100).
     #[arg(long)]
     limit: Option<u32>,
+    /// Show only Aurora's kryphocron moderation events (`event_type`
+    /// prefixed `kryphocron_`). Client-side filter on the fetched page
+    /// — Aurora's `event_type` filter takes one exact value, not a
+    /// prefix (v1.8.14 §7.3).
+    #[arg(long = "kryphocron-only")]
+    kryphocron_only: bool,
     /// Path to cairn.toml (defaults to ./cairn.toml).
     #[arg(long)]
     config: Option<std::path::PathBuf>,
@@ -2386,9 +2392,14 @@ async fn run_pds_admin_events_query(args: PdsAdminEventsQueryArgs) -> Result<(),
         after: args.after,
         before: args.before,
     };
-    let rendered =
-        cli_pds_admin_reads::events_query(&config, filter, args.cursor.as_deref(), args.limit)
-            .await?;
+    let rendered = cli_pds_admin_reads::events_query(
+        &config,
+        filter,
+        args.cursor.as_deref(),
+        args.limit,
+        args.kryphocron_only,
+    )
+    .await?;
     println!("{rendered}");
     Ok(())
 }

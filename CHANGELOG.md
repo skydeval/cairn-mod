@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.14 audit-events kryphocron-context tagging
+- When a moderator resolves a report whose subject is a decoded
+  kryphocron record, the shipped `report_resolved` audit-log entry's
+  `reason` JSON now carries two extra keys: `content_tier`
+  (`"public"` / `"private"`, the subject's visibility class) and
+  `decode_source` (`"aurora_server"` / `"cairn_client"`, the provenance
+  of the decoded plaintext). For every other subject the entry is
+  byte-identical to before — the keys are omitted, never null. No new
+  audit action value: the closed `AUDIT_ACTION_VALUES` set stays at 10,
+  and `cairn audit verify` covers the tagged rows unchanged (the `reason`
+  payload is hashed verbatim). Report **ingest** stays audit-free.
+- `content_tier` is derived cairn-mod-side from the subject NSID via
+  `kryphocron::Tier::from_nsid` (Aurora exposes no tier field), through
+  a new `ContentTier { Public, Private }` vocabulary type with a
+  snake_case `Display` and `From<kryphocron::Tier>`.
+- The `Report` row type and its read SELECTs (resolve, getReport,
+  listReports) are extended to plumb v1.8.13's `reports.decode_source`
+  column into the resolve path. No migration (0014 stays highest).
+- `build_resolve_audit_reason` now returns a `serde_json::Value` (was a
+  `String`) so the resolve site can compose the kryphocron tags before
+  serializing; the single caller stringifies at the emission point.
+- New `cairn pds-admin events query --kryphocron-only` flag: a
+  client-side filter that keeps only Aurora's 12 `kryphocron_*`
+  moderation events on the fetched page (Aurora's `event_type` filter
+  matches one exact value, not a prefix). Existing pretty-JSON rendering
+  is unchanged; the 12 event-type values are pinned in a test.
+
 ### Added — v1.8.13 report-flow private-record retrieval
 - First live decode. When a report's subject is a private kryphocron
   record (`tools.kryphocron.feed.postPrivate`), cairn-mod fetches it at

@@ -87,13 +87,31 @@ pub async fn events_query(
     filter: QueryEventsFilter,
     cursor: Option<&str>,
     limit: Option<u32>,
+    kryphocron_only: bool,
 ) -> Result<String, CliError> {
     let backend = backend_for_reads(config).await?;
-    let page: PaginatedResponse<EventWithContext> =
+    let mut page: PaginatedResponse<EventWithContext> =
         backend.query_events(filter, cursor, limit).await?;
+    if kryphocron_only {
+        retain_kryphocron_events(&mut page.items);
+    }
     let rendered = serde_json::to_string_pretty(&page)
         .map_err(|e| CliError::Config(format!("render response: {e}")))?;
     Ok(with_pagination_hint(rendered, page.cursor.as_deref()))
+}
+
+/// Prefix marking Aurora's kryphocron moderation events. All 12
+/// `kryphocron_*` `event_type` values (Aurora `admin/events.rs:249-262`)
+/// share it, so a prefix test both selects the current set and admits
+/// future kryphocron event types without a hand-maintained list.
+const KRYPHOCRON_EVENT_PREFIX: &str = "kryphocron_";
+
+/// Client-side `--kryphocron-only` filter (v1.8.14 §7.3): keep only
+/// events whose `event_type` is a kryphocron moderation event. Applied
+/// to the fetched page because Aurora's `event_type` filter matches one
+/// exact value, not a prefix.
+fn retain_kryphocron_events(items: &mut Vec<EventWithContext>) {
+    items.retain(|e| e.event_type.starts_with(KRYPHOCRON_EVENT_PREFIX));
 }
 
 /// `cairn pds-admin statuses query` body.
@@ -182,5 +200,79 @@ mod tests {
         assert!(with.contains("--cursor abc"));
         let without = with_pagination_hint("{}".to_string(), None);
         assert_eq!(without, "{}");
+    }
+
+    fn event(event_type: &str) -> EventWithContext {
+        EventWithContext {
+            id: 1,
+            event_type: event_type.to_string(),
+            actor_did: "did:plc:actor".to_string(),
+            actor_handle: None,
+            subject: None,
+            subject_handle: None,
+            details: serde_json::Value::Null,
+            created_at: "2026-07-25T00:00:00.000Z".to_string(),
+        }
+    }
+
+    /// Aurora's 12 kryphocron `event_type` values on the queryEvents
+    /// surface (`admin/events.rs:249-262` @ Aurora 2ffeb1a). Pinned so a
+    /// drift in the substrate vocabulary trips this test. All share the
+    /// `kryphocron_` prefix the `--kryphocron-only` filter keys on.
+    const KRYPHOCRON_EVENT_TYPES: &[&str] = &[
+        "kryphocron_bind_granted",
+        "kryphocron_bind_denied",
+        "kryphocron_audience_check_denied",
+        "kryphocron_reborrow_failed",
+        "kryphocron_composite_rollback_marker",
+        "kryphocron_audience_updated",
+        "kryphocron_block_changed",
+        "kryphocron_mute_changed",
+        "kryphocron_threadgate_changed",
+        "kryphocron_fallback",
+        "kryphocron_recovery_write",
+        "kryphocron_system_cleanup",
+    ];
+
+    #[test]
+    fn all_twelve_kryphocron_event_types_share_the_filter_prefix() {
+        assert_eq!(KRYPHOCRON_EVENT_TYPES.len(), 12);
+        for et in KRYPHOCRON_EVENT_TYPES {
+            assert!(
+                et.starts_with(KRYPHOCRON_EVENT_PREFIX),
+                "{et} must carry the kryphocron_ prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn retain_kryphocron_events_keeps_only_kryphocron() {
+        let mut items = vec![
+            event("account_takedown"),
+            event("kryphocron_bind_granted"),
+            event("record_takedown"),
+            event("kryphocron_system_cleanup"),
+        ];
+        retain_kryphocron_events(&mut items);
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|e| e.event_type.starts_with("kryphocron_"))
+        );
+    }
+
+    #[test]
+    fn retain_kryphocron_events_keeps_all_twelve() {
+        let mut items: Vec<_> = KRYPHOCRON_EVENT_TYPES.iter().map(|t| event(t)).collect();
+        retain_kryphocron_events(&mut items);
+        assert_eq!(items.len(), 12);
+    }
+
+    #[test]
+    fn retain_kryphocron_events_empties_a_non_kryphocron_page() {
+        let mut items = vec![event("account_takedown"), event("label_applied")];
+        retain_kryphocron_events(&mut items);
+        assert!(items.is_empty());
     }
 }
