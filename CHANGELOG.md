@@ -17,629 +17,75 @@ kryphocron consumption (v1.8.12–v1.8.15). Per-release subsections
 below preserve the development attribution.
 
 ### Added — v1.8.15 kryphocron handling guide
-- New operator guide (`docs/laquna-operator-guide.md`) for working
-  with kryphocron-encoded private records: how to diagnose a codec
-  the deployment can't read, how a moderator inspects an
-  un-decodable record through the report's record reference, how to
-  read rotation cadence off the records the PDS already returns, and
-  how forward-compatible the decode path is across codec versions.
-  Documentation only — no behavior change. Closes the kryphocron
-  consumption workstream.
+- New operator guide (`docs/laquna-operator-guide.md`) for working with kryphocron-encoded private records: diagnosing a codec the deployment can't read, inspecting an un-decodable record, reading rotation cadence, and codec-version forward compatibility. Documentation only; closes the kryphocron consumption workstream.
 
 ### Added — v1.8.14 kryphocron context on resolved reports
-- Resolving a report whose subject is a decoded private record now
-  records the content tier (public / private) and the decode source
-  (`aurora_server` / `cairn_client`) on the resolution's audit entry,
-  so the audit trail shows which moderation decisions touched
-  decoded private content and where the plaintext came from. Other
-  reports are unaffected, and `cairn audit verify` covers the tagged
-  entries unchanged.
-- New `cairn pds-admin events query --kryphocron-only` flag filters a
-  page of moderation events down to kryphocron events.
+- Resolving a report about a decoded private record now records the content tier and decode source on the resolution's audit entry, so the audit trail shows which moderation decisions touched decoded private content.
+- New `cairn pds-admin events query --kryphocron-only` flag filters a page of moderation events down to kryphocron events.
 
 ### Added — v1.8.13 private-record retrieval on report intake
-- When a report's subject is a private record cairn-mod can decode,
-  the plaintext is now retrieved and decoded at report-intake time and
-  stored on the report, so opening the report stays a plain read. This
-  is opt-in: the operator pins the `kryphocron-read` capability, and
-  nothing is decoded otherwise. A record stored under a codec the
-  deployment doesn't have installed is left un-decoded and the report
-  is still filed, with the mismatch reported in the logs.
-- Decoded private-tier plaintext is stored on the report row under the
-  same moderator-only access and retention as the report reason —
-  deliberate, since the encoding is friction, not confidentiality, so
-  the decoded form crosses no boundary the encoded form didn't.
+- When a report's subject is a private record cairn-mod can decode, the plaintext is retrieved at report intake and stored on the report, so opening the report stays a plain read; opt-in via the `kryphocron-read` capability, and a record whose codec isn't installed is left un-decoded with the report still filed.
 
 ### Added — v1.8.12 kryphocron capability wiring
-- cairn-mod can now consume kryphocron, the private-record capability
-  a Rust PDS may advertise. This release wires and detects it only —
-  no records are decoded yet, and nothing happens unless the operator
-  enables the new `[pds_admin.rust.kryphocron]` block (default off).
-- Three kryphocron capabilities join the registry: `kryphocron-read`
-  (operator opt-in — it gates decode of private content),
-  `kryphocron-rotation`, and `kryphocron-overrides`.
-- `cairn pds-admin probe` now reports kryphocron state when enabled —
-  the installed codec, its seed policy, and decode readiness — and
-  distinguishes "the PDS advertises it but the operator declined" from
-  "ready".
-- Building from source now needs a C toolchain: the kryphocron
-  dependency pulls in `zstd` (C libzstd).
+- cairn-mod can now consume kryphocron, the private-record capability a Rust PDS may advertise; this release wires and detects it only, and nothing happens unless the operator enables it (default off).
+- `cairn pds-admin probe` reports kryphocron state when enabled — the installed codec, its seed policy, and decode readiness.
+- Building from source now needs a C toolchain (the kryphocron dependency pulls in C libzstd).
 
 ### Added — v1.8.11 series wrap
-- New `cairn pds-admin probe` compatibility check: runs
-  `describeCapabilities` against the configured Rust PDS and
-  reports the registry-vs-advertised capability match
-  (advertised-and-registered, upstream extensions, and
-  registered-but-not-advertised drift) with an overall verdict;
-  `--json` for the structured report. This is the operator's tool
-  for verifying a PDS advertises what cairn-mod expects before
-  enabling gated surfaces.
-- The deprecated `acknowledge_v1_8_1_audit_divergence` config
-  field is removed (advisory-WARN since v1.8.6; the divergence it
-  acknowledged has been closed by `cairn audit cross-verify`
-  since then). Configs still carrying the key are silently
-  ignored — drop it at leisure. The coexistence gates the same
-  validator enforces (no auto-mode policy rules with the Rust
-  backend; no inbound XRPC gateway coexistence) remain in force,
-  and their error names drop the stale "Inspector" wording.
-- The `[pds_admin.locus]` → `[pds_admin.rust]` rename aid is
-  retained: a stale `locus` block still gets a precise
-  operator-facing error rather than a silent ignore.
-- Internal: capability test fixtures consolidated to advertise
-  all ten shipped families; umbrella design-doc reconciled
-  against shipped source (scope-language, ops capability model,
-  stub taxonomy, flag lifecycle).
+- New `cairn pds-admin probe` compatibility check runs `describeCapabilities` against the configured Rust PDS and reports which capabilities line up, so operators can verify a PDS before enabling gated surfaces (`--json` for a structured report).
+- The deprecated `acknowledge_v1_8_1_audit_divergence` config field is removed; configs still carrying it are ignored.
 
 ### Added — v1.8.10 operator extensions
-- Eight new read-only instance-visibility endpoints consumed from
-  the upstream PDS's ops namespace (trait 40 → 48, all Unsupported
-  on Ozone): system health, sequencer status, federation status,
-  blob statistics, database status, resource usage, version info,
-  and system metrics. All are **capability-bare upstream** — no
-  advertisement strings exist for them, so there is no capability
-  gate and no operator pin: availability is discovered at the
-  wire, and a 404 surfaces with an operator hint pointing at the
-  upstream's `describeCapabilities` output and release notes
-  (endpoint availability varies by PDS version; the advertised
-  list is advisory for this surface).
-- Seven of the eight return the upstream's JSON verbatim — the
-  upstream builds those bodies ad hoc with no contract types, so
-  cairn-mod deliberately ships **no fabricated mirrors**: the raw
-  body passes through, human rendering formats known headline
-  fields when present and falls back to pretty JSON otherwise,
-  and `--json` always emits the body untouched. Federation status
-  is the one typed response (camelCase wire).
-- New `cairn pds-admin ops` subcommand group: `metrics` (moved
-  from `cairn pds-admin metrics` — direct rename, old path
-  removed), `health`, `sequencer`, `federation`, `blobs`,
-  `database`, `resources`, `version`, `system-metrics`; all take
-  `--json`. The existing `blobs` *action* group is unaffected by
-  the same-named read inside `ops`.
-- No new capability registry entries, no migration, no config
-  changes — deliberately: the consumed surface advertises
-  nothing, persists nothing, and configures nothing. The
-  registry-additions cadence of v1.8.6–v1.8.9 breaks here by
-  fidelity to source, not oversight.
+- New `cairn pds-admin ops` subcommands surface eight read-only instance-visibility views from the PDS — health, sequencer, federation, blobs, database, resources, version, and system metrics — each with `--json`.
+- Availability is discovered at the wire; a view the PDS doesn't offer surfaces a clear operator hint rather than a hard failure.
 
 ### Added — v1.8.9 ops and runtime
-- Three new backend methods (trait 37 → 40), all Unsupported on
-  Ozone: `get_instance_metrics` (aggregated instance health /
-  resource / growth / federation metrics from the upstream PDS's
-  ops namespace — absent counters mean "not instrumented" and are
-  rendered as such, never zero-filled), `get_runtime_setting`, and
-  `set_runtime_setting` (the upstream's two-tier runtime
-  configuration surface).
-- **Operator opt-in required for the runtime-settings pair** —
-  `runtime-settings` is the registry's third `OperatorOptIn`
-  family, and the pin gates read AND write (family-level):
-  `runtime-settings = "v1"` under `[pds_admin.rust.pinned_versions]`
-  (dual-posture rules identical to the batch and stream opt-ins).
-  `instance-metrics` is AutoAdvance. Registry 8 → 10.
-- Runtime-setting reads surface the upstream's four-tier
-  resolution verbatim (`Runtime` / `File` / `Default` /
-  `RecoveryMode`) — including the recovery-mode override that
-  forces `moderation-mode` reads to `"full"`, so operators see
-  the override honestly. Unknown keys are a normal answer with
-  `source: Default`, not an error. cairn-mod reads
-  `moderation-mode` for visibility only; its moderation dispatches
-  work regardless of the upstream's mode.
-- Writes require a SuperAdmin-granted service DID upstream
-  (403 → `Auth`); the upstream's key allowlist and per-key value
-  validation are authoritative — **cairn-mod deliberately copies
-  no key list** (unknown keys are rejected upstream with the
-  known-keys enumeration), and its only local checks are a
-  non-empty `--reason` and a `--yes` confirm. Successful writes
-  return the value diff plus the upstream audit-chain entry id
-  (setting writes are audit-chained upstream and emit no
-  moderation event — they appear on the v1.8.8 stream only as
-  audit-entry frames).
-- New local ledger `runtime_settings_writes` (migration `0013`,
-  additive-only, unchained): what this cairn-mod changed, when,
-  and under which upstream chain entry. Best-effort (the upstream
-  chain entry is the authoritative record); not auto-joined by
-  `cairn audit cross-verify` — correlate via the stored entry id;
-  operators MAY prune.
-- Shared capability-gate helper extracted (`require_opt_in`) and
-  the batch POST dispatch generalized — the v1.8.7 batch and
-  v1.8.8 stream gates now use the same implementation, with their
-  shipped posture tests passing unchanged.
-- New CLI, all under `cairn pds-admin`: `metrics [--json]`,
-  `runtime get <key>`, `runtime set <key> <value> --reason … --yes`,
-  and `moderator-activity <did> [--after/--before/--limit]` — a
-  per-moderator activity view (summary counts + rows) over the
-  actor-scoped event query shipped in v1.8.3; read-only, no new
-  wire surface.
+- Operators can read the PDS's instance metrics and get/set the PDS's runtime settings via `cairn pds-admin`; runtime writes require operator opt-in (`runtime-settings = "v1"`) and a SuperAdmin-granted service identity on the PDS.
+- New `cairn pds-admin moderator-activity <did>` view summarizes a single moderator's activity.
 
 ### Added — v1.8.8 realtime stream consumption
-- cairn-mod now consumes the upstream PDS's realtime moderation
-  event stream (`subscribeModEvents` WebSocket): a long-lived
-  consumer task with a reconnect state machine, spawned by
-  `cairn serve` when `[pds_admin.rust.stream].enabled = true`.
-  The stream is JSON text frames (hello / event / auditEntry /
-  heartbeat / outdatedCursor / error); delivery is near-realtime
-  (the upstream polls on a 5-second tick over a retention-bounded
-  channel, 7-day default).
-- **Operator opt-in required** — `mod-events-stream` is the
-  capability registry's second `OperatorOptIn` family: the
-  consumer connects only when the upstream advertises
-  `mod-events-stream-v1` AND the operator pins
-  `mod-events-stream = "v1"` under
-  `[pds_admin.rust.pinned_versions]` (same dual-posture rules as
-  v1.8.7's batch opt-in). Unpinned or unadvertised, the task
-  parks dormant and re-evaluates with backoff.
-- One new backend method, `subscribe_mod_events` (trait 36 → 37)
-  — the trait's first stream-returning method. Ozone:
-  Unsupported. Reconciliation deliberately adds NO second method:
-  it reuses v1.8.3's `query_events` in a consumer-side page loop.
-- **At-most-once ingestion (F10), realized cairn-mod-side**: two
-  independent cursors (event stream + audit chain) persist to the
-  new `stream_cursors` table BEFORE each frame is processed. A
-  frame whose ingestion fails is lost by design (logged with full
-  context); nothing is ever re-delivered into side effects.
-  Heartbeats never advance cursors; a cursor-less connect seeds
-  from the server's hello.
-- **Echo suppression**: events whose id matches a recent local
-  dispatch (`pds_admin_audit.backend_action_id`, PerEvent and
-  PerBatch alike) are acknowledged but not mirrored — cairn-mod's
-  own actions are already first-class locally. Cascade reversals
-  of cairn-mod-approved appeals are ingested by design
-  (identifiable via `details.cascadeOf` + the service DID);
-  check failures fail open to ingestion.
-- Genuinely-upstream events land in the new unchained
-  `upstream_events` table (verbatim payload; UNIQUE event id =
-  reconciliation dedup; operators MAY prune). Upstream
-  `report_review` resolutions annotate matching pending local
-  reports via the new write-once `reports.upstream_resolution`
-  column (`resolved`/`dismissed`; matched by subject coordinates
-  — report ids do not ride the wire; local `status` stays
-  operator-owned).
-- Optional `include_audit_chain`: streamed audit-chain entries
-  are independently re-verified through v1.8.6's Path A pipeline
-  and mirrored to the new `upstream_audit_mirror` table with BOTH
-  verdicts (`verified_upstream` = the upstream's own recompute,
-  `verified_local` = cairn-mod's) — disagreement is itself
-  signal. Tampered entries are mirrored as evidence, not dropped;
-  `cairn audit cross-verify` remains the authoritative exit-15
-  surface.
-- On `outdatedCursor` (client fell behind the retention window):
-  automatic reconciliation backfills the gap from the unpruned
-  historical aggregate via `query_events`, then resubscribes
-  live; overlap is absorbed by the dedup key.
-- New `cairn stream` CLI: `status` (durable cursor +
-  observational-table state), `cursor get`, and the confirmed
-  overrides `cursor set` / `cursor reset` (at-most-once escape
-  hatches; replay is idempotent). `stream start`/`stop`
-  subcommands are deferred — they need an authenticated
-  server-side control endpoint (its own small design); the
-  v1.8.8 mechanism is the `enabled` toggle + restart, which also
-  clears an auth HardStop.
-- Migration `0012` (additive-only): `stream_cursors`,
-  `upstream_events`, `upstream_audit_mirror`,
-  `reports.upstream_resolution`, and the previously-missing
-  index on `pds_admin_audit.backend_action_id`.
-- Config: `[pds_admin.rust.stream]` — `enabled` (default false),
-  `include_audit_chain` (default false), `reconnect_max_backoff`
-  (default 60s), `silence_timeout` (default 35s; must exceed the
-  upstream's 30-second heartbeat), `reconnect_on_normal_close`
-  (default false).
+- cairn-mod can now consume the PDS's realtime moderation event stream when the operator opts in (`mod-events-stream = "v1"`), reconnecting automatically and surviving restarts.
+- Upstream report resolutions annotate matching local reports; the operator's own local report status stays operator-owned.
+- Optionally re-verifies the PDS's streamed audit-chain entries against cairn-mod's own recompute, recording both verdicts so any disagreement is visible.
+- New `cairn stream` CLI inspects and, when needed, overrides the stream cursor.
 
 ### Added — v1.8.7 batch endpoints + multi-subject dispatch
-- Ten new backend methods (trait 26 → 36). Four dedicated batch
-  methods consume the upstream PDS's atomic batch endpoints —
-  `batch_takedown_accounts`, `batch_suspend_accounts`
-  (indefinite-only by wire contract), `batch_restore_accounts`,
-  and `batch_takedown_records` (**URI-level**: bare AT-URIs, all
-  versions at each URI). Six `..._many` methods extend the v1.8.5
-  verbs to multi-subject dispatch in one `emitEvent`:
-  `delete_account_many`, `quarantine_blob_many`,
-  `restore_blob_many`, `delete_blob_many`, `takedown_record_many`
-  (**CID-level**: every subject requires a non-empty CID;
-  URI-level batches belong to `batch_takedown_records`), and
-  `update_subject_status_many`. All are Unsupported on Ozone.
-- Batch dispatch is **whole-batch atomic** upstream: partial
-  success is not an observable state. A per-subject failure aborts
-  the entire batch and surfaces the failing index and subject id
-  in the error message.
-- **Operator opt-in required** for the four dedicated batch
-  methods — the new `batch-takedown` capability family is the
-  registry's first `OperatorOptIn` entry, and advertisement alone
-  does not activate it. With an empty `required_capabilities`
-  (permissive baseline), opting in is one line:
-
-  ```toml
-  [pds_admin.rust.pinned_versions]
-  batch-takedown = "v1"
-  ```
-
-  With a non-empty `required_capabilities` (strict baseline), the
-  existing pin cross-check applies — add `batch-takedown-v1` to
-  `required_capabilities` as well, which also makes the capability
-  probe-required at startup. Unpinned (or unadvertised) dispatch
-  refuses with `CapabilityNotAdvertised("batch-takedown-v1")`.
-  The six `..._many` methods ride their verbs' existing
-  capability gates unchanged.
-- Nine new CLI subcommands, all through the recordAction writer:
-  `accounts batch-takedown|batch-suspend|delete-many`,
-  `blobs quarantine-many|restore-many|delete-many` (blob refs as
-  `<did>@<cid>`), the new `records` group with `batch-takedown`
-  (bare AT-URIs) and `takedown-many` (`<at-uri>#<cid>`, CID
-  fragment required), and `subjects update-status-many`.
-  `accounts batch-restore` is intentionally NOT shipped:
-  `batch_restore_accounts` is trait-only this release — cairn-mod's
-  restore semantics ride the single-target revoke flow, and a
-  batch-revoke writer design is deferred.
-- One `subject_actions` intent row per batch: `action_type` reuses
-  the singular verb's value, the first subject's DID occupies the
-  flat `subject_did` column, and the authoritative subjects list
-  rides `action_detail` with a `batch: true` marker. **Batch rows
-  are strike-exempt** (`strike_value_base/applied = 0`) — the
-  one-subject-one-strike semantic doesn't compose with N-subject
-  aggregation; per-subject singular rows remain the strike surface.
-- One `pds_admin_audit` row per batch, stamped with the new
-  `PerBatch` action-id variant (first production construction; the
-  stored TEXT payload is unchanged in shape, so
-  `cairn audit cross-verify` joins batch rows to their upstream
-  chain entries with zero changes). Dedicated-batch outputs store
-  `cascading_actions_json` as NULL (no cascade channel), distinct
-  from the emitEvent responses' `"[]"`.
-- Batch size caps mirror the upstream constants and are validated
-  client-side before any wire call (at-cap passes): 50 for the
-  dedicated batch endpoints and multi-subject default, 10 for
-  `delete_account_many`, 25 for `delete_blob_many`. Upstream
-  re-validates; the upstream values remain authoritative.
-- No migration: v1.8.7 rides the v1.8.5/v1.8.6 schema unchanged.
+- New batch endpoints for account takedown, suspension, restore, and record takedown, plus multi-subject variants of the existing action verbs — all requiring operator opt-in (`batch-takedown = "v1"`).
+- New `cairn pds-admin` subcommands for each: batch account actions, multi-subject blob and record actions, and multi-subject status updates.
 
 ### Added — v1.8.6 audit verification
-- New `cairn audit cross-verify` command: verifies cairn-mod's own
-  four-table hash chain, fetches the upstream PDS's hash-chained
-  audit trail, **independently re-verifies every upstream entry
-  byte-for-byte** (both the current 15-field canonical form and the
-  pre-v0.9 legacy form, including the wire-to-canonical timestamp,
-  payload, and subject transforms and the pre-chain sentinel rules),
-  and joins local dispatch rows to their upstream chain entries via
-  the response ids recorded since v1.8.5. Any divergence exits 15
-  with a JSON `outcome` discriminator (`divergence-local` /
-  `divergence-cross` / `divergence-join-mismatch`); pre-v1.8.5 rows
-  without join keys are reported as unjoinable, never as divergent.
-- Two new backend read methods behind the new `audit-trail`
-  capability family: `get_audit_trail` (paged, with the upstream's
-  own whole-chain verdict) and `get_audit_entry` (by id or by
-  hash). Unsupported on Ozone.
-- `verification_persist` (accepted since v1.8.1) gains its
-  consumer: cross-verify outcomes persist to the new
-  `cross_verify_outcomes` table (migration `0011`, additive-only)
-  and are listable via `cairn audit cross-verify --history`.
-  Setting it `false` runs the verification without recording.
-- cairn-mod's own `pds_admin_audit` row hash now covers the v1.8.5
-  response columns (12-field preimage). Migration `0011` captures a
-  per-deployment format boundary; `cairn audit verify` checks
-  pre-boundary rows under the v1.7 form and post-boundary rows
-  under the new form (with a counted, non-failing fallback for
-  mid-upgrade writes, surfaced as `legacy_form_rows`).
-- `acknowledge_v1_8_1_audit_divergence` is deprecated: the
-  divergence it acknowledged is closed by cross-verification. The
-  field now draws a warning and is ignored; it will be removed in
-  the v1.8.11 series wrap. The auto-mode-rules and xrpc-gateway
-  coexistence gates are unchanged.
-- Docs: `cairn audit verify`'s module notes now describe the
-  four-table walk it has actually performed since the xrpc
-  membership tables joined the chain (the stale two-table wording
-  misled this cycle's recon).
+- New `cairn audit cross-verify` command independently re-verifies the PDS's hash-chained audit trail against cairn-mod's own records and reports any divergence with a distinct exit code; `--history` lists past outcomes.
+- Operators can read the PDS's audit trail and fetch individual audit entries via `cairn pds-admin`.
 
 ### Added — v1.8.5 action surface enrichment
-- RustBackend now dispatches 14 of Aurora's 16 `emitEvent` action
-  variants: added delete-account, quarantine/restore/delete-blob,
-  resolve/dismiss-report, resolve/escalate-appeal, send-email, and
-  update-subject-status handlers on top of v1.8.2's four. Label
-  operations remain architecturally forbidden (cairn-mod's
-  `subscribeLabels` is the canonical label surface), which caps the
-  dispatched set at 14 by design.
-- New response type `ActionResponse` surfaces Aurora's `eventId`,
-  `auditEntryId`, `snapshots`, and `cascadingActions` (bare event
-  ids — resolve details via `events query`/`events get`). Appeal
-  approvals surface the cascaded reversal's event id. The v1.8.2
-  emit dispatch helper now parses the full response; the v1.8.2
-  methods are unchanged on the surface.
-- Per-action role handling: delete-account and send-email surface
-  Admin-role-insufficient failures as auth errors (exit 5) — those
-  two are Admin-gated upstream; the blob verbs are Moderator-tier.
-- Migration `0010` extends `subject_actions.action_type` and
-  `pds_admin_audit.backend_method` with the ten new values, adds
-  `subject_actions.action_detail` (variant data: report/appeal ids,
-  decisions, email fields, status values), and adds upstream
-  response persistence to `pds_admin_audit`
-  (`upstream_audit_entry_id`, `cascading_actions_json`,
-  `snapshots_json` — the existing `backend_action_id` column keeps
-  the root event id). Both tables are rebuilt with their append-only
-  triggers preserved; the two other tables referencing
-  `subject_actions` are re-created unchanged as part of the rebuild.
-- Ten new `cairn pds-admin` subcommands, all routing through the
-  recordAction writer (writer-owned dispatch + audit): `accounts
-  delete`, `blobs quarantine|restore|delete`, `reports
-  resolve|dismiss`, `appeals resolve|escalate`, `emails send`,
-  `subjects update-status`. Report and appeal subcommands take the
-  target's full subject coordinates (`--uri`/`--cid`) because the
-  upstream validates the embedded id against the subject by variant
-  and identifier. Default output is the full JSON outcome including
-  cascading actions; `--summary` prints a one-liner.
-- **Config note:** `[pds_admin.action_map]` must now cover the ten
-  new action types (map each to its same-named method, or `"skip"`).
-  The coverage rule is unchanged in spirit — every action type is
-  mapped explicitly — the set just grew.
-- Appeals surface is now complete end-to-end: list and inspect
-  appeals (v1.8.4), then resolve or escalate them (v1.8.5).
-- OzoneBackend returns `Unsupported` (exit 17) for all ten new
-  methods; per-method real bsky-PDS-admin mappings were considered
-  and deferred past v1.8.
-- Policy automation cannot propose the new verbs — they are
-  operator commands; `pending_policy_actions` keeps its
-  five-value vocabulary. The new verbs never emit labels and never
-  carry strikes.
-
+- `cairn pds-admin` gains ten moderation actions against a Rust PDS: delete account; quarantine/restore/delete blob; resolve/dismiss report; resolve/escalate appeal; send email; and update subject status. Each shows the full outcome, with `--summary` for a one-liner.
+- The appeals surface is now complete end-to-end: list and inspect appeals (v1.8.4), then resolve or escalate them.
+- `[pds_admin.action_map]` must now map the ten new action types (or `"skip"` them).
 
 ### Added — v1.8.4 moderator read surface completion
-- RustBackend now covers every read endpoint under
-  `tools.aurora.moderator.*`. New methods: `get_event`,
-  `get_subject_context`, `get_subject_history`, `list_appeals`,
-  `get_appeal`. Subject context/history are account-scoped (plain
-  DID parameter); history rows are action rows (the same shape
-  `query_statuses` returns), and `get_appeal` returns the list-view
-  fields plus a lifecycle timeline.
-- New CLI subcommands: `cairn pds-admin events get`,
-  `subjects context`, `subjects history`, `appeals list`,
-  `appeals get`. Appeal status filters take snake_case wire values
-  (`pending`, `under_review`, `approved`, `denied`, `escalated`).
-- Three new capability families in the registry: `subject-context`,
-  `subject-history`, `appeals` (advertised as `subject-context-v1`,
-  `subject-history-v1`, `appeals-v1`; `getAppeal` shares the
-  `appeals` gate with `listAppeals`). `getEvent` shares v1.8.3's
-  `moderator-activity` family, which now gates exactly three
-  endpoints: `queryEvents`, `queryStatuses`, `getEvent`. Each family
-  gates independently — a PDS advertising `moderator-activity-v1`
-  without `subject-context-v1` keeps event/status reads working
-  while subject-context reads report the missing capability.
-- OzoneBackend returns `Unsupported` for all five new methods;
-  Ozone's read surface still requires distinct service configuration
-  (out of v1.8 scope).
-- The umbrella plan's `getReporterContext` reference is reconciled
-  as a `queryEvents` actor-filter derivation — no distinct endpoint
-  exists upstream, so no new method was added for it.
+- cairn-mod now covers every moderator read endpoint on a Rust PDS: fetch an event, a subject's context and history, and list and inspect appeals.
+- New `cairn pds-admin` subcommands expose all of them: `events get`, `subjects context`, `subjects history`, `appeals list`, `appeals get`.
 
 ### Added — v1.8.3 read-side foundation + CID plumbing
-- RustBackend can now read the upstream PDS's moderation surface:
-  `query_events` (moderation event stream) and `query_statuses`
-  (per-DID status rows) via `tools.aurora.moderator.queryEvents` /
-  `queryStatuses`. Both gate on the shared `moderator-activity`
-  capability. OzoneBackend returns `Unsupported` for both (the Ozone
-  read surface is not colocated with bsky-PDS).
-- New CLI subcommands: `cairn pds-admin events query` and
-  `cairn pds-admin statuses query` — query the configured backend
-  directly and print the page as JSON. Filters map 1:1 onto the
-  upstream parameters (`--event-type` takes snake_case values like
-  `account_takedown`; `--subject-type` takes `account`/`record`/`blob`).
-  New exit codes: 16 (capability not advertised), 17 (backend
-  unsupported), 18 (terminal backend error). The v1.8.3 design draft
-  assigned 14/15 but those were already taken by
-  `SERVICE_RECORD_UNREACHABLE`/`AUDIT_DIVERGENCE`.
-- Added `subject_cid` column to `subject_actions` (migration `0009`;
-  the append-only trigger is rebuilt to guard the new column, all
-  existing clauses preserved). Record-targeted actions can now carry
-  the record CID: supply it on `recordAction` (`cid` field), or let
-  the writer derive it from a referenced report about the same record
-  (`reports.subject_cid` join, URI-matched). Fully record-shaped rows
-  (URI + CID) now auto-elevate to `takedown_record` at dispatch;
-  legacy rows without a CID continue to reject with a `validation`
-  outcome rather than escalating to account-level takedown.
+- cairn-mod can now read a Rust PDS's moderation surface — the event stream and per-subject status rows — via new `cairn pds-admin events query` and `statuses query` subcommands that print a page as JSON.
+- Record-targeted actions can now carry the record CID, so a fully record-shaped action targets that record rather than escalating to an account-level takedown.
 
 ### Added — v1.8.2 protocol parity
-- RustBackend can now execute account takedowns, suspensions, restorations,
-  and record takedowns against Rust PDSes (Aurora-Locus and compatible) via
-  `tools.aurora.admin.emitEvent`. Suspension duration is transmitted as
-  `metadata.durationDays`; omitted duration means indefinite. Moderator
-  `notes` are retained in cairn-mod's audit chain but are not transmitted
-  to the PDS (the emitEvent wire has no notes field; `rationale` carries
-  the first `reason_codes` entry).
-- Added `takedown_record` to the `PdsAdminBackend` trait. Ozone implements
-  it via `com.atproto.admin.updateSubjectStatus` with a `strongRef`
-  subject; RustBackend dispatches it via `emitEvent` with a record
-  subject. Both require the record's AT-URI **and** CID; a
-  partially-shaped subject is rejected with a `validation` outcome.
-- Subject-shape-aware dispatch routing: a takedown mapped to
-  `takedown_account` whose underlying action row targets a record (URI +
-  CID both present) auto-elevates to `takedown_record`. `takedown_record`
-  is also directly mappable in `[pds_admin.action_map]`.
-- Extended the audit chain's `backend_method` column to accept
-  `takedown_record` (migration `0008`; automatic, no operator action
-  needed).
-- Dispatching with empty `reason_codes` now logs a WARN naming the
-  misconfigured action row (the upstream moderator view would show no
-  reason); the dispatch still proceeds.
+- cairn-mod can now execute account takedowns, suspensions, restorations, and record takedowns against a Rust PDS, in lockstep with label emission and the existing audit chain.
+- Record takedowns require the record's full coordinates (AT-URI and CID); a partially-shaped record target is rejected rather than dispatched.
 
 ### Changed — v1.8.2
-- **Record-targeted moderation actions no longer escalate to
-  whole-account takedowns at the PDS.** Previously, a takedown recorded
-  against a record subject (AT-URI) dispatched an account-level takedown
-  of the parent DID. Because cairn-mod's action rows do not carry a
-  record CID (which both backends' record-takedown wire shapes require),
-  such dispatches now record a `validation`-outcome audit row and do not
-  reach the PDS, rather than silently widening a record action into an
-  account action. Account-targeted actions are unaffected. A future
-  release adds CID plumbing to make record-targeted rows dispatchable
-  end-to-end.
-- Renamed `F4_INVARIANT_REASON` to `LABEL_BRIDGE_INVARIANT_REASON`. If
-  you were importing the old name from `cairn_mod::pds_admin::backend`,
-  update your import. Value and label-bridge posture unchanged.
+- A takedown recorded against a record no longer escalates to a whole-account takedown at the PDS; without a record CID it is recorded locally and not dispatched, rather than silently widening into an account action. Account-targeted actions are unaffected.
 
-### Added
-- `BackendError` taxonomy split (foundation for v1.8 series). The seven-variant
-  shape — `Transient` / `Validation` / `Terminal` / `Auth` /
-  `CapabilityNotAdvertised` / `Unsupported` / `ArchitecturallyForbidden` —
-  is the operator-facing dashboard contract going forward; structured-log
-  parsers keying on the variant name need updating (see "Changed" below).
-- `BackendFailureLog` structured-log shape (nine fields: `scope` / `backend` /
-  `method` / `error_category` / `error_message` / `retry_after_seconds` /
-  `error_code` / `timestamp_epoch_ms` / `correlation_id`). Emitted via the
-  `log_backend_failure` helper. Operators querying structured logs pivot on
-  `error_category` (low-cardinality, exactly seven values).
-- `[sub_classification=Name ...]` marker convention in `error_message`
-  strings. Carries previously-structured side-channel data (rate-limit
-  retry hints, wire-level error codes, state-conflict markers) across
-  the variant migration without expanding the variant set. Operators can
-  query for sub-classifications via substring match in `error_message`,
-  e.g. `WHERE error_message LIKE '%[sub_classification=RateLimited%'`.
-  The `BackendError::retry_after_seconds()` and `BackendError::error_code()`
-  accessors parse the markers programmatically.
-- New `outcome` value `'terminal'` reserved for upstream-state failures
-  (HTTP 404 / 410) distinct from request-shape failures and from the
-  previously-named state-conflict cases. **Not yet writeable** — the SQL
-  CHECK constraint relaxation lands in a later v1.8.1 migration step
-  alongside the new `error_category` column.
-- `[pds_admin].backend` selector — explicit string `"ozone"` or
-  `"rust"` selects the active PDS-admin backend. When omitted (the
-  v1.7-compatible shape) and exactly one backend subsection is
-  declared, the selector auto-detects. When both are declared and
-  no selector is set, the configuration is rejected as ambiguous.
-  When the selector points at a subsection that isn't declared, the
-  configuration is rejected with a specific `selector requires
-  block` error.
-- `[pds_admin.rust]` configuration block — declares a Rust-PDS
-  backend (Aurora-Locus or another ATProto Rust PDS). Required
-  keys: `url`, `service_did`, `service_signing_key_env`,
-  `target_service_did`. Optional keys: `service_did_document_url`,
-  `request_timeout` (default `"30s"`, bounds 1s..=5m),
-  `capability_refresh_interval` (default `"1h"`, lower-bound
-  `"10s"`), `required_capabilities`, `pinned_versions`,
-  `verification_persist` (default `true`),
-  `acknowledge_v1_8_1_audit_divergence`. The env var named by
-  `service_signing_key_env` must hold a hex-encoded 32-byte
-  secp256k1 private key and be set at startup. (An earlier
-  unreleased draft of this block used OAuth-shaped keys —
-  `client_id_env` / `client_secret_env` / `scopes`; those keys
-  were removed before release and now produce a boot-time
-  migration error naming the replacement fields.)
-- `RustBackend` — the second `PdsAdminBackend` implementation
-  (`backend = "rust"` now boots instead of hard-erroring).
-  **Inspector-only in v1.8.1**: the only live upstream call is the
-  `tools.aurora.describeCapabilities` probe; every enforcement
-  method returns `CapabilityNotAdvertised` (audit `outcome =
-  'validation'`) until v1.8.2's protocol-parity work, and label
-  methods hard-refuse per the label-bridge invariant, same as the
-  Ozone backend. Dispatches that hit the capability gap emit an
-  operator-visible WARN on the
-  `cairn_mod::pds_admin::rust::capability` log target.
-- ES256K service-auth JWT signing for Rust-PDS calls. Per-call
-  short-lived tokens (`iss` = cairn-mod's service DID, `aud` = the
-  target PDS's service DID, `lxm` = the called NSID, 1-hour
-  expiry), signed with cairn-mod's secp256k1 key and DER-encoded
-  to match Aurora-Locus's verifier. No OAuth, no token cache. The
-  operator publishes cairn-mod's DID document and grants the
-  Aurora-side `admin_roles` role out-of-band.
-- Capability detection goes live: the `describeCapabilities` probe
-  runs at startup and every `capability_refresh_interval`,
-  verifies operator-declared `required_capabilities` against the
-  advertised set, and warns about advertised capability families
-  cairn-mod's registry doesn't know. The capability registry gains
-  its first entry (`mod-events-emit`, auto-advance — consumed by
-  v1.8.2's action verbs).
-- **Inspector-only audit-divergence enforcement when `[pds_admin]`
-  is enabled with `backend = "rust"`.** v1.8.1's RustBackend is
-  inspector-only — every dispatch produces a `BackendError`
-  audit-trail row at runtime because protocol parity with the
-  upstream ATProto admin surface lands at v1.8.2. Operators who
-  want to stand up the bridge against a Rust PDS in v1.8.1 must
-  acknowledge this explicitly via three independent
-  configuration constraints, all enforced at startup:
-  1. `[pds_admin.rust].acknowledge_v1_8_1_audit_divergence = true`
-     must be set on the selected block. Operators reading the
-     v1.8.1 release notes own this flag. The flag is
-     self-removing across the v1.8 series — required in v1.8.1,
-     deprecated in v1.8.2, removed in v1.8.3.
-  2. No `[policy_automation.rules.*]` may have `mode = "auto"`.
-     Auto-mode rules dispatch to the backend without operator
-     confirmation; in v1.8.1's inspector-only posture they would
-     silently produce audit-failure rows on every fire. Use
-     `mode = "flag"` on every rule until v1.8.2 ships.
-  3. `[xrpc_gateway].enabled` must not be `true`. The inbound
-     XRPC gateway dispatches into the recordAction path that
-     calls the configured backend; with the inspector-only Rust
-     backend this would produce continuous audit-failure rows
-     for every inbound request.
+### Added — v1.8.1
+- New `[pds_admin].backend` selector chooses the active PDS backend (`"ozone"` or `"rust"`); with one backend block declared it auto-detects, and an ambiguous or dangling selection is rejected at startup with a clear error.
+- New `[pds_admin.rust]` config block declares a Rust-PDS backend (URL, service identity, signing-key env var, and target PDS identity), authenticated per-call with short-lived ES256K service-auth tokens — no OAuth, no token cache.
+- The Rust-PDS backend (`backend = "rust"`) now boots. v1.8.1 is inspector-only: it probes the PDS's advertised capabilities at startup and refuses enforcement actions until protocol parity lands in v1.8.2, so standing it up against a Rust PDS in v1.8.1 requires an explicit acknowledgement.
+- The early-design `[pds_admin.locus]` block name is rejected at config load with a message pointing at the new `[pds_admin.rust]` name, so a stale config surfaces immediately.
+- Backend failures now carry a structured operator-facing category in the audit trail and structured logs; operators parsing failure logs by category should note the new value set.
 
-  All three error messages include a v1.8.2-lifts-the-restriction
-  pointer so operators see the upgrade path. Configurations that
-  set `enabled = true` with `backend = "ozone"` are unaffected.
-- `[pds_admin.locus]` (the early-design name for `[pds_admin.rust]`)
-  is rejected at config-load with a clear "renamed to
-  `[pds_admin.rust]` in v1.8.1" message. Operators with
-  v1.7-staged `[pds_admin.locus]` configs see the renaming error
-  immediately rather than silently losing the subsection.
-- v1.8.1 cross-release type-system foundation (partial). Foundation
-  types consumed by later v1.8.x releases that have v1.8.1 as their
-  shape ground-truth:
-  - `BackendActionId` migrated from a wrapper-string newtype to an
-    enum with `PerEvent(String)` and `PerBatch(String)` variants. The
-    `pds_admin_audit.backend_action_id` wire format is unchanged
-    (variant tag is Rust-only; serialization round-trips the inner
-    string only). v1.7-shaped call sites continue to use
-    `BackendActionId::new(..)`, which produces `PerEvent`. The
-    `PerBatch` variant is reserved for v1.8.5+ batch-action consumers.
-  - `CapabilityVersion(u32)` newtype with `parse_suffix("vN")` and
-    free-function `parse_capability_string("family-vN")`. No
-    operator impact yet — Aurora-Locus capability-gated trait
-    surface ships in later v1.8.x releases.
-  - `CapabilityClassification` (`AutoAdvance` / `OperatorOptIn`) +
-    empty `CAPABILITY_CLASSIFICATIONS` registry + `classification_for`
-    lookup helper. Registry populates as later v1.8.x releases
-    introduce capability-gated trait methods.
-  - `PaginationCursor(String)` opaque-string newtype. cairn-mod
-    treats the cursor as opaque round-trip data; first paginated
-    consumer ships in v1.8.3.
-  - `AuditTrailEntryRead` and `AuditTrailEntryWrite` upstream-audit
-    record types. `subjects` and `event_payload` carry
-    `serde_json::Value` placeholders pending the polymorphic
-    `Subject` and `EventPayload` types' first-consumer landings;
-    no v1.8.1 code path constructs these yet.
-
-### Changed
-- `apply_label` and `negate_label` on `OzoneBackend` now return
-  `BackendError::ArchitecturallyForbidden` (carrying the §F4 invariant
-  reason text) instead of `BackendError::Unsupported`. **Behavior is
-  unchanged** — cairn-mod has always forbidden these methods on
-  `OzoneBackend` per the §F4 architectural invariant in `cairn-design.md`,
-  and continues to do so. The new variant name carries clearer operator
-  semantics: `Unsupported` now means "switch backends if you need this,"
-  while `ArchitecturallyForbidden` means "no backend will ever do this;
-  cairn-mod's design forbids it." If you parse cairn-mod's structured
-  failure logs by variant name, update your parsers.
-- HTTP error mapping in `OzoneBackend` migrated to the new variant set:
-  network/timeout/HTTP 5xx → `Transient`; HTTP 401/403 → `Auth`;
-  HTTP 400/422 → `Validation`; HTTP 404/409/410 → `Terminal`; HTTP 429 →
-  `Transient` with `[sub_classification=RateLimited retry_after_seconds=N]`.
-  Operator dashboards keying on the existing `outcome` column values
-  (`network` / `auth` / `validation` / `rate_limited` / `conflict` /
-  `remote_error` / `unsupported`) continue to see the same row sets they
-  did in v1.7 — the v1.8.1 audit-writer preserves v1.7 outcome semantics
-  via the marker convention until the schema migration lands.
+### Changed — v1.8.1
+- The `apply_label` / `negate_label` methods on the Ozone backend now report as architecturally forbidden rather than merely unsupported — behavior is unchanged (cairn-mod has always forbidden them), the distinction is clearer operator semantics.
 
 ### Fixed
 
