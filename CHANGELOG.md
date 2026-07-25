@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.15 Laquna handling (Workstream B close)
+- Operator guide for Laquna-encoded private-record handling
+  (`docs/laquna-operator-guide.md`): codec-skew diagnosis (probe
+  codec-id + ingest decode-failure logs), codec-version forward
+  compatibility, the decode-failure moderator flow (the report
+  references the encoded record by AT-URI + CID; codec id and generation
+  are inspected by dereferencing the record via the PDS), rotation-cadence
+  observability (inferred from `encodedContentGeneration` timestamps), and
+  slug self-containment.
+- No new decode behavior. v1.8.15 documents that umbrella §4.B.4
+  (Laquna-specific handling) is satisfied by the surfaces shipped across
+  v1.8.12 (probe codec-id reporting), v1.8.13 (decode-path codec-skew
+  pre-check, generation-mark handling), and v1.8.14 (decode-provenance
+  audit tagging). No new trait method, capability, migration,
+  `BackendError` variant, or `Cargo.toml` change. Closes Workstream B
+  (kryphocron consumption).
+
 ### Added — v1.8.14 audit-events kryphocron-context tagging
 - When a moderator resolves a report whose subject is a decoded
   kryphocron record, the shipped `report_resolved` audit-log entry's
