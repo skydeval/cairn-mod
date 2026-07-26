@@ -97,81 +97,46 @@ below preserve the development attribution.
 
 ## [1.7.0] - 2026-04-30
 
-> v1.7 "PDS-side enforcement bridge & inbound XRPC gateway" closes
-> the loop between cairn-mod and the operator's PDS in two halves.
-> Outbound: a `[pds_admin]` config block declares operator-trusted
-> PDS credentials and an action-type-to-backend-method mapping;
-> cairn-mod's existing recordAction pipeline now propagates
-> account-state changes (takedown / temp suspension / restore) to
-> the configured PDS in lockstep with label emission. Inbound: a new
-> `xrpc_gateway` accepts proxied `tools.ozone.moderation.*` calls
-> and PDS-forwarded `com.atproto.moderation.createReport` — making
-> cairn-mod a usable Ozone replacement for operators on bsky-PDS.
-> Both halves preserve cairn-mod's audit-chain discipline (every
-> backend call hash-chains into the existing audit log; every
-> inbound mutation lands via the canonical recordAction path).
-> v1.7 ships bsky-PDS support; the `PdsAdminBackend` trait
-> abstraction accommodates v1.8's Aurora-Locus backend without API
-> changes. Disabled by default — operators upgrading from v1.6 see
-> no behavior change unless they opt in.
+> v1.7 "PDS-side enforcement bridge & inbound XRPC gateway" closes the
+> loop between cairn-mod and the operator's PDS. Outbound, cairn-mod
+> propagates account-state changes to the configured PDS in lockstep
+> with label emission; inbound, an XRPC gateway lets cairn-mod stand in
+> for Ozone on a bsky-PDS. Both halves are opt-in and disabled by
+> default, so upgrading from v1.6 changes no behavior until an operator
+> turns them on.
 
 ### Added
 
+- Outbound PDS-side enforcement: when enabled, cairn-mod propagates
+  account takedowns, suspensions, and restorations to the operator's
+  configured PDS in the same pipeline that emits labels, declared via a
+  new `[pds_admin]` config block (bsky-PDS supported this release).
+- Inbound XRPC gateway: when enabled, cairn-mod accepts proxied
+  `tools.ozone.moderation.*` calls (emitEvent, queryStatuses,
+  queryEvents) and PDS-forwarded `com.atproto.moderation.createReport`,
+  making it a drop-in Ozone replacement for operators on bsky-PDS.
+- Trust tables for the gateway: operators manage which moderator DIDs
+  and which upstream PDSes cairn-mod accepts inbound calls from, with
+  new `cairn xrpc-callers` and `cairn xrpc-pdses` CLI commands.
+- New `cairn pds-admin {takedown, suspend, restore}` commands — a
+  manual escape hatch for the enforcement bridge that still records
+  strikes and audits like any other action.
+- New `cairn moderator events` view over the full audit-log vocabulary,
+  with `--ozone-only` to show just the Ozone-eligible subset.
+- Every outbound backend call and every inbound mutation stays on
+  cairn-mod's hash-chained audit trail, and `cairn audit verify` now
+  walks it.
+
 ### Changed
-- [pds_admin] config block: parsing, validation, schema (#83)
-- [pds_admin] `PdsAdminBackend` trait + `BackendError` + `BackendActionId` + `Subject` types (#84)
-- [pds_admin] `pds_admin_audit` table + unified hash chain spanning `audit_log` (#85)
-- [pds_admin] `OzoneBackend` skeleton: ctor + Basic-auth + xrpc-url helpers (#86)
-- [pds_admin] `OzoneBackend::takedown_account` body via `com.atproto.admin.updateSubjectStatus` + recordAction dispatch (#87)
-- [audit] `cairn audit verify` extended to walk the unified chain across `audit_log` and `pds_admin_audit` (#88)
-- [pds_admin] `OzoneBackend::suspend_account` + `restore_account` bodies; ISO-duration → days plumbing; revoke-action dispatch path (#89)
-- [pds_admin] `probe()` trait method + `OzoneBackend::probe` (`describeServer`) + serve.rs startup wiring (#90)
-- [xrpc_gateway] `[xrpc_gateway]` config block + module skeleton + 501 catch-all router (#91)
-- [xrpc_gateway] NSID allowlist enum + per-handler dispatch stubs + XRPC-shape 405 envelope (#92)
-- [xrpc_gateway] `XrpcAuthService` + tower middleware: ATProto service-auth JWT verification (ES256K, claim validation; replay deferred to #94) (#93)
-- [xrpc_gateway] Replay cache + `xrpc_known_callers` / `xrpc_trusted_pdses` membership tables + middleware composition + CLI subcommands; audit-verify extended to walk 4 tables (#94)
-- [xrpc_gateway] `tools.ozone.moderation.emitEvent` handler body: dispatches `modEventLabel` / `modEventTakedown` / `modEventReverseTakedown` / `modEventComment` into the canonical `record_action` / `revoke_action` pipeline (§A14). Enforces `createdBy == claims.iss` per §A8.1 defense-in-depth. Reserved `xrpc-gateway-default` reason code documented for events without natural `reason_codes` (operators must declare in `[moderation_reasons]`). Unsupported `$type` values (Ozone has many beyond cairn-mod's four) return 400 `InvalidRequest` naming the unsupported type. (#95)
-- [xrpc_gateway] `com.atproto.moderation.createReport` handler body: PDS-signed inbound flow (§A10). Upstream PDSes forward user-filed reports; cairn-mod inserts into the existing `reports` table for the §F11/§F12/§F17 resolution surface to handle unchanged. The lexicon's `reasonType` is stored verbatim (cairn-mod's `reports.reason_type` already uses lexicon strings — no translation table). The user identity comes from the body's `reportedBy` field (the PDS asserts it on behalf of the user); operators express trust in upstream PDSes by adding them to `xrpc_trusted_pdses`. Threat-model §4 entry 9 documents the transitive-trust expansion. (#96)
-- [xrpc_gateway] `tools.ozone.moderation.queryStatuses` handler body: paginated read endpoint that folds cairn-mod's action history (`subject_actions` + `labels` + `reports`) into Ozone's `subjectStatusView` shape. New `handlers/projections/` submodule houses the field-by-field translation (the design-heavy piece) — pure functions, fully unit-tested. v1.7 supports `subject` / `limit` / `cursor` / `sortDirection` / `takendown` / `tags` / `appealed` filters; unsupported filters return 400 `InvalidRequest` naming the field rather than silently ignoring. `appealed=true` returns empty (cairn-mod has no appeal flow); `reviewState` is constant `#reviewClosed`. Cursor: base64url(JSON) of `(updated_at_ms, subject_did, subject_uri)` lex-comparable with the page query's sort key. `XrpcGatewayState` extended with `service_did` for the `labels.src` filter. (#97)
-- [xrpc_gateway] `tools.ozone.moderation.queryEvents` handler body: paginated read endpoint that projects cairn-mod's `audit_log` (joined with `subject_actions`) into Ozone's `modEventView` shape. **cairn-mod-internal audit entries are filtered out** — the Ozone surface only sees `subject_action_recorded` / `subject_action_revoked` projected to `modEventLabel` / `modEventTakedown` / `modEventComment` / `modEventReverseTakedown`; `pending_*`, `report_resolved`, `reporter_*`, `retention_sweep`, `service_record_*`, `label_applied` / `label_negated` are operator-tier and surface only via the CLI + `cairn audit verify`. Revocations of warnings/notes are also filtered (Ozone has no "reverse comment" event). v1.7 supported filters: `subject` / `types` / `createdBy` / `sortDirection` / `createdAfter` / `createdBefore` / `limit` / `cursor` / `includeAllUserRecords`; others → 400 `InvalidRequest`. Cursor: base64url(JSON) of a single `audit_log.id` (simpler than #97's tuple cursor since the column is monotonic AUTOINCREMENT). Closes Phase D's inbound NSID surface for v1.7. (#98)
-- [xrpc_gateway] Retired the `build_routes_only` test fixture: post-#98, every handler requires `Extension<XrpcGatewayState>`, so the no-middleware variant is no longer testable in isolation. The router's structural shape tests (unknown-NSID fallback, case mismatch, wrong-method 405, two-field envelope) are migrated to the layered router via `spawn_authed`. (#98)
-- [cli] `cairn pds-admin {takedown,suspend,restore}`: manual escape hatch for the PDS-admin bridge (#87 / §F23 / §A13). HTTP-routed via the canonical recordAction / revokeAction admin XRPC; the writer's post-commit dispatch fires the configured backend automatically. **Does not bypass strike accounting.** Pre-flights `[pds_admin].enabled` and surfaces the `pds_admin_audit` outcome in the response. Reserved reason code `pds-admin-cli` for manual escalations (operators must declare in `[moderation_reasons]`). (#99)
-- [cli] `cairn moderator add --with-xrpc-callers`: convenience flag that adds the moderator DID to `xrpc_known_callers` in the same invocation, with `--by` recording the operator running the command. Idempotent at the application layer (pre-checks `is_known_caller` to skip the duplicate add). Plain `cairn moderator add` is unchanged. (#99)
-- [cli] `cairn moderator events`: operator-tier audit-events view that mirrors `tools.ozone.moderation.queryEvents` (#98) but exposes the FULL cairn-mod audit_log vocabulary (including `pending_*`, `retention_sweep`, `xrpc_*` collaboration events, `report_resolved`, etc.). Default mode renders Ozone-eligible rows in their projected modEventView shape and cairn-mod-internal rows in a generic shape, intermixed in chronological order. `--ozone-only` applies #98's filter-out policy; output is identical to what queryEvents would return for the same filters. Reuses the `audit_event::project_audit_event` projection from #98. Direct-DB; supports `--subject` / `--actor` / `--type` / `--from` / `--to` / `--limit` / `--cursor`. (#99)
-- [docs] §F23 design-doc chapter — operator-facing reference for v1.7's PDS-side enforcement bridge and inbound XRPC gateway. 12 numbered subsections covering compatibility framing, outbound `pds_admin` (trait surface, OzoneBackend, audit-chain integration, startup probe), inbound `xrpc_gateway` (NSID allowlist, 501/405 envelopes), `XrpcAuthService` (verification rules + replay cache), trust tables (`xrpc_known_callers` vs `xrpc_trusted_pdses` + threat-model §4.9 cross-ref), inbound action integration + projection policy (subjectStatusView + modEventView field-by-field tables, filter-out policy, lexicon non-conformance notes), operator config blocks, operator-tier CLI surface (the five v1.7 commands), reserved reason codes (`policy-threshold` / `xrpc-gateway-default` / `pds-admin-cli`), operator-facing invariants (audit chain ordering, strict-monotonic timestamps, suspension duration encoding, strongRef.cid omission, replay cache scope, queryEvents filter-out), patterns established for v1.8+, and cross-references. (#100)
-- [docs] §18 roadmap update + §19.5 v1.7 deployment runbook. §18 collapses the v1.7+ foreshadowing bullet to a one-line shipped pointer to §F23 and refreshes the v1.x trajectory along two axes (backend coverage / Ozone parity floor); v1.8 = LocusBackend + retry policy + gateway refinements; v1.9 = review queue + extended event types + source management; v2.0 = web UI; future cycle = XRPC management of collaboration tables, `tools.ozone.communication.*` / `tools.ozone.team.*`, action-time CIDs; enterprise-tier = multi-instance replay coordination + Postgres + multi-node. New §19.5 walks operators through enabling `[pds_admin]` (action_map decision, env var, reserved reason code, restart, probe verification, manual-takedown verification), enabling `[xrpc_gateway]` (service DID publication, bsky-PDS env var coordination, reserved reason code, seeding `xrpc_known_callers` + `xrpc_trusted_pdses`, probe call), the verification dance (`cairn audit verify`, `cairn moderator events --ozone-only`, end-to-end test), and the rollback path (disable + restart; rows preserved for re-enable). v1.7 doc-complete; release ceremony per §19.2 happens outside chainlink scope. (#101)
 
 ### Fixed
-- `rustfmt` drift in `admin_subject_actions.rs` (7a7628f).
-- `DEFAULT_POLICY_REASON_CODE` renamed from `policy_threshold` to
-  `policy-threshold` so the default substitution path produces a
-  valid reason identifier under the `[a-z0-9-]` reason-id validator
-  (b51a940; caught during Phase B verification).
-- §F22.1 TOML example used `repeated_violation` (underscore);
-  renamed to `repeated-violation` so the documented operator
-  example produces a valid reason identifier (78edd9b).
-- `getSubjectHistory` wire shape was missing `actorKind` and
-  `triggeredByPolicyRule` fields. v1.6 added these columns to
-  `subject_actions` (writer persists correctly per #73), but the
-  read-side projection, SELECT, lexicon def, and CLI formatter were
-  never extended — so the API returned `null` for both, defeating
-  forensic traceability of policy-recorded vs moderator-recorded
-  actions. Fixed across all four layers + `cairn moderator history`
-  tabular output gains an ACTOR column (a1c71cb; caught during Phase
-  B verification).
-- Startup panic on `[xrpc_gateway].enabled = true`: both
-  `src/server/create_report.rs` and `src/xrpc_gateway/router.rs`
-  registered `POST /xrpc/com.atproto.moderation.createReport`, and
-  `axum::Router::merge` panicked on the duplicate route at
-  `serve.rs:257`. Fix: gateway router no longer mounts createReport;
-  the user-direct `create_report_router` is the single mount point
-  and dispatches to the gateway path's logic when the JWT issuer is
-  in `xrpc_trusted_pdses` (PDS-forwarded reports skip pre-gates +
-  take `reportedBy` from the body); other reports continue through
-  the user-direct path with pre-gates intact. §F23.5 + §19.5.3
-  updated to reflect the dispatch-not-mount architecture. v1.6 → v1.7
-  with `[xrpc_gateway].enabled = false` is unchanged. (#102; caught
-  during Phase B verification)
+- `getSubjectHistory` returned null for the `actorKind` and
+  `triggeredByPolicyRule` fields — the v1.6 columns existed but the
+  read side never surfaced them; now populated across the API and the
+  `cairn moderator history` output (which gains an ACTOR column).
+- Enabling the XRPC gateway no longer panics at startup on a duplicate
+  createReport route; the user-direct and PDS-forwarded report paths
+  now share one route.
 
 ### Removed
 
@@ -179,177 +144,84 @@ below preserve the development attribution.
 
 ## [1.6.0] - 2026-04-27
 
-> v1.6 "Policy automation" closes the v1.5 loop: operators
-> declare strike-threshold rules in `[policy_automation]`, and
-> the recorder evaluates those rules inside every recordAction
-> transaction. Auto-mode rules record consequent actions in the
-> same transaction; flag-mode rules queue pending rows for
-> moderator review. Conservative idempotency, severity-ordered
-> rule selection, takedown-cascade auto-dismissal of pendings,
-> and a forensic audit chain that extends across all policy
-> events. Pending state is moderator-tier visibility only — the
-> public surface still shows what cairn-mod has *done*, not what
-> it *might* do.
+> v1.6 "Policy automation" lets operators declare strike-threshold
+> rules that fire inside every recordAction: auto-mode rules take the
+> consequent action immediately, flag-mode rules queue a pending row
+> for moderator review. Pending state is moderator-tier only — the
+> public surface still shows what cairn-mod has done, not what it
+> might do.
 
 ### Added
 
-- Policy automation engine: `[policy_automation]` config block,
-  `PolicyAutomationPolicy` config loader, pure-function policy
-  evaluator with crossing detection + idempotency + severity
-  ordering, recorder integration evaluating rules inside the
-  recordAction transaction. (#70, #71, #72, #73)
-- Pending action confirm flow: `tools.cairn.admin.confirmPendingAction`
-  XRPC + `WriteCommand::ConfirmPendingAction` writer command.
-  Confirmed pendings materialize as `subject_actions` rows with
-  `actor_kind='moderator'` (the moderator takes responsibility)
-  and `triggered_by_policy_rule` preserved as forensic
-  provenance; full label emission via the v1.5 path. (#74)
-- Pending action dismiss flow: `tools.cairn.admin.dismissPendingAction`
-  XRPC + `WriteCommand::DismissPendingAction` writer command.
-  Audit-only rationale storage (the pending table itself has no
-  `resolved_reason` column; rationale lives in the audit row's
-  `moderator_reason` field). (#75)
-- Takedown-cascade auto-dismissal: every unresolved pending for
-  a subject auto-dismisses inside the same transaction as a
-  takedown row INSERT, regardless of takedown path (moderator-
-  recorded, policy-auto-recorded, or confirmed-pending-promoted).
-  Cascade audit rows reuse the `pending_policy_action_dismissed`
-  audit_log.action and discriminate via reason JSON's
-  `triggered_by` field (`takedown_terminal` vs `moderator_dismissed`),
-  cross-referencing the triggering takedown via `takedown_action_id`.
-  (#76)
-- Pending action read XRPC: `tools.cairn.admin.listPendingActions`
-  (paginated, `subject` + `resolution` filters, opaque id-cursor)
-  and `tools.cairn.admin.getPendingAction` (single row). Mod-or-
-  Admin role; direct sqlx queries against the pool (no writer
-  task involvement). (#77)
-- Operator CLI: `cairn moderator pending {list, view, confirm,
-  dismiss}`, HTTP-routed via the admin XRPC, tabular human output
-  by default, `--json` for tooling. (#78)
-- New error variants: `PendingActionNotFound`,
-  `PendingAlreadyResolved`, `SubjectTakendown` (defensive race-
-  closer on confirm).
-- New audit_log.action vocabulary: `pending_policy_action_confirmed`,
-  `pending_policy_action_dismissed`. Pending creation rides the
-  precipitating action's `subject_action_recorded` audit row's
-  `policy_consequence` field (no separate `pending_policy_action_created`
-  audit kind).
-- Migration `0005_policy_automation.sql`: extends `subject_actions`
-  with `actor_kind` (CHECK in 'moderator' | 'policy', defaulting
-  to 'moderator' for backfill) and `triggered_by_policy_rule`
-  (NULL for moderator-recorded actions); new `pending_policy_actions`
-  table with write-once-on-resolution trigger; partial indexes
-  on the active subset for the moderator review queue.
-- Comprehensive integration test coverage: idempotency contracts
-  through the writer task (#80) and end-to-end lifecycle
-  scenarios composing all v1.6 surfaces (#81).
-- Design doc §F22 (policy automation; 11 subsections covering
-  rule shape, threshold-crossing semantics, severity ordering,
-  auto-vs-flag mode, pending resolution, takedown cascade, schema
-  + audit linkage, synthetic policy actor DID, public-tier non-
-  visibility, operator surfaces, deferred capabilities). New §4.2
-  disclosure 6 (pending visibility is moderator-tier only). §F21.9
-  + §18 roadmap updates. (#82)
+- Policy automation: operators declare strike-threshold rules in a new
+  `[policy_automation]` config block, and cairn-mod evaluates them
+  inside every recordAction — auto-mode rules record the consequent
+  action in the same transaction, flag-mode rules queue it for review.
+- Moderator review queue: pending policy actions can be listed,
+  inspected, confirmed (materializing a real action the moderator owns,
+  with the originating rule preserved for provenance), or dismissed,
+  via `tools.cairn.admin.*` endpoints and `cairn moderator pending
+  {list, view, confirm, dismiss}`.
+- Taking down a subject auto-dismisses that subject's unresolved
+  pendings in the same transaction, whatever path the takedown came
+  from.
+- Every policy event — rule firings, pending creation, confirmation,
+  dismissal, and cascade — is recorded on the audit chain with enough
+  discrimination for consumers to tell moderator-driven from
+  policy-driven actions apart.
 
 ### Changed
 
-- Pending policy actions are moderator-tier visibility only — not
-  exposed via public XRPC (`tools.cairn.public.getMyStrikeState`
-  is unchanged from v1.5). Subscribers see what cairn-mod has
-  *done*, not what cairn-mod *might* do. See §4.2 disclosure 6.
-- `subject_actions` audit row's reason JSON gains an `actor_kind`
-  discriminator (`'moderator'` vs `'policy'`) and an optional
-  `triggered_by_policy_rule` field. The precipitating action's
-  audit row also gains an optional `policy_consequence` field
-  (`{rule_fired, mode, auto_action_id | pending_action_id}`)
-  cross-referencing the consequence when a rule fires.
-- `pending_policy_action_dismissed` audit reason JSON carries a
-  `triggered_by` discriminator (`'moderator_dismissed'` for #75,
-  `'takedown_terminal'` for #76) so audit consumers can filter
-  the two shapes via `json_extract`.
-- `MAINTAINERS.md` adds a "Development pattern" section disclosing
-  the AI-assisted development approach used to ship cairn-mod.
+- Pending policy actions are moderator-tier visibility only; the public
+  strike-state surface is unchanged. Subscribers see what cairn-mod has
+  done, not what it might do.
 
 ### Fixed
 
-- rustfmt drift in `tests/admin_subject_actions.rs` from #76's
-  test rewrites — two `let` bindings that were left in unwrapped
-  two-line form. Pure formatting fix; no logic change. (7a7628f)
-
-### Internal
-
-- chainlink #79 closed as duplicate of #73; the
-  `PolicyAutomationPolicy` plumbing through writer-state landed
-  as part of #73's recorder integration per that session's
-  "subsume #79" decision.
-
 ## [1.5.2] — 2026-04-27
 
-> Closes the v1.5 documentation gap: `cairn moderator labels` is
-> now in the moderator CLI reference.
+> Closes a v1.5 documentation gap.
 
 ### Changed
 
-- Added documentation for the `cairn moderator labels` subcommand
-  to docs/moderator-cli.md as a new "Active label inspection"
-  section. The subcommand shipped in v1.5 (#66) but was never
-  added to README.md before v1.5.1's documentation split
-  preserved existing content verbatim. (#69)
+- Documented the `cairn moderator labels` subcommand (shipped in v1.5)
+  in the moderator CLI reference.
 
 ## [1.5.1] — 2026-04-27
 
-> Documentation reorganization for clearer audience separation —
-> no behavior changes.
+> Documentation reorganization for clearer audience separation — no
+> behavior changes.
 
 ### Changed
 
-- Split README.md into focused documents covering distinct
-  audiences. README.md retains discovery-tier content (project
-  pitch, status, trust-chain disclosures, architecture summary)
-  and slims to ~150 lines. New SETUP.md covers first-deployment
-  setup (install, signing key, configuration, bootstrap, service-
-  record verify). New OPERATIONS.md covers day-2 operator content
-  (production checklist, monitoring, dependency security scanning,
-  single-instance enforcement). New docs/moderator-cli.md is the
-  moderator CLI reference (membership management, login, report
-  workflow, audit log queries). Existing files (CHANGELOG,
-  CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, MAINTAINERS, LICENSE-*,
-  cairn-design.md) stay at root per their conventions. (#68)
+- Split the README into audience-focused documents: the README keeps
+  the project pitch, status, and architecture summary; new SETUP and
+  OPERATIONS guides cover first deployment and day-2 operation; and a
+  moderator CLI reference collects the moderator commands.
 
 ## [1.5.0] - 2026-04-27
 
-> v1.5 "Label emission" closes the v1.4 loop: every recorded
-> action now translates into ATProto labels that consumer AppViews
-> honor, and revocation atomically negates whatever was emitted.
-> Operators declare the action-to-label mapping in
-> `[label_emission]` — defaults ship out of the box, override
-> knobs cover val / severity / blurs / locales per action type,
-> and notes never emit (defense-in-depth at the resolver). Reason
-> labels emit as `reason-<code>` alongside their action label,
-> sharing its expiry on temp_suspension. Revocation reads the
-> stored val from the linkage table (not the current policy)
-> so operator policy edits between emission and revocation can't
-> desynchronize negation. Subjects can introspect their own active
-> labels via `tools.cairn.public.getMyStrikeState`'s new
-> `activeLabels` field; operators query the same surface via
-> `cairn moderator labels <subject>`. The new §4.2 disclosure 5
-> makes the trust-chain framing explicit: internal moderation
-> state and protocol-visible labels are different surfaces, both
-> observable.
+> v1.5 "Label emission" turns every recorded action into ATProto labels
+> that consumer AppViews honor, and negates them atomically on
+> revocation. Operators declare the action-to-label mapping; subjects
+> can see their own active labels, and operators can query the same.
 
 ### Added
-- Label-emission schema migration: `subject_actions.emitted_label_uri` column (the action label's val — the column name predates the realization that ATProto labels lack canonical URIs; locked) and `subject_action_reason_labels` linkage table with composite PK `(action_id, reason_code)`. Trigger update permits the single NULL→non-NULL transition for `emitted_label_uri`, mirroring the revocation columns' exception from #46. Linkage rows preserved across revocation as forensic record per [§F21.7](cairn-design.md#f217-schema-linkage-and-audit-log-integration) (#57)
-- `[label_emission]` config block + `LabelEmissionPolicy` runtime loader. Operator surfaces: `enabled` master toggle, `warning_emits_label` opt-in, `emit_reason_labels` reason gate, `reason_label_prefix` (default `"reason-"`, empty permitted with startup warning), `[label_emission.action_label_overrides.<type>]` for per-action val/severity/blurs/locales, `[label_emission.severity_overrides]` for severity-only overrides. Cross-action `val` uniqueness enforced at config load — labels need to discriminate by val for revocation routing per [§F21.1](cairn-design.md#f211-action-to-label-mapping) (#58)
-- Action-to-label translation core: `resolve_action_labels` and `resolve_reason_labels` pure functions translate an `ActionForEmission` plus the resolved policy into unsigned `LabelDraft`s. Same shape as the v1.4 calculators (#49 strike, #50 decay, #51 window) — no I/O, no async, no signing, no DB. Notes never emit (hard gate); warnings gated on `warning_emits_label`; reason labels share the warning's suppression gate (reasons-without-context confuses consumers, recovery path is asymmetric). TempSuspension propagates `expires_at` to both action label and reason labels per [§F21.2](cairn-design.md#f212-reason-labels) (#59)
-- Recorder integration: `handle_record_action` now signs and persists the configured ATProto labels in the same transaction as the `subject_actions` INSERT, the `subject_strike_state` cache UPSERT, and the audit_log row. Atomic — failure rolls back action + audit + labels together so the audit chain never claims emission that didn't happen. Audit reason JSON gains `emitted_labels: [{val, uri}, ...]` capturing every label this action produced; hash chain (#39) extends to lock the (action, labels) bundle per [§F21.7](cairn-design.md#f217-schema-linkage-and-audit-log-integration) (#60)
-- Revocation negation: `handle_revoke_action` now atomically emits negation labels (neg=true) for every label the original action emitted, targeting the same `(src, uri, val)` tuple. Val read from `subject_actions.emitted_label_uri` and `subject_action_reason_labels` rows, NOT from current policy resolution — operator policy edits between emission and revocation cannot desynchronize negation. Negations carry `exp = None` (negations are permanent statements that supersede the original; expiring them would resurrect the original in consumer caches). Negation is unconditional regardless of current policy state — prior emissions exist on the wire and must be negated even when emission has been disabled since recording. Audit reason JSON gains `negated_labels: [{val, uri}, ...]` mirroring emission's `emitted_labels` shape per [§F21.3](cairn-design.md#f213-negation-on-revocation) (#62)
-- Idempotency guards: defense-in-depth `should_skip_action_label_emission` and `should_skip_reason_emission` helpers gate the emission loops on the row's pre-emission state. v1.5's normal flow always finds the gates' queries returning empty/NULL (the INSERT just landed inside the same transaction), so the guards are structurally a no-op in production; they exist to protect against future paths (backfill migrations, retry helpers) where a row might already carry emission state. The `subject_action_reason_labels` PK on `(action_id, reason_code)` is the SQL-level safety net per [§F21.5](cairn-design.md#f215-idempotency) (#64)
-- Public XRPC `subjectStrikeState.activeLabels`: `tools.cairn.public.getMyStrikeState` and `tools.cairn.admin.getSubjectStrikes` now return the labels cairn-mod is currently emitting against the subject. One entry per non-revoked, non-negated action with `val`, `actionId`, `actionType`, `reasonCodes`, optional `expiresAt`. Most-recent-action-first ordering. Cache-bypass invariant from [§F20.9](cairn-design.md#f209-cache-management) extends here — always recomputed from `labels` + `subject_actions` source-of-truth. Exp-passed labels are INCLUDED (cairn-mod surfaces emitted state; AppView-side honor of `exp` is the consumer's responsibility per [§F7](cairn-design.md#f7-label-expiry-schema-only-enforcement-deferred)) per [§F21.8](cairn-design.md#f218-public-introspection-and-operator-cli) (#65)
-- Operator CLI: `cairn moderator labels <subject>` HTTP-routes via admin `getSubjectStrikes` and renders `activeLabels` as the primary output. Default tabular human format (one row per emitted label — action label plus one per reason code, all sharing action context columns); `--json` emits just the `activeLabels` array, not the full strikes envelope per [§F21.8](cairn-design.md#f218-public-introspection-and-operator-cli) (#66)
-- Test pinning: warning/note emission policy contract (the `warning_emits_label` gate at all relevant configurations + the Note hard gate at every code path) (#61); temp_suspension exp-field semantics (validation rejection paths + label-exp propagation including ms-precision RFC-3339 ↔ epoch-ms parity) (#63)
+- Recorded actions now emit ATProto labels, signed and persisted in the
+  same transaction as the action so the audit trail never claims an
+  emission that didn't happen. Operators declare the mapping — including
+  per-action value, severity, blurs, and locales — in a new
+  `[label_emission]` config block, with sensible defaults out of the box.
+- Reason labels emit as `reason-<code>` alongside their action label
+  and share its expiry on temp suspensions.
+- Revoking an action atomically negates every label it emitted, reading
+  the stored values (not current policy) so a policy edit between
+  emission and revocation can't desynchronize the negation.
+- Subjects can introspect their own active labels via
+  `tools.cairn.public.getMyStrikeState`, and operators can query the
+  same subject via `cairn moderator labels <subject>`.
 
 ### Changed
-- [`cairn-design.md`](cairn-design.md) gains [§F21](cairn-design.md#f21-label-emission-against-moderation-state-v15) (label emission against moderation state), nine subsections covering action-to-label mapping, reason labels, negation on revocation, temp suspension expiry via ATProto's native `exp` field, idempotency, customization for deployments, schema linkage and audit-log integration, public introspection and operator CLI, and deferred future work. [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience) trust-chain disclosure 5 documents that internal moderation state and protocol-visible labels are different surfaces, both observable: operators declare the translation rules in `[label_emission]`, subscribers compare config + emitted streams to verify policy variation. [§F20.10](cairn-design.md#f2010-deferred-to-future-releases) reordered: label emission marked shipped; remaining items reordered for v1.6+. [§18](cairn-design.md#18-future-roadmap) roadmap marks v1.5 shipped, adds v1.6 (policy automation) and v1.7+ (PDS administrative actions, default-disabled when `[pds_admin]` is absent), notes the continued v1.x trajectory toward Ozone parity, and contemplates cairn-mod-enterprise as eventual platform-tier sibling project (open scope; no version commitment) (#67)
 
 ### Fixed
 
@@ -359,38 +231,34 @@ below preserve the development attribution.
 
 ## [1.4.0] - 2026-04-26
 
-> v1.4 "Account moderation state model" turns moderation into
-> first-class records: every action against a subject (warning,
-> note, suspension, takedown) writes a structured row with a
-> strike value resolved at action time and frozen for forensic
-> durability. Strikes accumulate, dampen for first-time offenders,
-> and decay over time per operator-configurable rules. Read
-> endpoints — admin and a new user-facing `tools.cairn.public.*`
-> namespace — recompute strike state through a pure decay
-> calculator on every fetch, so cached values can never produce a
-> misleading answer. Operators declare reason vocabularies and
-> strike policy in `[moderation_reasons]` and `[strike_policy]`
-> config blocks; the new §4.2 disclosure 4 makes the trade-off
-> explicit: cairn-mod's contribution is making policy declarable
-> and observable, not adjudicating what the policy should be.
+> v1.4 "Account moderation state model" makes moderation first-class:
+> every action against a subject writes a structured record with a
+> strike value frozen at action time. Strikes accumulate, dampen for
+> first-time offenders, and decay over time per operator-configurable
+> rules. Read endpoints recompute strike state on every fetch, so a
+> stale cache can never give a misleading answer.
 
 ### Added
-- Account moderation state model: `subject_actions` table records every moderation action (warning, note, temp_suspension, indef_suspension, takedown) with structured reason metadata, duration, notes, and links to source reports. `subject_strike_state` cache table tracks current strike counts per subject_did. Append-only schema; revocation transitions are the only allowed UPDATE per the trigger contract from [§F20.6](cairn-design.md#f20-account-moderation-state-model-v14) (#46)
-- Reason vocabulary system: operators declare moderation reasons in `[moderation_reasons]` config block with `base_weight`, `severe` flag, and `description`. Cairn-mod ships eight default reasons aligned with ATProto's `reasonType` (hate-speech, harassment, threats-of-violence, csam, spam, misinformation, nsfw, other). Operator-declared blocks replace defaults entirely (no merging) per [§F20.2](cairn-design.md#f20-account-moderation-state-model-v14) (#47)
-- Strike policy system: `[strike_policy]` config block declares `good_standing_threshold` (default 3), `dampening_curve` (default `[1, 2]`), `decay_function` (linear or exponential), `decay_window_days` (default 90), `suspension_freezes_decay` (default `true`), and `cache_freshness_window_seconds` (default 3600). Per-field defaults let operators declare partial blocks per [§F20.3](cairn-design.md#f20-account-moderation-state-model-v14) (#48, #55)
-- Strike calculator: pure function applies dampening at action time. Users in good standing get curve-position values; users out of good standing get full `base_weight`; severe reasons bypass dampening. The `was_dampened` flag and `strikes_at_time_of_action` are frozen on the row for forensic auditability per [§F20.3](cairn-design.md#f20-account-moderation-state-model-v14) (#49)
-- Decay calculator: time-based decay computed on read, not stored. Linear decay reaches 0 at `decay_window_days`; exponential decay reaches ~1% at the same boundary (half-life = window / log₂(100)). Suspension freezes decay (v1.4 simplification: only the most recent unrevoked suspension affects calculation) per [§F20.4](cairn-design.md#f20-account-moderation-state-model-v14) (#50)
-- Recorder + revoker: `WriteCommand::RecordAction` and `WriteCommand::RevokeAction` route action writes through the writer task. Single-transaction atomicity across `subject_actions` row, `subject_strike_state` cache update, and hash-chained `audit_log` row via #39's pathway. Predict-then-verify pattern on the `subject_actions.id` ensures `audit_log_id` linkage stays correct even under sequence-allocation edge cases (#51)
-- Position-in-window calculator: pure function counts in-good-standing offenses within the current decay window. Uses each prior action's `was_dampened` flag as the "in good standing at its time" predicate so position counting is stable across policy edits (#51)
-- Multi-reason resolver: when an action carries multiple reason codes, the strike calculation uses the dominant reason — severe wins regardless of `base_weight`; ties on `base_weight` resolve to first-listed deterministically (#51)
-- Admin XRPC: `tools.cairn.admin.recordAction`, `tools.cairn.admin.revokeAction` (writes); `tools.cairn.admin.getSubjectHistory`, `tools.cairn.admin.getSubjectStrikes` (reads). All Mod-or-Admin authorization. The shared [`src/server/strike_state.rs`](src/server/strike_state.rs) module factors the projection logic used by both admin and public read endpoints (#51, #52, #53)
-- Public XRPC: `tools.cairn.public.getMyStrikeState`. First endpoint in the `tools.cairn.public.*` namespace. Service-auth gated; the verified `iss` must equal the subject_did. CORS allows browser-side callers (the namespace is designed for downstream consumers like future accessory bots or Web UIs). Cross-references admin's `subjectStrikeState` type to avoid type drift (#54)
-- Operator CLIs: `cairn moderator action` / `warn` / `note` / `revoke` / `history` / `strikes` — moderator-tier, HTTP-routed via admin XRPC, cursor-paginated history, structured strikes display with decay trajectory. The `decayWindowRemainingDays` field is omitted at zero strikes since trajectory is meaningless without strikes to project (#51, #52)
-- Subject-strike-state cache management: `cache_is_fresh` predicate and `get_or_recompute_strike_count` entry point. Cache bypass is the v1.4 read-endpoint invariant; the cache exists for v1.5+ consumers needing O(1) "is this user in good standing?" reads. Best-effort cache writes during recompute (write failure logs but doesn't fail the read) per [§F20.9](cairn-design.md#f20-account-moderation-state-model-v14) (#55)
+- Account moderation state model: every action (warning, note, temp or
+  indefinite suspension, takedown) is recorded as a structured,
+  append-only row with reason metadata, duration, notes, and links to
+  the source report.
+- Operators declare their moderation vocabulary and strike policy in
+  new `[moderation_reasons]` and `[strike_policy]` config blocks —
+  reason weights and severity, good-standing threshold, dampening, and
+  decay function/window. cairn-mod ships eight default reasons aligned
+  with ATProto's `reasonType`.
+- Strikes are resolved at action time (dampened for users in good
+  standing, full weight otherwise, severe reasons bypassing dampening)
+  and frozen on the row; current strike state is recomputed through a
+  decay calculator on every read.
+- Admin XRPC to record and revoke actions and to read a subject's
+  history and strike state, plus a new `tools.cairn.public.*` namespace
+  with `getMyStrikeState` for subjects to check their own standing.
+- New `cairn moderator {action, warn, note, revoke, history, strikes}`
+  commands for recording and reviewing moderation from the CLI.
 
 ### Changed
-- [`cairn-design.md`](cairn-design.md) gains [§F20](cairn-design.md#f20-account-moderation-state-model-v14) (account moderation state model), ten subsections covering action types, reasons, strike calculation, decay, revocation, schema, XRPC surface, operator CLIs, cache management, and deferred future work. [§4.2](cairn-design.md#42-operator-trust-trust-chain-readme-audience) trust-chain disclosure 4 documents that operators set their own moderation policy and that policy declarability is cairn-mod's contribution rather than a fixed moderation philosophy. [§18](cairn-design.md#18-future-roadmap) roadmap updated to mark v1.4 as shipped and surface the deferred-to-future-releases items from §F20.10 (#56)
-- [`cairn-design.md`](cairn-design.md#f10-audit-log) §F10 audit-log action vocabulary gained `subject_action_recorded` and `subject_action_revoked` entries (lexicon `defs.json` `knownValues` + `AUDIT_ACTION_VALUES` + design-doc prose). Update landed with #51's commit since the recorder writes those actions (#51)
 
 ### Fixed
 
@@ -401,26 +269,21 @@ below preserve the development attribution.
 ## [1.3.0] - 2026-04-26
 
 > v1.3 "Audit integrity" makes audit-log tampering cryptographically
-> detectable. Every audit row now carries a SHA-256 hash chained to
-> the previous row's hash; operators verify chain integrity via
-> `cairn audit verify`, backfill pre-v1.3 rows via `cairn audit-rebuild`,
-> and inspect individual hashes via the extended `cairn audit show`
-> output. The release also reconciles the design doc against four
-> releases of drift — §11/§14/§16.1/§18 reflect what shipped, §19's
-> release runbook documents the manual flow that v1.1/v1.2/v1.3
-> actually used, and the unused GitHub Actions release workflow is
-> marked deprecated.
+> detectable: every audit row carries a SHA-256 hash chained to the
+> previous row, and operators verify, backfill, and inspect those
+> hashes from the CLI.
 
 ### Added
-- Hash-chained audit log: every `audit_log` row carries `prev_hash` and `row_hash` columns (SHA-256 over DAG-CBOR canonical encoding of the row's content). Tampering with any row's content or stored hash produces a recomputation mismatch detectable via `cairn audit verify`. `WriteCommand::AppendAudit` routes audit-row writes through the writer task; cross-process callers (`cairn publish-service-record` / `cairn unpublish-service-record`) use a parallel `append_via_pool` path that shares the same `compute_audit_row_hash` function — single canonical hash implementation, no risk of drift between paths (#39)
-- `cairn audit-rebuild` CLI subcommand. One-shot operator command that walks `audit_log` in id order and fills `prev_hash` + `row_hash` for every row using the canonical hash function. Idempotent — re-running on an already-rebuilt log is a no-op success. Acquires the writer's `server_instance_lease` for the duration of the rebuild; lease conflict surfaces as exit 11 `LEASE_CONFLICT` so the operator stops `cairn serve` first. The §F10 `audit_log_no_update` trigger is dropped + recreated inside a single `BEGIN IMMEDIATE` transaction so partial-failure ROLLBACK restores the trigger atomically (#40)
-- `cairn audit verify` CLI subcommand. Read-only operator command that walks the chain, recomputes each attested row's hash from its stored content + the running prev_hash, and compares against the stored `row_hash`. Reports the first divergence (row id, expected hex hash, actual hex hash, count of rows verified before divergence) and exits with the new exit code 15 `AUDIT_DIVERGENCE`. Pre-attestation rows (NULL `row_hash`, predating `cairn audit-rebuild` on a legacy install) are skipped with a horizon notice rather than flagged as errors. Safe to run while `cairn serve` is live — read-only, no lease (#41)
-- `cairn audit show <id>` output gains `row_hash` and `prev_hash` fields in both human and JSON output. Pre-attestation rows display the `(pre-attestation)` sentinel; the genesis row's `prev_hash` displays as the all-zeros 64-char hex string. `tools.cairn.admin.defs#auditEntry` gains optional `prevHash` and `rowHash` fields; `tools.cairn.admin.listAuditLog` also exposes them on the wire (the human-table formatter stays terse), so `cairn audit list --json | jq` surfaces hashes for free (#42)
+- Hash-chained audit log: every audit row carries a hash chained to the
+  previous row, so tampering with any row's content or stored hash is
+  detectable.
+- New `cairn audit verify` walks the chain and reports the first
+  divergence (safe to run against a live server); `cairn audit-rebuild`
+  backfills hashes onto pre-v1.3 rows.
+- `cairn audit show <id>` and the audit-log API now surface each row's
+  hash and its predecessor's.
 
 ### Changed
-- [`cairn-design.md`](cairn-design.md) §11/§14/§16.1/§18 reconciled to reflect what shipped through v1.0/v1.1/v1.2/v1.3 versus what's still aspirational. §18 renamed from "v1.1 Roadmap" to "Future Roadmap" (anchor moves from `#18-v11-roadmap` to `#18-future-roadmap`). Cross-platform binary commitments (Windows + multi-target) dropped from §14 and §16.1 — cairn-mod is server software designed for Linux deployment behind a reverse proxy, and `cargo install cairn-mod` is the canonical install path (#43)
-- [`cairn-design.md`](cairn-design.md) §19 release runbook rewritten to match the manual flow that v1.1, v1.2, and v1.3 have actually used: a 13-step procedure across three phases (Readiness, Manual end-to-end verification, Release ceremony). Cadence-bound framings ("1 week before target date," "Week-1 post-release") replaced with cadence-agnostic language; §19.4 now defers to §20.2's existing monitoring SLA rather than duplicating it (#44)
-- [`.github/workflows/release.yml`](.github/workflows/release.yml) marked deprecated via header comment. The workflow has never been used successfully — three v1.0 `workflow_dispatch` attempts failed on 2026-04-24, and v1.1/v1.2/v1.3 all shipped via the manual flow now documented in §19.2. The file is preserved (not deleted) as historical record of the v1.0 release-automation design intent (#45)
 
 ### Fixed
 
@@ -431,26 +294,25 @@ below preserve the development attribution.
 ## [1.2.0] - 2026-04-26
 
 > v1.2 "Trust-chain transparency" makes the labeler's trust posture
-> auditable. Operators and external auditors can now read the full
-> signing-key history, maintainer roster (with HTTP-attested vs CLI-
-> inserted provenance), service record content hash, and instance
-> metadata via a single admin endpoint. The audit log gains a per-id
-> detail view to complement the existing list query, and the service-
-> record lifecycle gains its inverse — `cairn unpublish-service-record`
-> — closing a documented friction point in the operator workflow.
+> auditable, adds a per-entry audit-log view, and gives the
+> service-record lifecycle its inverse.
 
 ### Added
-- `tools.cairn.admin.getTrustChain` admin XRPC endpoint and `cairn trust-chain show` CLI subcommand. Read-only, admin-role-only summary of instance trust posture: signing-key history (active + rotated, with `validFrom`/`validTo`), maintainer roster with `provenanceAttested` flag distinguishing HTTP-attested adds from CLI/SQL inserts, published service-record content hash + declared label values, and instance metadata (build version, service endpoint). The envelope reuses the `tools.cairn.admin.defs` shared types so the CLI and any other consumer agree on wire shape (#35, #36, #37)
-- `tools.cairn.admin.getAuditLog` admin XRPC endpoint and `cairn audit show <id>` CLI subcommand. Per-id detail view complementing `cairn audit list` (the v1.1 list query). Admin-role-only; returns the bare `auditEntry` shape with the full `reason` payload. `AuditEntryNotFound` 404 on unknown id mirrors `getReport`'s posture (#26)
-- `cairn unpublish-service-record` CLI subcommand. Removes the `app.bsky.labeler.service` record from the operator's PDS via `com.atproto.repo.deleteRecord` (with `swapRecord` for race detection), clears `service_record_*` `labeler_config` state, and writes a `service_record_unpublished` audit row in one transaction. Idempotent — running on an unpublished labeler is a no-op success that still audits. Subsequent `cairn serve` startup verify (§F19) fail-starts with the existing exit 13 `SERVICE_RECORD_ABSENT` until republish; no new exit code needed (#34)
+- New `tools.cairn.admin.getTrustChain` endpoint and `cairn trust-chain
+  show` command: a read-only summary of the instance's trust posture —
+  signing-key history, maintainer roster (noting HTTP-attested vs
+  CLI-inserted entries), the published service-record hash and declared
+  label values, and instance metadata.
+- Per-entry audit-log lookup via `cairn audit show <id>`, complementing
+  the existing list query.
+- New `cairn unpublish-service-record` command removes the labeler's
+  service record from the operator's PDS and audits the removal;
+  idempotent, and startup verify then flags the absent record until it
+  is republished.
 
 ### Changed
-- `ReportStatus` and `ResolutionAction` extracted from string fields to typed Rust enums. Wire shape unchanged; the change is internal type safety + central enumeration of allowed values (#27)
-- `acquire_service_auth` and `truncate` factored from per-CLI-module copies into shared [`src/cli/auth.rs`](src/cli/auth.rs) and [`src/cli/output.rs`](src/cli/output.rs). No behavior change; the factor-out triggered when `cli/trust_chain.rs` brought the duplicated `acquire_service_auth` to eight identical copies across four modules (#28)
-- F10 audit-log actions list in [cairn-design.md](cairn-design.md#f10-audit-log) updated to include `service_record_unpublished` (#34)
 
 ### Fixed
-- `tests/wellknown.rs::ALL_LEXICONS` now exercises every lexicon served at `.well-known/lexicons/*` — `getTrustChain`, `retentionSweep`, and `getAuditLog` were previously missing from the per-NSID serving test (coverage gap, not a correctness gap; the underlying handlers and routes were always tested) (#38)
 
 ### Removed
 
@@ -459,40 +321,37 @@ below preserve the development attribution.
 ## [1.1.0] - 2026-04-25
 
 > v1.1 "Pleasant to operate" focuses on operational comfort for
-> self-hosters. The release adds orchestrator-friendly health
-> probes, supply-chain security scanning in CI, the full admin
-> CLI surface (moderator / report / audit / retention), startup-
-> time service-record drift detection, and a 41% trim of the
-> published crates.io tarball. The housekeeping pass deflakes
-> three timing-sensitive cache tests, validates `contrib/`
-> deployment configs in CI, and ships a quickstart rot-check
-> that exercises the README's operator workflow against a mock
-> PDS — silent doc drift now fails CI.
->
-> Also: this release reconciled a tracker numbering migration
-> mid-development (chainlink replaced an earlier crosslink
-> instance), and removed a stale auto-generated hook system that
-> was emitting misleading reminders. See
-> [docs/tracker-history.md](docs/tracker-history.md) for the
-> migration record.
+> self-hosters: health probes, supply-chain scanning in CI, the full
+> admin CLI surface, startup-time service-record drift detection, and a
+> slimmer published package.
 
 ### Added
-- `/health` and `/ready` orchestrator probe endpoints (unauthenticated, per-check rationale in [§F14](cairn-design.md#f14-health-and-readiness-probe-endpoints-v11)) (#23)
-- CI security scanning: `cargo-audit` + `cargo-deny` on push/PR plus a scheduled daily audit that opens an issue on new advisories; hard-fail posture with a dated-review-comment escape hatch in [`deny.toml`](deny.toml) (policy in [§F15](cairn-design.md#f15-dependency-security-scanning-in-ci-v11)) (#13)
-- `cairn moderator {add, remove, list}` CLI subcommands for managing the `moderators` table directly; one-shot, no lease conflict with running `cairn serve` (contract in [§F16](cairn-design.md#f16-moderator-management-cli-v11)) (#24)
-- `cairn report {list, view, resolve, flag, unflag}` admin CLI subcommands wrapping the `tools.cairn.admin.*` HTTP endpoints; audit attribution preserved via JWT iss (contract in [§F17](cairn-design.md#f17-report-management-cli-v11)) (#7)
-- `cairn audit list` admin-only CLI subcommand wrapping `tools.cairn.admin.listAuditLog` with actor / action / outcome / time-window filters and `--cursor` pagination (contract in [§F18](cairn-design.md#f18-audit-log-cli-v11)) (#6)
-- `cairn serve` startup verify-only check against the published service record on the operator's PDS; drift / absent / unreachable each fail-start with a distinct exit code (12/13/14); reconciliation via `cairn publish-service-record` (contract in [§F19](cairn-design.md#f19-service-record-verify-on-startup-v11)) (#8)
-- subscribeLabels retention sweep — daily writer-task batched DELETEs against `labels` older than `[subscribe].retention_days` (default 180); operator-initiated runs via `tools.cairn.admin.retentionSweep` (admin-only, audited per call) and `cairn retention sweep`; new `[retention]` config block. Full contract in [§F4](cairn-design.md#f4-comatprotolabelsubscribelabels-endpoint) (#12)
-- E2E quickstart rot-check: new [`tests/e2e/quickstart.sh`](tests/e2e/quickstart.sh) walks the README's operator workflow end-to-end (signing-key generation → config → `publish-service-record` → `serve` → `curl /.well-known/did.json`) against a [mock PDS binary](examples/mock_pds.rs). New `e2e-quickstart` CI job — silent README drift now fails CI (#10)
-- contrib syntax smoke check: prototype `contrib-smoke` CI job was developed during v1.1 but removed before release after four CI iterations surfaced a fundamental fragility — the validators (`caddy validate` / `caddy adapt`, `nginx -t`, `systemd-analyze verify`) are version- and environment-sensitive runtime tools rather than pure syntax checkers, making the job test "does CI's specific environment accept this template" rather than "is the template syntactically valid for operators." A cleaner replacement (likely pure syntax validation, not invoking runtime tools) is tracked as chainlink #33; the docker-compose end-to-end alternative tracks as chainlink #32. Side-effect of the removal: `contrib/nginx/cairn.conf` ships with rate-limiting as operator-add (matches the Caddyfile pattern) — the inline `rate=10r/h` was one of the four failures that drove this deferral and stays out as the v1.2 design conversation hasn't picked an approach (#9)
+- Unauthenticated `/health` and `/ready` probe endpoints for
+  orchestrators.
+- Supply-chain scanning in CI: `cargo-audit` and `cargo-deny` on every
+  push and PR, plus a daily scheduled audit that opens an issue on new
+  advisories.
+- The full admin CLI surface: `cairn moderator {add, remove, list}` for
+  membership, `cairn report {list, view, resolve, flag, unflag}` for
+  the report workflow, and `cairn audit list` for filtered, paginated
+  audit-log queries.
+- `cairn serve` verifies the published service record on the operator's
+  PDS at startup and fail-starts on drift, absence, or an unreachable
+  PDS, each with a distinct exit code.
+- subscribeLabels retention sweep: a daily batched delete of labels past
+  the configured retention window, plus operator-initiated runs via
+  `tools.cairn.admin.retentionSweep` and `cairn retention sweep`, under
+  a new `[retention]` config block.
 
 ### Changed
-- crates.io tarball trimmed from 287 files to 168 via [`Cargo.toml`](Cargo.toml) `[package].exclude` rules — drops `.chainlink/`, `.claude/`, `.github/`, internal docs (`cairn-design.md`, `RETROSPECTIVE.md`, `MAINTAINERS.md`, `CODE_OF_CONDUCT.md`, `docs/`), and `tests/` (which alone account for ~70 files including the ~40-file signature corpus). The `.sqlx/` offline cache (~95 entries) is a hard floor required for downstream `SQLX_OFFLINE=true` builds without sqlx-cli; further reduction would require splitting the cache into lib-only vs all-targets variants and is deferred (#22)
-- §20.4 of [cairn-design.md](cairn-design.md) replaced its three-paragraph "named handoff target TBD" narrative (stale post-v1.0) with a brief two-sentence pointer to [MAINTAINERS.md](MAINTAINERS.md) as the durable source of truth for the archive-on-silence policy. Single-source-of-truth — no policy duplication (#17)
+- The published crates.io package is trimmed from 287 files to 168,
+  dropping internal docs, CI config, and the test corpus that
+  `cargo install` doesn't need.
 
 ### Fixed
-- Three timing-sensitive auth-cache tests (`doc_cache_returns_cached_then_expires`, `doc_cache_negative_has_shorter_ttl`, `jti_cache_expiry_permits_reuse`) deflaked by routing wall-clock reads through a new `Clock` trait. Production wires `SystemClock`; tests substitute `MockClock` with explicit `advance(Duration)` calls. Zero `thread::sleep` in cache tests; deterministic regardless of CI scheduler jitter. Verified correctness power before commit by intentionally breaking `DidDocCache::get` and `JtiCache::check_and_record` and confirming the relevant tests panic (#21)
+- Three timing-sensitive auth-cache tests deflaked by routing
+  wall-clock reads through an injectable clock; they no longer depend
+  on CI scheduler timing.
 
 ### Removed
 
@@ -503,15 +362,18 @@ below preserve the development attribution.
 ### Added
 
 ### Changed
-- Design-doc drift sweep: crate name, security contact, tracker references, CHANGELOG phrasing (#5)
-- Release workflow: manual workflow_dispatch triggers crates.io publish + GitHub Release, with non-blocking post-publish smoke test (#4)
-- CI hardening: rustdoc + MSRV gates, rust-cache; MSRV bumped 1.85→1.88 (#3)
-- Complete rustdoc sweep for tier 3 items deferred from #22 (#11)
+- Release workflow: a manual dispatch publishes to crates.io and cuts a
+  GitHub Release, with a non-blocking post-publish smoke test.
+- CI hardening: rustdoc and MSRV gates plus build caching; MSRV raised
+  to 1.88.
 
 ### Fixed
-- `cairn publish-service-record` audit trail: skip path now audits (was silent), publish path records `content_changed=true` (was inverted on first publish), and `labeler_config` upsert + audit row share one transaction (#20)
-- `cairn serve` exited ~30 seconds after startup with no signal received; the drain timeout now bounds only the post-shutdown drain phase (#19)
-- Clippy 1.95 `collapsible_if` on five nested if-let sites (#14)
+- `cairn publish-service-record` now audits the skip path (previously
+  silent), records the change flag correctly on first publish, and
+  writes its config update and audit row in one transaction.
+- `cairn serve` no longer exits about 30 seconds after startup when no
+  shutdown signal was received; the drain timeout now bounds only the
+  post-shutdown phase.
 
 ### Removed
 
