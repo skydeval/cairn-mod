@@ -1,17 +1,8 @@
 /target
-
-# chainlink runtime (rules/ tracked)
 .chainlink/
-
-# legacy crosslink
 .crosslink/
 .crosslink.archive/
-
-# claude runtime
 .claude/
-
 docs/internal/
-
-# docker-compose working files (deploy-specific / secret)
 .env
 signing-key.hex
