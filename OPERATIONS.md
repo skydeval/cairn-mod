@@ -128,3 +128,32 @@ cairn-mod exposes two unauthenticated endpoints for orchestrators:
   is the one-command audit. Entries without a review date, or with
   dates in the past, are a hygiene failure — either renew the review
   or remove the ignore.
+
+### Docker deployments
+
+Everything above is deployment-form-agnostic. Docker-specific notes
+for the compose/docker-run forms ([SETUP.md](SETUP.md) forms B/C):
+
+- [ ] **Logs**: `docker compose logs -f cairn` (stdout tracing
+  output, same format as journald in the installed form). Caddy
+  access logs: `docker compose logs -f caddy`.
+- [ ] **A restart-looping cairn container is exiting with a
+  meaningful code** — docker restart policies can't discriminate
+  exit codes the way systemd's `RestartPreventExitStatus=11` does,
+  so fail-starts loop under `restart: unless-stopped`.
+  `docker compose ps` shows it; `docker compose logs cairn` names
+  the cause; then see SETUP's exit-code table (11 lease / 12 drift /
+  13 absent / 14 unreachable). 12 and 13 are fixed by
+  `docker compose run --rm cairn publish-service-record`.
+- [ ] **Backup**: the SQLite DB lives on the `cairn-data` volume;
+  the §Backup guidance above applies to `/var/lib/cairn/cairn.db`
+  *inside the volume* (e.g. `docker compose exec cairn sqlite3 …`
+  or stop-and-copy). WAL means copy the db + `-wal` + `-shm` files
+  together, or copy with the container stopped.
+- [ ] **Image updates**: `git pull && docker compose build &&
+  docker compose up -d` — the §F5 lease + `unless-stopped` handle
+  the swap; single replica means a brief serve gap (matches the
+  installed form's `systemctl restart` posture).
+- [ ] **Never scale to two replicas** (`docker compose scale
+  cairn=2`, two engines on one volume, …) — the single-instance
+  lease (§F5) and SQLite WAL locality both forbid it.

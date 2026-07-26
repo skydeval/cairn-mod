@@ -38,18 +38,32 @@ Production deployments should pin to the stable release, not the `main` branch.
 
 ## Quickstart
 
-Install:
+cairn-mod deploys three ways — installed binary, docker-compose, or
+plain `docker run` — same binary, same config, same security posture.
+[SETUP.md](SETUP.md) forks into all three.
+
+Install from crates.io:
 
 ```
 cargo install cairn-mod
 ```
 
-This produces a binary named `cairn`. For full deployment guidance
-(signing key generation, configuration, service-record publishing,
-service verify on startup), see [SETUP.md](SETUP.md).
+This produces a binary named `cairn`; bring your own reverse proxy
+([`contrib/`](contrib/) has systemd + Caddy + nginx templates).
 
-For day-2 operational concerns (production checklist, monitoring,
-security hygiene), see [OPERATIONS.md](OPERATIONS.md).
+Or deploy with Docker (bundled compose: cairn-mod + Caddy with
+automatic TLS):
+
+```
+git clone https://github.com/skydeval/cairn-mod && cd cairn-mod
+cp .env.example .env   # then edit: your domain + DID
+# signing key + cairn.toml + bootstrap: see SETUP.md §docker-compose
+docker compose up -d
+```
+
+Either way, [SETUP.md](SETUP.md) is the full walkthrough (signing key
+generation, configuration, service-record publishing, verify), and
+[OPERATIONS.md](OPERATIONS.md) covers day-2 concerns.
 
 ## Trust-chain disclosures
 
