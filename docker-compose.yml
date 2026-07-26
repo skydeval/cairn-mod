@@ -1,0 +1,56 @@
+services:
+  cairn:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Single-source the public hostname: CAIRN_DOMAIN in .env feeds
+      # both Caddy's site address and the labeler's service_endpoint.
+      CAIRN_SERVICE_ENDPOINT: https://${CAIRN_DOMAIN}
+    volumes:
+      - cairn-data:/var/lib/cairn
+      # Config mounts at the compiled default path (/etc/cairn/cairn.toml),
+      # so no CAIRN_CONFIG env var or --config flag is needed anywhere.
+      - ./cairn.toml:/etc/cairn/cairn.toml:ro
+      # Signing key: host-side `chmod 600` + `chown 1000` required — the
+      # loader checks mode/owner through the bind mount (see SETUP.md).
+      - ./signing-key.hex:/var/lib/cairn/signing-key.hex:ro
+    expose:
+      # Not published to the host — Caddy is the only ingress.
+      - "3000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Covers pre-bind startup work: the service-record verify performs
+      # a PDS fetch before binding the listener.
+      start_period: 40s
+    networks:
+      - cairn
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - cairn
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      CAIRN_DOMAIN: ${CAIRN_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - cairn
+
+volumes:
+  cairn-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  cairn:

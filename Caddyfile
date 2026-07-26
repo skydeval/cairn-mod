@@ -1,0 +1,86 @@
+# Cairn labeler — bundled docker-compose Caddy sidecar.
+#
+# This is the compose-form default: the site address comes from
+# CAIRN_DOMAIN (set in .env, passed through by docker-compose.yml) and
+# the upstream is the `cairn` compose service via Docker DNS. Caddy's
+# default `tls` handling auto-provisions a certificate via Let's
+# Encrypt (ACME) the first time the site is reached over HTTPS — no
+# cert-bot hooks required. Ensure ports 80 + 443 are open.
+#
+# Operators who prefer a BYO reverse proxy: delete the `caddy` service
+# block from docker-compose.yml and use the installed-form templates in
+# contrib/ (contrib/caddy/Caddyfile targets 127.0.0.1:3000 with a
+# hand-edited hostname; this file is its compose twin).
+
+{$CAIRN_DOMAIN} {
+	# HSTS — §F13. Signals "HTTPS only for one year" to browsers.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+	# No-cache on admin endpoints. NOTE: admin responses reflect
+	# mutable moderation state (label lists, report state, audit
+	# log). Intermediary caches could produce stale views that
+	# affect moderation decisions — the §F13 "no-cache headers for
+	# admin endpoints" line exists to prevent that.
+	@admin path /xrpc/tools.cairn.admin.*
+	header @admin Cache-Control "no-store, max-age=0"
+	header @admin Pragma "no-cache"
+
+	# Caddy's reverse_proxy handles WebSocket upgrade automatically
+	# — subscribeLabels (GET /xrpc/com.atproto.label.subscribeLabels)
+	# works through this single directive. No explicit Upgrade/
+	# Connection headers needed (contrast with nginx).
+	reverse_proxy cairn:3000
+
+	# --------------------------------------------------------------
+	# Rate limiting (§F13 targets).
+	#
+	# Caddy core does not ship rate-limiting. The §F13-specified
+	# numbers require the third-party `caddy-ratelimit` module
+	# (github.com/mholt/caddy-ratelimit). Install with:
+	#
+	#   xcaddy build --with github.com/mholt/caddy-ratelimit
+	#
+	# ...then uncomment the block below. The template ships with
+	# these commented out so Caddy parses this file without extra
+	# modules installed; nginx.conf in contrib/ ships them active
+	# by default because nginx has rate-limiting in core (platform
+	# capability difference, not oversight).
+	#
+	# § createReport per-IP: burst 3, rate 10/hour
+	# § subscribeLabels per-IP: 8 concurrent
+	#
+	# @report path /xrpc/com.atproto.moderation.createReport
+	# rate_limit @report {
+	# 	zone cairn_report {
+	# 		key {client_ip}
+	# 		events 10
+	# 		window 1h
+	# 	}
+	# }
+	#
+	# @subscribe path /xrpc/com.atproto.label.subscribeLabels
+	# rate_limit @subscribe {
+	# 	zone cairn_subscribe {
+	# 		key {client_ip}
+	# 		max_events 8
+	# 	}
+	# }
+	# --------------------------------------------------------------
+
+	# TLS: Caddy auto-provisions a Let's Encrypt certificate for
+	# the site address by default — no explicit `tls` directive
+	# needed. (An empty `tls { }` block was rejected by newer
+	# Caddy versions with "wrong argument count or unexpected
+	# line ending after '}'", so it has to be either populated
+	# or absent. Absent is the right choice for the production-
+	# ACME default.)
+	#
+	# For staging during first-run testing, REPLACE the implicit
+	# default by adding this block (uncomment + adjust):
+	#
+	#   tls {
+	#       issuer acme {
+	#           dir https://acme-staging-v02.api.letsencrypt.org/directory
+	#       }
+	#   }
+}

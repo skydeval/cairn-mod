@@ -1,0 +1,47 @@
+# cairn.toml — Docker deployment template.
+# Copy to cairn.toml; docker-compose.yml bind-mounts it read-only at
+# the compiled default path /etc/cairn/cairn.toml.
+#
+# What goes WHERE in the Docker forms:
+#  - Deploy-varying scalars come from env (.env / -e flags), NOT this
+#    file: CAIRN_SERVICE_DID, CAIRN_SERVICE_ENDPOINT. See .env.example.
+#  - Container-topology scalars are baked into the image as env
+#    defaults and also stay OUT of this file: CAIRN_BIND_ADDR,
+#    CAIRN_DB_PATH, CAIRN_SIGNING_KEY_PATH.
+#  - Env OVERRIDES this file (figment precedence), so any of the above
+#    written here would be silently shadowed inside the container.
+#  - Nested tables ([labeler], [operator], [pds_admin.*], …) are
+#    file-only — the CAIRN_ env prefix does not reach nested TOML
+#    tables. They live here.
+#
+# For the installed (non-Docker) form, see the full config walkthrough
+# in SETUP.md — that form typically carries the identity and path
+# scalars in the file instead.
+
+# The app.bsky.labeler.service record `cairn publish-service-record`
+# emits to your PDS. Lists what labels you declare and how consumers
+# should render them.
+[labeler]
+label_values = ["spam"]
+
+[[labeler.label_value_definitions]]
+identifier      = "spam"
+severity        = "alert"            # inform | alert | none
+blurs           = "none"             # content | media | none
+default_setting = "warn"             # ignore | warn | hide
+locales         = [
+  { lang = "en", name = "Spam", description = "Unsolicited promotional content." },
+]
+
+# Where the operator (= the labeler DID) authenticates to publish the
+# service record. Separate from moderators authenticating to cairn-mod
+# (§5.3) — different identity, different file.
+[operator]
+pds_url      = "https://bsky.social"
+# Container path on the cairn-data volume: the session file is written
+# by in-container `operator-login` and must be owned by the container
+# UID (1000) at a path both bootstrap and serve containers see.
+session_path = "/var/lib/cairn/operator-session.json"
+
+# Optional advanced tables ([pds_admin], [xrpc_gateway], [retention],
+# [label_emission], ...) go here exactly as in the installed form.

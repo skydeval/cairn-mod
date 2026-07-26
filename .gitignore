@@ -11,3 +11,7 @@
 .claude/
 
 docs/internal/
+
+# docker-compose working files (deploy-specific / secret)
+.env
+signing-key.hex

@@ -1,0 +1,11 @@
+# Deny-all, then allowlist exactly what the build COPYs (Dockerfile).
+# Default-deny keeps secret-shaped files (.env, signing-key.hex,
+# cairn.toml, …) out of the build context by construction — nothing
+# enters unless explicitly allowlisted here.
+*
+!Cargo.toml
+!Cargo.lock
+!.sqlx/
+!migrations/
+!lexicons/
+!src/
