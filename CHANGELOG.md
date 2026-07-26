@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — v1.8.16 deployment forms
+- cairn-mod now deploys three ways: the existing installed binary, a bundled docker-compose stack (cairn-mod + Caddy with automatic TLS), or plain `docker run` — same binary, same config file, same security posture in all three. The signing key stays a file with strict permissions in every form; container deployments bind-mount it.
+- New repo-root Docker artifacts: `Dockerfile` (multi-stage, non-root fixed UID, <150 MB runtime image), `docker-compose.yml`, `Caddyfile`, `.env.example`, and `cairn.toml.example`.
+- SETUP.md now forks into the three deployment forms and converges on shared signing-key / configure / bootstrap / verify steps; OPERATIONS.md gains a Docker-specific section (logs, restart-loop diagnosis, volume backup).
+
 ## [1.8.0] - 2026-07-22
 
 The v1.8 series ships as one release: the Rust-PDS backend, from
